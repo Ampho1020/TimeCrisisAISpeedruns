@@ -73,7 +73,10 @@ class TimeCrisisEnv:
         return self._build_obs(self.prev, 0, 0)
 
     def step(self, theta: np.ndarray):
-        shoot, cover, aim_bias = act(theta, self._build_obs(self.prev, 0, 0))
+        shoot, cover, _aim_bias = act(theta, self._build_obs(self.prev, 0, 0))
+        # TODO: Replace the placeholder center aim with real normalized target
+        # coordinates once the vision/aiming step lands.
+        aim_x, aim_y = 0.5, 0.5
 
         total_fired = total_hit = total_life_loss = 0
         cleared_guess = dead_guess = False
@@ -82,7 +85,12 @@ class TimeCrisisEnv:
         for f in range(FRAME_SKIP):
             # Edge-trigger the shot: press briefly, release. Holding the
             # button for all 5 frames makes fire rate uncontrollable.
-            self.client.set_input(shoot=bool(shoot and f < 2), cover=cover, aim_bias=aim_bias)
+            self.client.set_input(
+                shoot=bool(shoot and f < 2),
+                cover=cover,
+                aim_x=aim_x,
+                aim_y=aim_y,
+            )
 
             pre = self.prev
             self.client.step_frames(1)

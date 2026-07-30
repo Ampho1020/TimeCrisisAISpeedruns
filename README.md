@@ -1,6 +1,6 @@
 # TimeCrisisAISpeedruns
 
-Evolution Strategies (ES) agent that learns to clear Time Crisis (PS1) quickly and without taking damage, driven through BizHawk via a small Lua<->Python bridge.
+Evolution Strategies (ES) agent that learns to clear Time Crisis (PS1) quickly and without taking damage, driven through BizHawk 2.11.1 via a small Lua<->Python bridge.
 
 ## Design summary
 
@@ -23,7 +23,7 @@ Evolution Strategies (ES) agent that learns to clear Time Crisis (PS1) quickly a
 | File | Purpose |
 |---|---|
 | `config.py` | All constants, RAM map, hyperparameters |
-| `bridge_client.py` | TCP line-protocol client for the Lua bridge |
+| `bridge_client.py` | Python listener/server for the BizHawk `comm.*` bridge |
 | `policy.py` | Flat-vector MLP policy (numpy only) |
 | `phase_inference.py` | Derived ACTION/WAIT/CUTSCENE/TERMINAL classifier |
 | `env_timecrisis.py` | Environment wrapper: reset, step, fitness |
@@ -42,13 +42,42 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+## BizHawk / bridge setup
+
+This repository targets **BizHawk 2.11.1** with the **Nymashock** PSX core.
+The Lua bridge no longer uses LuaSocket; it uses BizHawk's native
+`comm.socketServer*` API, which means:
+
+- the Python process listens on `HOST` / `PORT` from `config.py`
+- BizHawk connects out to that listener from `bizhawk_bridge.lua`
+- `bizhawk_bridge.lua` calls `comm.socketServerSetIp(HOST)` and
+  `comm.socketServerSetPort(PORT)` directly, so separate BizHawk
+  `--socket_ip` / `--socket_port` launch flags are not required
+- the logical command set stays line-based (`read_u16`, `set_input`, `step`,
+  `load`, `save`, `frame`, `hud`, `hud_clear`)
+
+Before running:
+
+1. Open `/home/runner/work/TimeCrisisAISpeedruns/TimeCrisisAISpeedruns/bizhawk_bridge.lua`.
+2. Replace these clearly-marked constants with the exact Guncon key names your
+   BizHawk/Nymashock build reports:
+   - `GUNCON_TRIGGER_KEY`
+   - `GUNCON_AIM_X_KEY`
+   - `GUNCON_AIM_Y_KEY`
+   - optionally `GUNCON_COVER_BUTTON_KEY` if your setup uses a dedicated cover button
+3. If you do not know the exact names, use the commented diagnostic block at the
+   top of `apply_input()`: uncomment it temporarily, run one frame, and copy the
+   printed `joypad.get()` / `input.get()` key names back into the constants.
+4. If your build needs different axis bounds, adjust `GUNCON_AXIS_MIN` /
+   `GUNCON_AXIS_MAX` after checking the values your Guncon fields expect.
+
 ## Run order
 
-1. Open BizHawk, load Time Crisis, reach Stage 1 Area A start, **save to slot 1**.
-2. Tools -> Lua Console -> open `bizhawk_bridge.lua`. It should print `[bridge] listening on 127.0.0.1:8765`.
-3. **Edit `apply_input()` in the Lua file** so the button names match your real shoot/cover bindings. This is the one thing guaranteed to need adjusting.
-4. `python es_train.py`
-5. In a second terminal, any time: `python plot_progress.py`
+1. Open BizHawk, load Time Crisis, reach Stage 1 Area A start, and **save to slot 1**.
+2. Start the Python listener: `python es_train.py`
+3. In BizHawk, Tools -> Lua Console -> open `bizhawk_bridge.lua`. It should print
+   `[bridge] configured comm target 127.0.0.1:8765 (BizHawk connects out to Python)`.
+4. In a second terminal, any time: `python plot_progress.py`
 
 Evaluate a checkpoint:
 
@@ -82,6 +111,10 @@ Expect the first ~20 generations to look like nothing is happening. That's norma
 
 ## Known limitations (v1)
 
-- **`aim_bias` is inert.** The Lua side accepts it and drops it, so the agent currently chooses only shoot / cover / wait with aim fixed. Expect an early fitness plateau; this is not a hyperparameter problem.
+- **Aim is still a placeholder.** The bridge now carries normalized `aim_x` /
+  `aim_y`, but `env_timecrisis.py` currently feeds a temporary center-screen
+  `(0.5, 0.5)` aim until the vision step lands.
 - **Clear detection is a heuristic** (`timer` jumping upward by >100). It may misfire. Replace it if a real area-clear RAM flag turns up.
-- **No vision yet.** Next step is enemy detection feeding target-slot scores in place of the single `aim_bias` output.
+- **Policy output is still scalar-only.** `policy.py` still emits `aim_bias`; the
+  bridge keeps a backward-compatible fallback, but real training progress on
+  aiming will wait for vision-based X/Y targets.
