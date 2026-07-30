@@ -1,58 +1,51 @@
--- Line-protocol bridge for BizHawk 2.11.1 comm.* <-> Python ES training.
+-- Minimal comm.* bridge for BizHawk 2.11.1 <-> Python ES training.
 -- Open via: Tools -> Lua Console -> Open Script
 --
--- BizHawk/NLua 2.11.1 does not ship LuaSocket. This script uses BizHawk's
--- native comm.socketServer* API instead. In this transport model BizHawk
--- connects out to a Python listener started by bridge_client.py / es_train.py.
+-- IMPORTANT LAUNCH REQUIREMENT
+--   BizHawk's comm socket server must be initialized at launch, NOT from Lua.
+--   Start Python (the listener) FIRST, then launch BizHawk like:
+--       ./EmuHawk --socket_ip=127.0.0.1 --socket_port=8765
+--   Do NOT call comm.socketServerSetIp/SetPort here -- if the server was
+--   initialized via the command line those calls can null-ref / tear down
+--   the connection.
+--
+-- STARTUP ORDER (matters!):
+--   1. python es_train.py        (binds 127.0.0.1:8765, waits on accept)
+--   2. launch BizHawk WITH the socket flags above
+--   3. load the game (Guncon port, savestate slot 1 past in-game calibration)
+--   4. Tools -> Lua Console -> open this script
 --
 -- Commands (one per line):
---   read_u16 <addr>                             -> OK <value>
---   set_input <shoot01> <cover01> <aim_x> <aim_y> -> OK
---   step <n>                                    -> OK
---   load <slot> / save <slot>                   -> OK
---   frame                                       -> OK <framecount>
---   hud <line1|line2|...> / hud_clear           -> OK
+--   read_u16 <addr>                               -> OK <value>
+--   set_input <shoot01> <cover01> <aim_x> <aim_y> -> OK   (aim_* optional)
+--   step <n>                                      -> OK
+--   load <slot> / save <slot>                     -> OK
+--   frame                                         -> OK <framecount>
+--   hud <line1|line2|...> / hud_clear             -> OK
 --
--- Backward compatibility note:
---   Older clients sent set_input <shoot01> <cover01> <aim_bias>.
---   If aim_y is missing, this script still maps the legacy bias onto a
---   centered X-only placeholder aim so the old command shape does not crash.
+-- NOTES
+--   * Aim X/Y are accepted and stored but intentionally NOT written to the
+--     Guncon axes yet -- the in-game lightgun calibration is baked into the
+--     savestate, and real aiming lands with the vision step. Only the trigger
+--     (shoot) and P1 A (cover) buttons are driven for now. This keeps the
+--     per-frame path minimal so nothing out-of-range can fault the core.
+--   * Confirmed Guncon key names on this build:
+--       trigger = "P1 Trigger" (left mouse / shoot)
+--       cover   = "P1 A"       (right mouse)
+--       axes    = "P1 X Axis" (0..2640), "P1 Y Axis" (16..256)  [unused for now]
 
-local HOST, PORT = "127.0.0.1", 8765
 local DOMAIN = "MainRAM"
 
-assert(comm and comm.socketServerSend and comm.socketServerResponse
-  and comm.socketServerSetIp and comm.socketServerSetPort,
-  "BizHawk 2.11.1 comm.socketServer* API is required")
-
-comm.socketServerSetIp(HOST)
-comm.socketServerSetPort(PORT)
-print(string.format(
-  "[bridge] configured comm target %s:%d (BizHawk connects out to Python)",
-  HOST, PORT
-))
-
--- === Guncon input mapping (Nymashock, BizHawk 2.11.1) -- CONFIRMED ===
--- Discovered via the diagnostic block in apply_input() on this build.
-local GUNCON_TRIGGER_KEY      = "P1 Trigger"  -- left mouse  (shoot)
-local GUNCON_AIM_X_KEY        = "P1 X Axis"   -- mouse X
-local GUNCON_AIM_Y_KEY        = "P1 Y Axis"   -- mouse Y
-local GUNCON_COVER_BUTTON_KEY = "P1 A"        -- right mouse (cover)
-
--- Per-axis ranges (they differ on this build!), measured edge-to-edge:
---   X: 0    (far left) .. 2640 (far right)
---   Y: 16   (top)      .. 256  (bottom)
-local GUNCON_X_AXIS_MIN, GUNCON_X_AXIS_MAX = 0,  2640
-local GUNCON_Y_AXIS_MIN, GUNCON_Y_AXIS_MAX = 16, 256
-
--- If cover ducks by moving the cursor off-screen instead of (or in addition
--- to) pressing P1 A, push the aim just past the min edge of each axis.
-local GUNCON_OFFSCREEN_AXIS_X = GUNCON_X_AXIS_MIN - 32
-local GUNCON_OFFSCREEN_AXIS_Y = GUNCON_Y_AXIS_MIN - 32
-
 local shoot, cover = false, false
-local aim_x_norm, aim_y_norm = 0.5, 0.5
+local aim_x_norm, aim_y_norm = 0.5, 0.5   -- stored only; not written yet
 local hud_lines = {}
+
+-- pending frames to advance, consumed one-per-iteration by the main loop
+local pending_steps = 0
+
+-- Confirmed Guncon buttons (axes intentionally not written yet).
+local GUNCON_TRIGGER_KEY = "P1 Trigger"
+local GUNCON_COVER_KEY   = "P1 A"
 
 local function parse_int(s)
   if not s then return nil end
@@ -74,40 +67,12 @@ local function draw_hud()
   end
 end
 
--- Map normalized [0,1] onto a specific axis range (each axis differs).
-local function normalized_to_axis(v, axis_min, axis_max)
-  local clamped = clamp01(v)
-  return math.floor(axis_min + clamped * (axis_max - axis_min) + 0.5)
-end
-
 local function apply_input()
-  local inp = {}
-  -- DIAGNOSTIC: uncomment this one-shot block to re-print the exact Guncon key
-  -- names your BizHawk/Nymashock build exposes (already resolved above).
-  --[[
-  -- local jp = joypad.get(1) or {}
-  -- for k, _ in pairs(jp) do print("[bridge] joypad key: " .. tostring(k)) end
-  -- local raw = input.get() or {}
-  -- for k, _ in pairs(raw) do print("[bridge] input key: " .. tostring(k)) end
-  --]]
-
-  -- NOTE: aim_x_norm is already X-calibrated (0.94) on the Python side via
-  -- apply_guncon_calibration(); do NOT re-scale it here.
-  local axis_x = normalized_to_axis(aim_x_norm, GUNCON_X_AXIS_MIN, GUNCON_X_AXIS_MAX)
-  local axis_y = normalized_to_axis(aim_y_norm, GUNCON_Y_AXIS_MIN, GUNCON_Y_AXIS_MAX)
-  if cover then
-    axis_x = GUNCON_OFFSCREEN_AXIS_X
-    axis_y = GUNCON_OFFSCREEN_AXIS_Y
-  end
-
-  inp[GUNCON_TRIGGER_KEY] = shoot and not cover
-  inp[GUNCON_AIM_X_KEY] = axis_x
-  inp[GUNCON_AIM_Y_KEY] = axis_y
-  if GUNCON_COVER_BUTTON_KEY ~= nil and GUNCON_COVER_BUTTON_KEY ~= "" then
-    inp[GUNCON_COVER_BUTTON_KEY] = cover
-  end
-  joypad.set(inp)
-  draw_hud()
+  -- Buttons only for now. Trigger suppressed while covering.
+  joypad.set({
+    [GUNCON_TRIGGER_KEY] = shoot and not cover,
+    [GUNCON_COVER_KEY]   = cover,
+  })
 end
 
 local function handle(line)
@@ -124,24 +89,14 @@ local function handle(line)
   elseif cmd == "set_input" then
     shoot = (parts[2] == "1")
     cover = (parts[3] == "1")
-    if parts[5] ~= nil then
-      aim_x_norm = clamp01(tonumber(parts[4]) or 0.5)
-      aim_y_norm = clamp01(tonumber(parts[5]) or 0.5)
-    else
-      local legacy_bias = tonumber(parts[4]) or 0.0
-      if legacy_bias < -1.0 then legacy_bias = -1.0 end
-      if legacy_bias > 1.0 then legacy_bias = 1.0 end
-      aim_x_norm = 0.5 + 0.5 * legacy_bias
-      aim_y_norm = 0.5
-    end
+    if parts[4] ~= nil then aim_x_norm = clamp01(tonumber(parts[4]) or 0.5) end
+    if parts[5] ~= nil then aim_y_norm = clamp01(tonumber(parts[5]) or 0.5) end
     return "OK\n"
 
   elseif cmd == "step" then
-    local n = tonumber(parts[2]) or 1
-    for _ = 1, n do
-      apply_input()
-      emu.frameadvance()
-    end
+    -- Do NOT frameadvance here; queue it for the main loop. Advancing frames
+    -- inside a comm handler can fault BizHawk 2.11.1.
+    pending_steps = pending_steps + (tonumber(parts[2]) or 1)
     return "OK\n"
 
   elseif cmd == "load" then
@@ -172,18 +127,21 @@ local function handle(line)
   end
 end
 
+-- Single, canonical frame loop. Exactly one emu.frameadvance() per iteration.
+-- Drain any waiting command, then advance one frame (applying input if a
+-- step is pending).
 while true do
   local line = comm.socketServerResponse()
-  local advanced_in_handler = false
   if line and line ~= "" then
     local ok, resp = pcall(handle, line)
-    if string.sub(line, 1, 5) == "step " or line == "step" then
-      advanced_in_handler = true
-    end
     comm.socketServerSend(ok and resp or ("ERR " .. tostring(resp) .. "\n"))
   end
-  if not advanced_in_handler then
-    draw_hud()
-    emu.frameadvance()
+
+  if pending_steps > 0 then
+    apply_input()
+    pending_steps = pending_steps - 1
   end
+
+  draw_hud()
+  emu.frameadvance()
 end
