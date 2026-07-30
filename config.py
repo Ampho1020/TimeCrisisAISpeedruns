@@ -60,3 +60,28 @@ ACT_DIM = 3
 VERBOSE_EPISODES = True
 LOG_CSV = "training_log.csv"
 HUD_ENABLED = True    # draw status text on the emulator window
+
+# -----------------------------
+# Guncon lightgun calibration
+#
+# Nymashock has no built-in offset/scale UI (unlike DuckStation), so we
+# correct aim in software before writing X/Y to the Guncon port.
+#
+# From DuckStation testing: scaling the X axis to 94% of screen width fixes
+# the edge drift flawlessly. Y axis needs no correction.
+#
+# Correction is applied about screen center:
+#   x_corr = center + (x - center) * scale_x + offset_x
+#   y_corr = center + (y - center) * scale_y + offset_y
+#
+# Axes are normalized to [0.0, 1.0] (0 = left/top, 1 = right/bottom),
+# so center = 0.5.
+# -----------------------------
+GUNCON_CALIB = {
+    "center_x": 0.5,
+    "center_y": 0.5,
+    "scale_x": 0.94,   # DuckStation-verified: X axis to 94%
+    "scale_y": 1.0,    # Y already perfect
+    "offset_x": 0.0,
+    "offset_y": 0.0,
+}

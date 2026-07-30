@@ -2,6 +2,24 @@
 
 import socket
 
+from config import GUNCON_CALIB
+
+
+def apply_guncon_calibration(aim_x, aim_y):
+    """Map normalized [0,1] aim through the Guncon calibration transform.
+
+    Corrects the edge drift seen with the Nymashock Guncon (no built-in
+    offset/scale UI). Applied about screen center; see GUNCON_CALIB in
+    config.py for the tuned values.
+    """
+    c = GUNCON_CALIB
+    x = c["center_x"] + (aim_x - c["center_x"]) * c["scale_x"] + c["offset_x"]
+    y = c["center_y"] + (aim_y - c["center_y"]) * c["scale_y"] + c["offset_y"]
+    # clamp so we never send out-of-range coordinates to the port
+    x = min(1.0, max(0.0, x))
+    y = min(1.0, max(0.0, y))
+    return x, y
+
 
 class BridgeClient:
     """
