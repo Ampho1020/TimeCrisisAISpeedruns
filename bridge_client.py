@@ -1,12 +1,32 @@
-"""Line-protocol server for bizhawk_bridge.lua using BizHawk 2.11.1 comm.*.
+"""Line-protocol server for bizhawk_bridge.lua (BizHawk 2.11.1 comm.* model).
 
-BizHawk's comm.socketServer* transport is the reverse of the old LuaSocket
-bridge: the Python side listens, then the Lua script running in BizHawk
-connects out to it. Once connected, the logical protocol remains one command
-per line and one reply per line.
+TRANSPORT DIRECTION (important):
+    Under BizHawk's comm.socketServer* API, BizHawk is the socket *client*: it
+    dials OUT to an external listener the moment it launches (it connects in its
+    MainForm constructor). Therefore THIS class must be the *server* -- it binds
+    the port, listens, and accepts the connection BizHawk makes.
+
+STARTUP ORDER (must be followed or BizHawk crashes with "Connection refused"):
+    1. Start Python first (this creates the listener and blocks on accept()):
+           python es_train.py
+    2. Only then launch BizHawk WITH the socket flags:
+           ./EmuHawk --socket_ip=127.0.0.1 --socket_port=8765
+    3. Load the game (Guncon port, savestate slot 1), then open bizhawk_bridge.lua.
+
+    If Python is not already listening when BizHawk launches, BizHawk's launch-
+    time connect is refused and it crashes in MainForm..ctor.
+
+Protocol (one command per line, one reply per line):
+    read_u16 <addr>                                 -> OK <value>
+    set_input <shoot01> <cover01> <aim_x> <aim_y>   -> OK
+    step <n>                                         -> OK
+    load <slot>                                      -> OK
+    save <slot>                                      -> OK
+    frame                                            -> OK <framecount>
+    hud <line1|line2|...>                            -> OK
+    hud_clear                                        -> OK
+Errors come back as: ERR <message>
 """
-
-from __future__ import annotations
 
 import socket
 
@@ -14,31 +34,27 @@ from config import GUNCON_CALIB
 
 
 def apply_guncon_calibration(aim_x, aim_y):
-    """Map normalized [0,1] aim through the Guncon calibration transform."""
+    """Map normalized [0,1] aim through the Guncon calibration transform.
+
+    Corrects the edge drift seen with the Nymashock Guncon (no built-in
+    offset/scale UI). Applied about screen center; see GUNCON_CALIB in
+    config.py for the tuned values.
+    """
     c = GUNCON_CALIB
     x = c["center_x"] + (aim_x - c["center_x"]) * c["scale_x"] + c["offset_x"]
     y = c["center_y"] + (aim_y - c["center_y"]) * c["scale_y"] + c["offset_y"]
+    # clamp so we never send out-of-range coordinates to the port
     x = min(1.0, max(0.0, x))
     y = min(1.0, max(0.0, y))
     return x, y
 
 
 class BridgeClient:
-    """
-    Protocol (one command per line, one reply per line):
-        read_u16 <addr>                            -> OK <value>
-        set_input <shoot01> <cover01> <aim_x> <aim_y> -> OK
-        step <n>                                   -> OK
-        load <slot>                                -> OK
-        save <slot>                                -> OK
-        frame                                      -> OK <framecount>
-        hud <line1|line2|...>                      -> OK
-        hud_clear                                  -> OK
-
-    Backward compatibility note:
-        Legacy callers may still pass aim_bias without aim_x/aim_y. In that
-        case the bias is mapped onto a centered X-only placeholder aim until
-        real vision-based X/Y aiming lands.
+    """Server side of the bridge. Named 'BridgeClient' for backwards
+    compatibility with env_timecrisis.py / es_train.py -- the public method
+    surface (connect/close/read_u16/set_input/step_frames/load_state/
+    save_state/frame/hud/hud_clear) is unchanged; only the transport flipped
+    from dial-out client to listen-and-accept server.
     """
 
     def __init__(self, host: str, port: int, timeout: float = 10.0):
@@ -52,34 +68,34 @@ class BridgeClient:
     # -- lifecycle ------------------------------------------------------
 
     def connect(self):
-        self.close()
+        """Bind, listen, and block until BizHawk connects out to us.
+
+        Call this BEFORE launching BizHawk. It blocks on accept() until the
+        emulator dials in.
+        """
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_sock.bind((self.host, self.port))
         self.server_sock.listen(1)
-        self.server_sock.settimeout(self.timeout)
-        self.sock, _ = self.server_sock.accept()
+        print(
+            f"[bridge] listening on {self.host}:{self.port} -- "
+            f"now launch BizHawk with --socket_ip={self.host} --socket_port={self.port}",
+            flush=True,
+        )
+        # Block until BizHawk connects (no timeout on the initial accept, since
+        # the user may take a moment to launch the emulator).
+        self.sock, addr = self.server_sock.accept()
         self.sock.settimeout(self.timeout)
         self.file = self.sock.makefile("rwb")
-        self.server_sock.close()
-        self.server_sock = None
+        print(f"[bridge] BizHawk connected from {addr}", flush=True)
 
     def close(self):
-        try:
-            if self.file:
-                self.file.close()
-        except Exception:
-            pass
-        try:
-            if self.sock:
-                self.sock.close()
-        except Exception:
-            pass
-        try:
-            if self.server_sock:
-                self.server_sock.close()
-        except Exception:
-            pass
+        for obj in (self.file, self.sock, self.server_sock):
+            try:
+                if obj:
+                    obj.close()
+            except Exception:
+                pass
         self.file = None
         self.sock = None
         self.server_sock = None
@@ -88,15 +104,12 @@ class BridgeClient:
 
     def _cmd(self, line: str):
         if self.file is None:
-            raise RuntimeError(
-                "Bridge not connected. Start the Python process so it is listening, "
-                "then load bizhawk_bridge.lua in BizHawk to connect out."
-            )
+            raise RuntimeError("Bridge not connected. Call connect() first.")
         self.file.write((line + "\n").encode("utf-8"))
         self.file.flush()
         raw = self.file.readline()
         if not raw:
-            raise RuntimeError("Bridge disconnected (is bizhawk_bridge.lua still running?)")
+            raise RuntimeError("Bridge disconnected (is the Lua script still running?)")
         text = raw.decode("utf-8", errors="replace").strip()
         if not text.startswith("OK"):
             raise RuntimeError(f"Bridge error for '{line}': {text}")
@@ -108,25 +121,12 @@ class BridgeClient:
     def read_u16(self, addr: int) -> int:
         return int(self._cmd(f"read_u16 0x{addr:X}"))
 
-    def set_input(
-        self,
-        shoot: bool,
-        cover: bool,
-        aim_bias: float | None = None,
-        *,
-        aim_x: float | None = None,
-        aim_y: float | None = None,
-    ):
-        if aim_x is None or aim_y is None:
-            # Backward-compatible fallback while policy.py still emits a single
-            # aim_bias scalar. Real X/Y aiming should pass aim_x/aim_y instead.
-            legacy_bias = 0.0 if aim_bias is None else float(aim_bias)
-            legacy_bias = min(1.0, max(-1.0, legacy_bias))
-            aim_x = 0.5 + 0.5 * legacy_bias
-            aim_y = 0.5
-
-        aim_x, aim_y = apply_guncon_calibration(float(aim_x), float(aim_y))
-        self._cmd(f"set_input {1 if shoot else 0} {1 if cover else 0} {aim_x:.4f} {aim_y:.4f}")
+    def set_input(self, shoot: bool, cover: bool, aim_x: float = 0.5, aim_y: float = 0.5):
+        # Apply the Guncon calibration exactly once, right before sending.
+        cx, cy = apply_guncon_calibration(aim_x, aim_y)
+        self._cmd(
+            f"set_input {1 if shoot else 0} {1 if cover else 0} {cx:.4f} {cy:.4f}"
+        )
 
     def step_frames(self, n: int = 1):
         self._cmd(f"step {int(n)}")
