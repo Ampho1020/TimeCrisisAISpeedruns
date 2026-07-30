@@ -32,20 +32,24 @@ print(string.format(
   HOST, PORT
 ))
 
-local GUNCON_TRIGGER_KEY = "TODO_REPLACE_WITH_GUNCON_TRIGGER_KEY"
-local GUNCON_AIM_X_KEY   = "TODO_REPLACE_WITH_GUNCON_AIM_X_KEY"
-local GUNCON_AIM_Y_KEY   = "TODO_REPLACE_WITH_GUNCON_AIM_Y_KEY"
-local GUNCON_COVER_BUTTON_KEY = ""
--- TODO: confirm the exact Guncon axis range on your build. These defaults are
--- a normalized-to-axis mapping placeholder and may need adjustment.
-local GUNCON_AXIS_MIN = 0
-local GUNCON_AXIS_MAX = 255
--- If your setup ducks by moving the cursor off-screen instead of pressing a
--- dedicated Guncon cover button, these off-screen values are the fallback.
-local GUNCON_OFFSCREEN_AXIS_X = GUNCON_AXIS_MIN - 32
-local GUNCON_OFFSCREEN_AXIS_Y = GUNCON_AXIS_MIN - 32
+-- === Guncon input mapping (Nymashock, BizHawk 2.11.1) -- CONFIRMED ===
+-- Discovered via the diagnostic block in apply_input() on this build.
+local GUNCON_TRIGGER_KEY      = "P1 Trigger"  -- left mouse  (shoot)
+local GUNCON_AIM_X_KEY        = "P1 X Axis"   -- mouse X
+local GUNCON_AIM_Y_KEY        = "P1 Y Axis"   -- mouse Y
+local GUNCON_COVER_BUTTON_KEY = "P1 A"        -- right mouse (cover)
 
-local warned_guncon_todo = false
+-- Per-axis ranges (they differ on this build!), measured edge-to-edge:
+--   X: 0    (far left) .. 2640 (far right)
+--   Y: 16   (top)      .. 256  (bottom)
+local GUNCON_X_AXIS_MIN, GUNCON_X_AXIS_MAX = 0,  2640
+local GUNCON_Y_AXIS_MIN, GUNCON_Y_AXIS_MAX = 16, 256
+
+-- If cover ducks by moving the cursor off-screen instead of (or in addition
+-- to) pressing P1 A, push the aim just past the min edge of each axis.
+local GUNCON_OFFSCREEN_AXIS_X = GUNCON_X_AXIS_MIN - 32
+local GUNCON_OFFSCREEN_AXIS_Y = GUNCON_Y_AXIS_MIN - 32
+
 local shoot, cover = false, false
 local aim_x_norm, aim_y_norm = 0.5, 0.5
 local hud_lines = {}
@@ -70,36 +74,27 @@ local function draw_hud()
   end
 end
 
-local function normalized_to_axis(v)
+-- Map normalized [0,1] onto a specific axis range (each axis differs).
+local function normalized_to_axis(v, axis_min, axis_max)
   local clamped = clamp01(v)
-  return math.floor(GUNCON_AXIS_MIN + clamped * (GUNCON_AXIS_MAX - GUNCON_AXIS_MIN) + 0.5)
+  return math.floor(axis_min + clamped * (axis_max - axis_min) + 0.5)
 end
 
 local function apply_input()
   local inp = {}
-  -- DIAGNOSTIC: uncomment this one-shot block to print the exact Guncon key
-  -- names that your BizHawk/Nymashock build exposes, then replace the
-  -- TODO_REPLACE_* constants at the top of this file with those exact names.
+  -- DIAGNOSTIC: uncomment this one-shot block to re-print the exact Guncon key
+  -- names your BizHawk/Nymashock build exposes (already resolved above).
   --[[
-  -- if not warned_guncon_todo then
-  --   local jp = joypad.get(1) or {}
-  --   for k, _ in pairs(jp) do print("[bridge] joypad key: " .. tostring(k)) end
-  --   local raw = input.get() or {}
-  --   for k, _ in pairs(raw) do print("[bridge] input key: " .. tostring(k)) end
-  --   warned_guncon_todo = true
-  -- end
+  -- local jp = joypad.get(1) or {}
+  -- for k, _ in pairs(jp) do print("[bridge] joypad key: " .. tostring(k)) end
+  -- local raw = input.get() or {}
+  -- for k, _ in pairs(raw) do print("[bridge] input key: " .. tostring(k)) end
   --]]
-  if not warned_guncon_todo and (
-    string.find(GUNCON_TRIGGER_KEY, "TODO_REPLACE", 1, true)
-    or string.find(GUNCON_AIM_X_KEY, "TODO_REPLACE", 1, true)
-    or string.find(GUNCON_AIM_Y_KEY, "TODO_REPLACE", 1, true)
-  ) then
-    print("[bridge] TODO: replace GUNCON_*_KEY constants using the diagnostic block in apply_input()")
-    warned_guncon_todo = true
-  end
 
-  local axis_x = normalized_to_axis(aim_x_norm)
-  local axis_y = normalized_to_axis(aim_y_norm)
+  -- NOTE: aim_x_norm is already X-calibrated (0.94) on the Python side via
+  -- apply_guncon_calibration(); do NOT re-scale it here.
+  local axis_x = normalized_to_axis(aim_x_norm, GUNCON_X_AXIS_MIN, GUNCON_X_AXIS_MAX)
+  local axis_y = normalized_to_axis(aim_y_norm, GUNCON_Y_AXIS_MIN, GUNCON_Y_AXIS_MAX)
   if cover then
     axis_x = GUNCON_OFFSCREEN_AXIS_X
     axis_y = GUNCON_OFFSCREEN_AXIS_Y
