@@ -16,6 +16,14 @@ STARTUP ORDER (must be followed or BizHawk crashes with "Connection refused"):
     If Python is not already listening when BizHawk launches, BizHawk's launch-
     time connect is refused and it crashes in MainForm..ctor.
 
+HANDSHAKE:
+    BizHawk's socket connects at launch, but only the Lua script answers
+    commands. So accept() can return long before the script is loaded. To avoid
+    the first command timing out, the Lua script sends a single "READY" line on
+    load; connect() below blocks (with a long timeout) until it reads that line
+    before returning. This also consumes the READY so it can't corrupt the first
+    real command/reply pair.
+
 Protocol (one command per line, one reply per line):
     read_u16 <addr>                                 -> OK <value>
     set_input <shoot01> <cover01> <aim_x> <aim_y>   -> OK
@@ -31,6 +39,10 @@ Errors come back as: ERR <message>
 import socket
 
 from config import GUNCON_CALIB
+
+# How long to wait for the Lua "READY" handshake after BizHawk connects. Long,
+# because the user still has to load the game and open the Lua script.
+HANDSHAKE_TIMEOUT = 120.0
 
 
 def apply_guncon_calibration(aim_x, aim_y):
@@ -68,10 +80,11 @@ class BridgeClient:
     # -- lifecycle ------------------------------------------------------
 
     def connect(self):
-        """Bind, listen, and block until BizHawk connects out to us.
+        """Bind, listen, accept, then block until the Lua READY handshake.
 
         Call this BEFORE launching BizHawk. It blocks on accept() until the
-        emulator dials in.
+        emulator dials in, then blocks reading until the Lua script sends
+        "READY" (so training never fires a command before the script is live).
         """
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -85,9 +98,29 @@ class BridgeClient:
         # Block until BizHawk connects (no timeout on the initial accept, since
         # the user may take a moment to launch the emulator).
         self.sock, addr = self.server_sock.accept()
-        self.sock.settimeout(self.timeout)
         self.file = self.sock.makefile("rwb")
-        print(f"[bridge] BizHawk connected from {addr}", flush=True)
+        print(
+            f"[bridge] BizHawk connected from {addr}; "
+            f"waiting for Lua READY (load the game and open bizhawk_bridge.lua)...",
+            flush=True,
+        )
+
+        # Wait for the Lua script to announce it is live. Use a long timeout for
+        # the handshake, then drop back to the normal per-command timeout.
+        self.sock.settimeout(HANDSHAKE_TIMEOUT)
+        while True:
+            raw = self.file.readline()
+            if not raw:
+                raise RuntimeError(
+                    "Connection closed before READY handshake "
+                    "(did the Lua script fail to load?)."
+                )
+            if raw.decode("utf-8", errors="replace").strip() == "READY":
+                break
+            # Ignore any other chatter until READY arrives.
+
+        self.sock.settimeout(self.timeout)
+        print("[bridge] handshake OK -- bridge live", flush=True)
 
     def close(self):
         for obj in (self.file, self.sock, self.server_sock):
