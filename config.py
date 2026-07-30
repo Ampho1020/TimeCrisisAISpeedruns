@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 # -----------------------------
-# Bridge connection (BizHawk Lua)
+# Bridge connection (Python listener / BizHawk comm.* target)
 # -----------------------------
 HOST = "127.0.0.1"
 PORT = 8765
@@ -49,6 +49,8 @@ FAIL_PENALTY       = 200.0
 # Policy dims
 # obs = [timer_norm, life_norm, fired_norm, hit_norm, acc, last_hit, last_miss]
 # act = [shoot_logit, cover_logit, aim_bias]
+# The bridge now accepts normalized aim_x/aim_y, but policy.py still emits a
+# single aim_bias scalar until the vision-based aiming step lands.
 # -----------------------------
 OBS_DIM = 7
 HIDDEN  = 64
