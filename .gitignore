@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+*.npy
+training_log.csv
+*.State
+*.bk2

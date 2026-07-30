@@ -1,0 +1,166 @@
+"""Scalar-only environment wrapper (v1: no vision yet)."""
+
+import numpy as np
+
+from bridge_client import BridgeClient
+from config import (
+    CLEAR_BONUS, DAMAGE_PENALTY, FAIL_PENALTY, FRAME_SKIP, HOST,
+    MAX_TICKS, PARTIAL_HIT_REWARD, PORT, RAM, STATE_SLOT,
+)
+from phase_inference import Phase, PhaseInferer, TickSignals
+from policy import act
+
+
+def u16_delta(new_v: int, old_v: int) -> int:
+    """Signed delta between two u16 reads, wrap-around safe."""
+    d = new_v - old_v
+    if d < -32768:
+        d += 65536
+    elif d > 32768:
+        d -= 65536
+    return d
+
+
+class TimeCrisisEnv:
+    def __init__(self, host=HOST, port=PORT, state_slot=STATE_SLOT):
+        self.client = BridgeClient(host, port)
+        self.state_slot = state_slot
+        self.phase_infer = PhaseInferer(vote_window=3)
+        self.prev = None
+        self.start_timer = 0
+        self.ticks = 0
+
+    # -- lifecycle ------------------------------------------------------
+
+    def connect(self):
+        self.client.connect()
+
+    def close(self):
+        self.client.close()
+
+    # -- RAM ------------------------------------------------------------
+
+    def _read_core(self):
+        return {
+            "shots_fired": self.client.read_u16(RAM.shots_fired),
+            "shots_hit":   self.client.read_u16(RAM.shots_hit),
+            "timer":       self.client.read_u16(RAM.timer),
+            "life":        self.client.read_u16(RAM.life),
+        }
+
+    @staticmethod
+    def _build_obs(cur, last_hit: int, last_miss: int) -> np.ndarray:
+        fired = max(cur["shots_fired"], 1)
+        return np.array([
+            cur["timer"] / 10000.0,
+            cur["life"] / 100.0,
+            cur["shots_fired"] / 1000.0,
+            cur["shots_hit"] / 1000.0,
+            cur["shots_hit"] / fired,
+            float(last_hit),
+            float(last_miss),
+        ], dtype=np.float32)
+
+    # -- episode --------------------------------------------------------
+
+    def reset(self) -> np.ndarray:
+        self.client.load_state(self.state_slot)
+        self.client.step_frames(2)
+        self.prev = self._read_core()
+        self.start_timer = self.prev["timer"]
+        self.ticks = 0
+        self.phase_infer.reset()
+        return self._build_obs(self.prev, 0, 0)
+
+    def step(self, theta: np.ndarray):
+        shoot, cover, aim_bias = act(theta, self._build_obs(self.prev, 0, 0))
+
+        total_fired = total_hit = total_life_loss = 0
+        cleared_guess = dead_guess = False
+        timer_at_tick_start = self.prev["timer"]
+
+        for f in range(FRAME_SKIP):
+            # Edge-trigger the shot: press briefly, release. Holding the
+            # button for all 5 frames makes fire rate uncontrollable.
+            self.client.set_input(shoot=bool(shoot and f < 2), cover=cover, aim_bias=aim_bias)
+
+            pre = self.prev
+            self.client.step_frames(1)
+            post = self._read_core()
+
+            total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
+            total_hit   += max(0, u16_delta(post["shots_hit"],   pre["shots_hit"]))
+            life_d       = u16_delta(post["life"], pre["life"])
+            if life_d < 0:
+                total_life_loss += -life_d
+
+            if post["life"] == 0:
+                dead_guess = True
+            # Heuristic clear detection: timer jumps discontinuously upward.
+            # Replace with a real flag if you ever find one.
+            if u16_delta(post["timer"], self.start_timer) > 100:
+                cleared_guess = True
+
+            self.prev = post
+            if dead_guess or cleared_guess:
+                break
+
+        self.ticks += 1
+
+        phase = self.phase_infer.infer(TickSignals(
+            shots_fired_delta=total_fired,
+            shots_hit_delta=total_hit,
+            life_delta=-total_life_loss,
+            timer_delta=u16_delta(self.prev["timer"], timer_at_tick_start),
+            cleared_guess=cleared_guess,
+            dead_guess=dead_guess,
+            can_fire_probe=(total_fired > 0),
+        ))
+
+        last_hit  = 1 if total_hit > 0 else 0
+        last_miss = 1 if (total_fired > 0 and total_hit == 0) else 0
+        obs = self._build_obs(self.prev, last_hit, last_miss)
+
+        done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
+        info = {
+            "shots_fired_delta": total_fired,
+            "shots_hit_delta": total_hit,
+            "life_loss": total_life_loss,
+            "cleared": bool(cleared_guess and not dead_guess),
+            "dead": dead_guess,
+            "phase": phase.name,
+        }
+        return obs, done, info
+
+    def episode_fitness(self, theta: np.ndarray):
+        """Run one full episode. Returns (fitness, metrics)."""
+        self.reset()
+        total_hits = total_fired = total_life_loss = 0
+        cleared = False
+
+        while True:
+            _, done, info = self.step(theta)
+            total_hits      += info["shots_hit_delta"]
+            total_fired     += info["shots_fired_delta"]
+            total_life_loss += info["life_loss"]
+            cleared = cleared or info["cleared"]
+            if done:
+                break
+
+        elapsed = u16_delta(self.start_timer, self.prev["timer"])
+
+        if cleared:
+            fitness = CLEAR_BONUS - elapsed - DAMAGE_PENALTY * total_life_loss
+        else:
+            # Partial credit ONLY on failure, so early generations have
+            # something to climb. Never distorts successful runs.
+            fitness = PARTIAL_HIT_REWARD * total_hits - FAIL_PENALTY
+
+        return float(fitness), {
+            "cleared": cleared,
+            "elapsed": float(elapsed),
+            "damage": float(total_life_loss),
+            "accuracy": float(total_hits / max(total_fired, 1)),
+            "shots_fired": int(total_fired),
+            "shots_hit": int(total_hits),
+        }
