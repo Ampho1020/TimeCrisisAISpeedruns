@@ -15,6 +15,13 @@
 --   3. load the game (Guncon port, savestate slot 1 past in-game calibration)
 --   4. Tools -> Lua Console -> open this script
 --
+-- HANDSHAKE
+--   BizHawk's socket connects at launch, but only THIS script answers commands.
+--   So Python's accept() can succeed long before the script is loaded, causing
+--   the first command to time out. To avoid that race, this script sends a
+--   single "READY" line as soon as it starts. bridge_client.connect() blocks
+--   until it receives that line before issuing any command.
+--
 -- Commands (one per line):
 --   read_u16 <addr>                               -> OK <value>
 --   set_input <shoot01> <cover01> <aim_x> <aim_y> -> OK   (aim_* optional)
@@ -126,6 +133,11 @@ local function handle(line)
     return "ERR unknown_cmd\n"
   end
 end
+
+-- Announce readiness exactly once so Python's connect() can stop blocking and
+-- know the script is live and able to service commands.
+comm.socketServerSend("READY\n")
+print("[bridge] sent READY -- waiting for commands")
 
 -- Single, canonical frame loop. Exactly one emu.frameadvance() per iteration.
 -- Drain any waiting command, then advance one frame (applying input if a
