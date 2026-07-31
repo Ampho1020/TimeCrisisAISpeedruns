@@ -39,12 +39,35 @@ TIMEOUT_TIMER_THRESHOLD = 0
 # -----------------------------
 # ES hyperparameters
 # -----------------------------
-POP_SIZE    = 6      # MUST be even (mirrored sampling)
+POP_SIZE    = 30      # MUST be even (mirrored sampling)
 SIGMA       = 0.05    # perturbation scale
 ALPHA       = 0.02    # learning rate
-GENERATIONS = 3
+GENERATIONS = 100
 SEED        = 42
 CHECKPOINT_EVERY = 10
+
+# -----------------------------
+# Parallel training
+# -----------------------------
+# Run several BizHawk instances at once, one per worker, each on its own port
+# (BASE_PORT + worker_index). The population is split across the workers and
+# evaluated concurrently, so wall-clock per generation drops by ~NUM_WORKERS.
+# Set NUM_WORKERS = 1 for the original single-instance flow.
+#
+# One emulator per worker is heavy (CPU + RAM + a window each). Start with a few
+# and raise toward POP_SIZE only if your machine keeps up.
+NUM_WORKERS = 4
+BASE_PORT   = PORT            # worker i listens on BASE_PORT + i
+
+# Auto-launch: if True, training spawns the BizHawk instances for you (no manual
+# per-window commands). Fill in the paths for your machine. If False, launch
+# NUM_WORKERS instances yourself, each with --socket_port = BASE_PORT + i, and
+# Python just connects to them.
+AUTO_LAUNCH_BIZHAWK = False
+BIZHAWK_LAUNCH      = "./EmuHawkMono.sh"  # EmuHawk launcher (Linux: EmuHawkMono.sh)
+BIZHAWK_ROM         = ""                  # absolute path to the Time Crisis disc image
+BIZHAWK_LUA         = "bizhawk_bridge.lua"  # absolute path recommended
+BIZHAWK_EXTRA_ARGS  = []                  # any extra EmuHawk CLI flags
 
 # -----------------------------
 # Fitness shaping
@@ -55,12 +78,14 @@ PARTIAL_HIT_REWARD = 8.0     # only applies to FAILED episodes
 FAIL_PENALTY       = 200.0
 
 # Cover is a HOLD, not a tap: the ~0.2s (~12-frame) in/out traverse is only
-# useful if the button is held through it. Reward each committed hold that lasts
-# at least COVER_TRAVERSE_TICKS decision ticks so the policy learns to commit to
-# cover instead of spamming it every tick. Spam never reaches the threshold, so
-# it earns nothing -- we reward holding, not toggling.
+# useful if the button is held through it. We reward holding DENSELY -- each
+# extra consecutive held tick, up to COVER_TRAVERSE_TICKS, adds COVER_HOLD_REWARD
+# -- so evolution gets a smooth gradient to climb from spamming toward holding.
+# A length-1 tap earns nothing and holding past the traverse is capped (no
+# camping). It never penalizes short/partial holds, so it won't punish the
+# future half-out "peek" the agent uses to read incoming bullets.
 COVER_TRAVERSE_TICKS = 3     # ticks (x FRAME_SKIP frames) to clear the traverse
-COVER_HOLD_REWARD    = 4.0   # per committed hold; small shaping term
+COVER_HOLD_REWARD    = 12.0  # per extra held tick, up to the traverse; capped
 
 # -----------------------------
 # Policy dims

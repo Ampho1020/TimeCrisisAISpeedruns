@@ -148,12 +148,18 @@ class BridgeClient:
     # -- lifecycle ------------------------------------------------------
 
     def connect(self):
-        """Bind, listen, accept, then poll a Python-initiated handshake.
+        """Bind + listen, then accept and handshake in one call.
 
-        Call this BEFORE launching BizHawk. Blocks on accept() until the
-        emulator dials in, then repeatedly sends "hello" until the Lua script
-        (opened after BizHawk launches) replies "READY".
+        Convenience wrapper for the single-instance flow. For a PARALLEL launch,
+        call start_listening() on every worker first, launch all the emulators,
+        then finish_connect() on each -- Python must be listening before BizHawk
+        dials in, so binding has to happen before the emulators start.
         """
+        self.start_listening()
+        self.finish_connect()
+
+    def start_listening(self):
+        """Bind and listen so BizHawk can connect out to us. Does not block."""
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_sock.bind((self.host, self.port))
@@ -163,6 +169,18 @@ class BridgeClient:
             f"now launch BizHawk with --socket_ip={self.host} --socket_port={self.port}",
             flush=True,
         )
+
+    def finish_connect(self):
+        """Accept the BizHawk connection, then poll a Python-initiated handshake.
+
+        Blocks on accept() until the emulator dials in, then repeatedly sends
+        "hello" until the Lua script (opened after BizHawk launches) replies
+        "READY", and finally drains the stale handshake replies.
+        """
+        if self.server_sock is None:
+            raise RuntimeError(
+                "start_listening() must be called before finish_connect()."
+            )
         # Block until BizHawk connects (no timeout on the initial accept).
         self.sock, addr = self.server_sock.accept()
         self._recv_buf = b""

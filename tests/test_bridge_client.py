@@ -117,23 +117,33 @@ class CoverHoldRewardTest(unittest.TestCase):
     def test_spamming_earns_nothing(self):
         from env_timecrisis import cover_hold_reward
 
-        # Toggle every tick: no streak ever reaches the traverse threshold.
+        # Toggle every tick: every run is length 1, so nothing accrues.
         spam = [i % 2 == 0 for i in range(30)]
         self.assertEqual(cover_hold_reward(spam, traverse_ticks=3, reward=4.0), 0.0)
 
-    def test_hold_shorter_than_traverse_earns_nothing(self):
+    def test_partial_hold_earns_dense_gradient(self):
         from env_timecrisis import cover_hold_reward
 
-        # Hold two, release one -- never clears a 3-tick traverse.
-        short = [(i % 3) < 2 for i in range(30)]
-        self.assertEqual(cover_hold_reward(short, traverse_ticks=3, reward=4.0), 0.0)
+        # A single length-2 hold earns one step of reward -- more than a tap,
+        # less than a full commit. This slope is what lets ES climb.
+        tap = [True, False]
+        hold2 = [True, True, False]
+        hold3 = [True, True, True, False]
+        r_tap = cover_hold_reward(tap, traverse_ticks=3, reward=4.0)
+        r_hold2 = cover_hold_reward(hold2, traverse_ticks=3, reward=4.0)
+        r_hold3 = cover_hold_reward(hold3, traverse_ticks=3, reward=4.0)
+        self.assertEqual(r_tap, 0.0)
+        self.assertEqual(r_hold2, 4.0)
+        self.assertEqual(r_hold3, 8.0)
+        self.assertLess(r_tap, r_hold2)
+        self.assertLess(r_hold2, r_hold3)
 
-    def test_hold_is_awarded_once_per_commit(self):
+    def test_holding_past_traverse_is_capped(self):
         from env_timecrisis import cover_hold_reward
 
-        # One sustained hold commits exactly once, no matter how long it lasts.
+        # Holding forever is capped at (traverse - 1) * reward: no camping bonus.
         self.assertEqual(
-            cover_hold_reward([True] * 30, traverse_ticks=3, reward=4.0), 4.0
+            cover_hold_reward([True] * 30, traverse_ticks=3, reward=4.0), 8.0
         )
 
     def test_holding_strictly_beats_spamming(self):

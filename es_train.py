@@ -6,9 +6,9 @@ from config import (
     ALPHA, CHECKPOINT_EVERY, GENERATIONS, HUD_ENABLED, LOG_CSV,
     POP_SIZE, SEED, SIGMA, VERBOSE_EPISODES,
 )
-from env_timecrisis import TimeCrisisEnv
 from logger import TrainingLogger
 from policy import PARAM_COUNT
+from worker_pool import WorkerPool
 
 
 def rank_transform(fitnesses: np.ndarray) -> np.ndarray:
@@ -30,10 +30,9 @@ def train():
     # Small init -- large weights saturate tanh and kill the signal.
     theta = rng.normal(0.0, 0.1, size=(PARAM_COUNT,)).astype(np.float64)
 
-    env = TimeCrisisEnv()
-    env.connect()
+    pool = WorkerPool()
+    pool.start()
     logger = TrainingLogger(LOG_CSV)
-
     try:
         for gen in range(GENERATIONS):
             # --- mirrored sampling: test both +eps and -eps ---
@@ -43,13 +42,13 @@ def train():
             eps = np.concatenate([eps_half, -eps_half], axis=0)
             candidates = theta[None, :] + SIGMA * eps
 
-            fitnesses, infos = [], []
-            for i in range(POP_SIZE):
-                fit, info = env.episode_fitness(candidates[i])
-                fitnesses.append(fit)
-                infos.append(info)
+            # Evaluate the whole population across all workers in parallel.
+            results = pool.evaluate(candidates)
+            fitnesses = [r[0] for r in results]
+            infos = [r[1] for r in results]
 
-                if VERBOSE_EPISODES:
+            if VERBOSE_EPISODES:
+                for i, (fit, info) in enumerate(zip(fitnesses, infos)):
                     print(
                         f"  gen {gen:03d} ep {i + 1:02d}/{POP_SIZE} | "
                         f"fit {fit:8.2f} | t {info['elapsed']:6.1f} | "
@@ -57,15 +56,6 @@ def train():
                         f"{'CLEAR' if info['cleared'] else '.....'}",
                         flush=True,
                     )
-
-                if HUD_ENABLED:
-                    try:
-                        env.client.hud([
-                            f"gen {gen}  ep {i + 1}/{POP_SIZE}",
-                            f"fit {fit:.0f}",
-                        ])
-                    except Exception:
-                        pass
 
             fitnesses = np.asarray(fitnesses, dtype=np.float64)
 
@@ -96,6 +86,13 @@ def train():
             if gen > 5 and clear_rate == 0.0:
                 print("  !! note: no clears yet -- running on partial credit only.", flush=True)
 
+            if HUD_ENABLED:
+                for env in pool.envs:
+                    try:
+                        env.client.hud([f"gen {gen}", f"best {fitnesses.max():.0f}"])
+                    except Exception:
+                        pass
+
             logger.log({
                 "gen": gen,
                 "best": float(fitnesses[best_i]),
@@ -122,11 +119,12 @@ def train():
     finally:
         logger.close()
         if HUD_ENABLED:
-            try:
-                env.client.hud_clear()
-            except Exception:
-                pass
-        env.close()
+            for env in pool.envs:
+                try:
+                    env.client.hud_clear()
+                except Exception:
+                    pass
+        pool.close()
 
 
 if __name__ == "__main__":

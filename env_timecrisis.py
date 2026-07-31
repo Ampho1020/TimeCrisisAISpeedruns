@@ -27,22 +27,33 @@ def cover_hold_reward(
     traverse_ticks: int = COVER_TRAVERSE_TICKS,
     reward: float = COVER_HOLD_REWARD,
 ) -> float:
-    """Reward each cover hold that survives the in/out traverse.
+    """Dense reward for HOLDING cover, shaped so evolution can climb toward it.
 
-    A hold that stays down for `traverse_ticks` consecutive decision ticks earns
-    `reward` once (holding longer is not double-paid). Spamming -- toggling the
-    button so no streak ever reaches the threshold -- earns nothing, so holding
-    is always scored strictly higher than spamming.
+    For each maximal run of consecutive held ticks of length L, add
+    ``reward * min(L - 1, traverse_ticks - 1)``:
+      * a length-1 tap (spam) earns nothing,
+      * every extra held tick up to the traverse adds ``reward`` -- a smooth
+        gradient ES can follow from spamming toward holding (the earlier
+        all-or-nothing bonus was a flat plateau: no candidate ever reached the
+        threshold, so there was no gradient to climb),
+      * holding past the traverse is capped, so there's no incentive to camp.
+
+    Purely additive with no penalties, so it never punishes a short or partial
+    hold -- important for the future half-out "peek" the agent needs once vision
+    lets it read incoming bullets mid-transition.
     """
-    streak = 0
+    def run_value(run: int) -> float:
+        return reward * min(max(run - 1, 0), traverse_ticks - 1)
+
     total = 0.0
+    run = 0
     for held in cover_flags:
         if held:
-            streak += 1
-            if streak == traverse_ticks:
-                total += reward
+            run += 1
         else:
-            streak = 0
+            total += run_value(run)
+            run = 0
+    total += run_value(run)
     return total
 
 
@@ -59,6 +70,12 @@ class TimeCrisisEnv:
 
     def connect(self):
         self.client.connect()
+
+    def start_listening(self):
+        self.client.start_listening()
+
+    def finish_connect(self):
+        self.client.finish_connect()
 
     def close(self):
         self.client.close()
