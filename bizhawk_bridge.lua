@@ -28,6 +28,13 @@
 --   BizHawk appears frozen. So we do ONE emu.frameadvance() right after sending
 --   READY to flush it out the transport before we ever read.
 --
+--   BLOCKING READ NOTE: on this build comm.socketServerResponse() BLOCKS until a
+--   message arrives (there is no non-blocking variant -- confirmed via
+--   getluafunctionslist). A blocking read would stall the frame loop forever, so
+--   we call comm.socketServerSetTimeout(1) to give it a ~1ms receive timeout.
+--   On timeout it returns an empty string, which the loop guard treats as "no
+--   command this frame" and simply advances.
+--
 -- Commands (one per line):
 --   read_u16 <addr>                               -> OK <value>
 --   set_input <shoot01> <cover01> <aim_x> <aim_y> -> OK   (aim_* optional)
@@ -139,6 +146,11 @@ local function handle(line)
     return "ERR unknown_cmd\n"
   end
 end
+
+-- Make the (otherwise blocking) receive time out quickly so the frame loop
+-- never stalls. On timeout, socketServerResponse() returns "" which the loop
+-- guard below treats as "no command this frame".
+comm.socketServerSetTimeout(1)
 
 -- Announce readiness exactly once so Python's connect() can stop blocking and
 -- know the script is live and able to service commands.
