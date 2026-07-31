@@ -89,8 +89,8 @@ class BridgeClient:
         self.host = host
         self.port = port
         self.timeout = timeout
-        self.server_sock = None
-        self.sock = None
+        self.server_sock: socket.socket | None = None
+        self.sock: socket.socket | None = None
         self._recv_buf = b""  # leftover bytes between framed reads
 
     # -- framing helpers ------------------------------------------------
@@ -102,6 +102,8 @@ class BridgeClient:
         return f"{len(data)} ".encode("utf-8") + data
 
     def _send(self, payload: str):
+        if self.sock is None:
+            raise RuntimeError("Bridge not connected. Call connect() first.")
         self.sock.sendall(self._frame(payload))
 
     def _recv_message(self) -> str:
@@ -110,9 +112,12 @@ class BridgeClient:
         May raise socket.timeout if nothing arrives within the socket timeout.
         Returns the decoded payload (prefix stripped).
         """
+        if self.sock is None:
+            raise RuntimeError("Bridge not connected. Call connect() first.")
+        sock = self.sock
         # 1. Read up to and including the space that terminates the length.
         while b" " not in self._recv_buf:
-            chunk = self.sock.recv(4096)
+            chunk = sock.recv(4096)
             if chunk == b"":
                 raise RuntimeError(
                     "Bridge disconnected (is the Lua script still running?)"
@@ -128,7 +133,7 @@ class BridgeClient:
         # 2. Ensure we have the full payload of n bytes.
         self._recv_buf = rest
         while len(self._recv_buf) < n:
-            chunk = self.sock.recv(4096)
+            chunk = sock.recv(4096)
             if chunk == b"":
                 raise RuntimeError(
                     "Bridge disconnected mid-message "
@@ -203,6 +208,23 @@ class BridgeClient:
             # Ignore any other chatter until READY arrives.
 
         self.sock.settimeout(self.timeout)
+
+        # RESYNC: the handshake spammed many "hello" messages while waiting for
+        # the Lua script to load. Once loaded, the Lua loop answers each queued
+        # "hello" with "ERR unknown_cmd" one-per-frame, so those stale replies
+        # are now sitting in the stream ahead of any real command's reply. If we
+        # don't drain them, the first real command (e.g. "load 1") reads a stale
+        # "ERR unknown_cmd" and wrongly fails. Send a sentinel command and
+        # discard everything up to its "OK" reply. TCP is FIFO and the Lua loop
+        # is single-threaded, so the sentinel's OK is guaranteed to arrive after
+        # every stale hello->ERR; only hellos were ever sent, so the first "OK"
+        # is unambiguously the sentinel's.
+        self._send("frame")
+        while True:
+            resp = self._recv_message().strip()
+            if resp.startswith("OK"):
+                break
+
         print("[bridge] handshake OK -- bridge live", flush=True)
 
     def close(self):
@@ -231,7 +253,10 @@ class BridgeClient:
     # -- commands -------------------------------------------------------
 
     def read_u16(self, addr: int) -> int:
-        return int(self._cmd(f"read_u16 0x{addr:X}"))
+        resp = self._cmd(f"read_u16 0x{addr:X}")
+        if resp is None:
+            raise RuntimeError(f"Bridge returned no value for 'read_u16 0x{addr:X}'")
+        return int(resp)
 
     def set_input(self, shoot: bool, cover: bool, aim_x: float = 0.5, aim_y: float = 0.5):
         # Apply the Guncon calibration exactly once, right before sending.
@@ -250,7 +275,10 @@ class BridgeClient:
         self._cmd(f"save {int(slot)}")
 
     def frame(self) -> int:
-        return int(self._cmd("frame"))
+        resp = self._cmd("frame")
+        if resp is None:
+            raise RuntimeError("Bridge returned no value for 'frame'")
+        return int(resp)
 
     def hud(self, lines):
         safe = [str(s).replace("|", "/").replace("\n", " ") for s in lines]
