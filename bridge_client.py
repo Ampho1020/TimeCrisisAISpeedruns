@@ -1,30 +1,41 @@
-"""Line-protocol server for bizhawk_bridge.lua (BizHawk 2.11.1 comm.* model).
+"""Length-prefixed socket bridge for bizhawk_bridge.lua (BizHawk 2.11.1 comm.*).
 
 TRANSPORT DIRECTION (important):
     Under BizHawk's comm.socketServer* API, BizHawk is the socket *client*: it
-    dials OUT to an external listener the moment it launches (it connects in its
-    MainForm constructor). Therefore THIS class must be the *server* -- it binds
-    the port, listens, and accepts the connection BizHawk makes.
+    dials OUT to an external listener the moment it launches. Therefore THIS
+    class is the *server* -- it binds the port, listens, and accepts BizHawk.
+
+WIRE FORMAT (critical -- verified against BizHawk source):
+    Since BizHawk 2.6.2, comm.socketServerResponse() does NOT read newline-
+    terminated lines. Every message in BOTH directions is length-prefixed:
+
+        "{N} {payload}"
+
+    where N is the byte length of payload in base-10 followed by a single space.
+    e.g. to send "ping" you must put "4 ping" on the wire; BizHawk replies the
+    same way, e.g. "10 PONG:ping". We therefore frame every outbound command and
+    parse every inbound reply using this decimal-length prefix -- NOT newlines.
+
+    (This was the root cause of the long "messages never arrive" saga: we were
+    sending newline-terminated text, which BizHawk's receiver silently drops.)
 
 STARTUP ORDER (must be followed or BizHawk crashes with "Connection refused"):
-    1. Start Python first (this creates the listener and blocks on accept()):
+    1. Start Python first (binds the port, waits on accept):
            python es_train.py
     2. Only then launch BizHawk WITH the socket flags:
            ./EmuHawk --socket_ip=127.0.0.1 --socket_port=8765
     3. Load the game (Guncon port, savestate slot 1), then open bizhawk_bridge.lua.
 
-    If Python is not already listening when BizHawk launches, BizHawk's launch-
-    time connect is refused and it crashes in MainForm..ctor.
-
-HANDSHAKE:
+HANDSHAKE (Python-initiated):
     BizHawk's socket connects at launch, but only the Lua script answers
-    commands. So accept() can return long before the script is loaded. To avoid
-    the first command timing out, the Lua script sends a single "READY" line on
-    load; connect() below blocks (with a long timeout) until it reads that line
-    before returning. This also consumes the READY so it can't corrupt the first
-    real command/reply pair.
+    commands, and on this build socketServerResponse() only *sends* as the reply
+    half of a *received* message -- Lua cannot reliably speak first. So the Lua
+    script can't just emit READY unprompted. Instead, connect() POLLS: it sends
+    "hello" repeatedly (short per-send timeout) until the Lua script -- once
+    loaded -- replies "READY". This mirrors the proven ping/pong test and cleanly
+    handles the fact that the script is opened after BizHawk launches.
 
-Protocol (one command per line, one reply per line):
+Commands (payload text, before framing):
     read_u16 <addr>                                 -> OK <value>
     set_input <shoot01> <cover01> <aim_x> <aim_y>   -> OK
     step <n>                                         -> OK
@@ -40,9 +51,11 @@ import socket
 
 from config import GUNCON_CALIB
 
-# How long to wait for the Lua "READY" handshake after BizHawk connects. Long,
-# because the user still has to load the game and open the Lua script.
+# How long to poll for the Lua handshake after BizHawk connects. Long, because
+# the user still has to load the game and open the Lua script.
 HANDSHAKE_TIMEOUT = 120.0
+# Per-attempt send/recv timeout while polling the handshake.
+HANDSHAKE_POLL_INTERVAL = 0.5
 
 
 def apply_guncon_calibration(aim_x, aim_y):
@@ -65,8 +78,11 @@ class BridgeClient:
     """Server side of the bridge. Named 'BridgeClient' for backwards
     compatibility with env_timecrisis.py / es_train.py -- the public method
     surface (connect/close/read_u16/set_input/step_frames/load_state/
-    save_state/frame/hud/hud_clear) is unchanged; only the transport flipped
-    from dial-out client to listen-and-accept server.
+    save_state/frame/hud/hud_clear) is unchanged.
+
+    Uses raw recv/sendall (NOT socket.makefile) because a makefile object gets
+    permanently poisoned if a read times out ("cannot read from timed out
+    object"), which is fatal once we set per-read timeouts.
     """
 
     def __init__(self, host: str, port: int, timeout: float = 10.0):
@@ -75,16 +91,63 @@ class BridgeClient:
         self.timeout = timeout
         self.server_sock = None
         self.sock = None
-        self.file = None
+        self._recv_buf = b""  # leftover bytes between framed reads
+
+    # -- framing helpers ------------------------------------------------
+
+    @staticmethod
+    def _frame(payload: str) -> bytes:
+        """Wrap a payload in BizHawk's "{len} {payload}" length prefix."""
+        data = payload.encode("utf-8")
+        return f"{len(data)} ".encode("utf-8") + data
+
+    def _send(self, payload: str):
+        self.sock.sendall(self._frame(payload))
+
+    def _recv_message(self) -> str:
+        """Read one length-prefixed message: decimal length, space, payload.
+
+        May raise socket.timeout if nothing arrives within the socket timeout.
+        Returns the decoded payload (prefix stripped).
+        """
+        # 1. Read up to and including the space that terminates the length.
+        while b" " not in self._recv_buf:
+            chunk = self.sock.recv(4096)
+            if chunk == b"":
+                raise RuntimeError(
+                    "Bridge disconnected (is the Lua script still running?)"
+                )
+            self._recv_buf += chunk
+
+        length_str, _, rest = self._recv_buf.partition(b" ")
+        try:
+            n = int(length_str)
+        except ValueError:
+            raise RuntimeError(f"Malformed length prefix: {length_str!r}")
+
+        # 2. Ensure we have the full payload of n bytes.
+        self._recv_buf = rest
+        while len(self._recv_buf) < n:
+            chunk = self.sock.recv(4096)
+            if chunk == b"":
+                raise RuntimeError(
+                    "Bridge disconnected mid-message "
+                    "(is the Lua script still running?)"
+                )
+            self._recv_buf += chunk
+
+        payload = self._recv_buf[:n]
+        self._recv_buf = self._recv_buf[n:]
+        return payload.decode("utf-8", errors="replace")
 
     # -- lifecycle ------------------------------------------------------
 
     def connect(self):
-        """Bind, listen, accept, then block until the Lua READY handshake.
+        """Bind, listen, accept, then poll a Python-initiated handshake.
 
-        Call this BEFORE launching BizHawk. It blocks on accept() until the
-        emulator dials in, then blocks reading until the Lua script sends
-        "READY" (so training never fires a command before the script is live).
+        Call this BEFORE launching BizHawk. Blocks on accept() until the
+        emulator dials in, then repeatedly sends "hello" until the Lua script
+        (opened after BizHawk launches) replies "READY".
         """
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -95,27 +158,47 @@ class BridgeClient:
             f"now launch BizHawk with --socket_ip={self.host} --socket_port={self.port}",
             flush=True,
         )
-        # Block until BizHawk connects (no timeout on the initial accept, since
-        # the user may take a moment to launch the emulator).
+        # Block until BizHawk connects (no timeout on the initial accept).
         self.sock, addr = self.server_sock.accept()
-        self.file = self.sock.makefile("rwb")
+        self._recv_buf = b""
         print(
             f"[bridge] BizHawk connected from {addr}; "
-            f"waiting for Lua READY (load the game and open bizhawk_bridge.lua)...",
+            f"polling for Lua handshake (load the game and open bizhawk_bridge.lua)...",
             flush=True,
         )
 
-        # Wait for the Lua script to announce it is live. Use a long timeout for
-        # the handshake, then drop back to the normal per-command timeout.
-        self.sock.settimeout(HANDSHAKE_TIMEOUT)
+        # Python-initiated handshake: spam "hello" until Lua answers "READY".
+        # Short per-attempt timeout so a missed reply just triggers another send.
+        self.sock.settimeout(HANDSHAKE_POLL_INTERVAL)
+        import time
+
+        deadline = time.monotonic() + HANDSHAKE_TIMEOUT
+        attempts = 0
         while True:
-            raw = self.file.readline()
-            if not raw:
+            if time.monotonic() > deadline:
                 raise RuntimeError(
-                    "Connection closed before READY handshake "
-                    "(did the Lua script fail to load?)."
+                    "Timed out waiting for Lua handshake. Is bizhawk_bridge.lua "
+                    "open and the game running?"
                 )
-            if raw.decode("utf-8", errors="replace").strip() == "READY":
+            attempts += 1
+            try:
+                self._send("hello")
+            except socket.timeout:
+                continue
+            except Exception as e:
+                raise RuntimeError(f"Handshake send failed: {e!r}")
+
+            try:
+                reply = self._recv_message()
+            except socket.timeout:
+                if attempts % 10 == 0:
+                    print(
+                        f"[bridge] sent {attempts} handshakes, still waiting for READY...",
+                        flush=True,
+                    )
+                continue
+
+            if reply.strip() == "READY":
                 break
             # Ignore any other chatter until READY arrives.
 
@@ -123,27 +206,23 @@ class BridgeClient:
         print("[bridge] handshake OK -- bridge live", flush=True)
 
     def close(self):
-        for obj in (self.file, self.sock, self.server_sock):
+        for obj in (self.sock, self.server_sock):
             try:
                 if obj:
                     obj.close()
             except Exception:
                 pass
-        self.file = None
         self.sock = None
         self.server_sock = None
+        self._recv_buf = b""
 
     # -- transport ------------------------------------------------------
 
     def _cmd(self, line: str):
-        if self.file is None:
+        if self.sock is None:
             raise RuntimeError("Bridge not connected. Call connect() first.")
-        self.file.write((line + "\n").encode("utf-8"))
-        self.file.flush()
-        raw = self.file.readline()
-        if not raw:
-            raise RuntimeError("Bridge disconnected (is the Lua script still running?)")
-        text = raw.decode("utf-8", errors="replace").strip()
+        self._send(line)
+        text = self._recv_message().strip()
         if not text.startswith("OK"):
             raise RuntimeError(f"Bridge error for '{line}': {text}")
         parts = text.split(maxsplit=1)
