@@ -15,12 +15,18 @@
 --   3. load the game (Guncon port, savestate slot 1 past in-game calibration)
 --   4. Tools -> Lua Console -> open this script
 --
--- HANDSHAKE
+-- HANDSHAKE + DEADLOCK NOTE
 --   BizHawk's socket connects at launch, but only THIS script answers commands.
 --   So Python's accept() can succeed long before the script is loaded, causing
 --   the first command to time out. To avoid that race, this script sends a
 --   single "READY" line as soon as it starts. bridge_client.connect() blocks
 --   until it receives that line before issuing any command.
+--
+--   CRITICAL: comm socket I/O only pumps while the frame loop advances. If we
+--   send READY and then immediately block reading a command, READY never
+--   flushes -> Python waits for READY, Lua waits for a command -> deadlock, and
+--   BizHawk appears frozen. So we do ONE emu.frameadvance() right after sending
+--   READY to flush it out the transport before we ever read.
 --
 -- Commands (one per line):
 --   read_u16 <addr>                               -> OK <value>
@@ -139,9 +145,16 @@ end
 comm.socketServerSend("READY\n")
 print("[bridge] sent READY -- waiting for commands")
 
+-- CRITICAL: advance one frame RIGHT NOW to pump the comm transport and flush
+-- the READY bytes out to Python. Without this, we would enter the loop and
+-- block on socketServerResponse() before READY is ever sent -> deadlock
+-- (Python waits for READY, Lua waits for a command) and BizHawk freezes.
+emu.frameadvance()
+
 -- Single, canonical frame loop. Exactly one emu.frameadvance() per iteration.
 -- Drain any waiting command, then advance one frame (applying input if a
--- step is pending).
+-- step is pending). We advance every iteration regardless of whether a command
+-- arrived, so the comm transport keeps pumping and never deadlocks.
 while true do
   local line = comm.socketServerResponse()
   if line and line ~= "" then
