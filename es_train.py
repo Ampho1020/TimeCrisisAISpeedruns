@@ -80,12 +80,13 @@ def train():
             std = float(fitnesses.std())
             spread = float(fitnesses.max() - fitnesses.min())
             clear_rate = float(np.mean([1.0 if x["cleared"] else 0.0 for x in infos]))
+            timeout_rate = float(np.mean([1.0 if x["timed_out"] else 0.0 for x in infos]))
             mean_acc = float(np.mean([x["accuracy"] for x in infos]))
 
             print(
                 f"\n=== gen {gen:03d} | best {fitnesses[best_i]:8.2f} "
                 f"| mean {fitnesses.mean():8.2f} | std {std:7.2f} | spread {spread:8.2f} "
-                f"| clear {clear_rate:5.1%} | t {best['elapsed']:6.1f} "
+                f"| clear {clear_rate:5.1%} | timeout {timeout_rate:5.1%} | t {best['elapsed']:6.1f} "
                 f"| dmg {best['damage']:4.0f} | acc {best['accuracy']:5.1%} ===\n",
                 flush=True,
             )

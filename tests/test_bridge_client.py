@@ -111,5 +111,41 @@ class BridgeClientTests(unittest.TestCase):
         self.assertEqual(fake.commands[2], "frame")
 
 
+class CoverHoldRewardTest(unittest.TestCase):
+    """Lock in that holding cover is rewarded and spamming never is."""
+
+    def test_spamming_earns_nothing(self):
+        from env_timecrisis import cover_hold_reward
+
+        # Toggle every tick: no streak ever reaches the traverse threshold.
+        spam = [i % 2 == 0 for i in range(30)]
+        self.assertEqual(cover_hold_reward(spam, traverse_ticks=3, reward=4.0), 0.0)
+
+    def test_hold_shorter_than_traverse_earns_nothing(self):
+        from env_timecrisis import cover_hold_reward
+
+        # Hold two, release one -- never clears a 3-tick traverse.
+        short = [(i % 3) < 2 for i in range(30)]
+        self.assertEqual(cover_hold_reward(short, traverse_ticks=3, reward=4.0), 0.0)
+
+    def test_hold_is_awarded_once_per_commit(self):
+        from env_timecrisis import cover_hold_reward
+
+        # One sustained hold commits exactly once, no matter how long it lasts.
+        self.assertEqual(
+            cover_hold_reward([True] * 30, traverse_ticks=3, reward=4.0), 4.0
+        )
+
+    def test_holding_strictly_beats_spamming(self):
+        from env_timecrisis import cover_hold_reward
+
+        spam = [i % 2 == 0 for i in range(30)]
+        cycles = ([True] * 3 + [False]) * 7  # deliberate hold/release cycles
+        self.assertGreater(
+            cover_hold_reward(cycles, traverse_ticks=3, reward=4.0),
+            cover_hold_reward(spam, traverse_ticks=3, reward=4.0),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,13 +27,22 @@ FRAME_SKIP = 5        # emulator frames per decision (60Hz -> ~83ms)
 MAX_TICKS  = 900      # 900 * 5 = 4500 frames hard cap (~75s)
 STATE_SLOT = 1        # savestate slot holding Stage 1 Area A start
 
+# Time Crisis counts the area timer DOWN; when it hits zero the game drops to a
+# "continue?" screen. That is a SEPARATE terminal from life == 0 (being shot),
+# and if we don't detect it the episode idles on the continue screen until
+# MAX_TICKS, spamming inputs into a frozen state (the "repetitive" behavior).
+# We catch the moment the timer reaches this threshold so the episode ends as a
+# timeout failure. If you locate a dedicated continue-screen RAM flag, wire it in
+# via RamMap and prefer it -- this timer zero-cross is the address-free fallback.
+TIMEOUT_TIMER_THRESHOLD = 0
+
 # -----------------------------
 # ES hyperparameters
 # -----------------------------
-POP_SIZE    = 40      # MUST be even (mirrored sampling)
+POP_SIZE    = 6      # MUST be even (mirrored sampling)
 SIGMA       = 0.05    # perturbation scale
 ALPHA       = 0.02    # learning rate
-GENERATIONS = 200
+GENERATIONS = 3
 SEED        = 42
 CHECKPOINT_EVERY = 10
 
@@ -44,6 +53,14 @@ CLEAR_BONUS        = 1000.0
 DAMAGE_PENALTY     = 300.0   # deliberately harsh: a hit is never worth it
 PARTIAL_HIT_REWARD = 8.0     # only applies to FAILED episodes
 FAIL_PENALTY       = 200.0
+
+# Cover is a HOLD, not a tap: the ~0.2s (~12-frame) in/out traverse is only
+# useful if the button is held through it. Reward each committed hold that lasts
+# at least COVER_TRAVERSE_TICKS decision ticks so the policy learns to commit to
+# cover instead of spamming it every tick. Spam never reaches the threshold, so
+# it earns nothing -- we reward holding, not toggling.
+COVER_TRAVERSE_TICKS = 3     # ticks (x FRAME_SKIP frames) to clear the traverse
+COVER_HOLD_REWARD    = 4.0   # per committed hold; small shaping term
 
 # -----------------------------
 # Policy dims

@@ -33,7 +33,14 @@
 --   getluafunctionslist). A blocking read would stall the frame loop forever, so
 --   we call comm.socketServerSetTimeout(1) to give it a ~1ms receive timeout.
 --   On timeout it returns an empty string, which the loop guard treats as "no
---   command this frame" and simply advances.
+--   command this frame".
+--
+--   FRAME BUDGET NOTE: the loop advances a real game frame ONLY when a "step" is
+--   pending. All other commands (reads, set_input, load/save, frame, hud) use
+--   emu.yield() instead, which keeps the loop/UI alive and the transport pumping
+--   WITHOUT consuming a frame. This keeps the decision cadence at exactly
+--   FRAME_SKIP frames per tick and keeps throughput from being throttled to the
+--   emulator's frame rate.
 --
 -- Commands (one per line):
 --   read_u16 <addr>                               -> OK <value>
@@ -44,15 +51,19 @@
 --   hud <line1|line2|...> / hud_clear             -> OK
 --
 -- NOTES
---   * Aim X/Y are accepted and stored but intentionally NOT written to the
---     Guncon axes yet -- the in-game lightgun calibration is baked into the
---     savestate, and real aiming lands with the vision step. Only the trigger
---     (shoot) and P1 A (cover) buttons are driven for now. This keeps the
---     per-frame path minimal so nothing out-of-range can fault the core.
+--   * Aim X/Y are now written to the Guncon axes via joypad.setanalog, so the
+--     AI -- not the host mouse -- controls where the gun points. aim_x/aim_y
+--     arrive normalized 0..1 (0 = left/top) and are mapped to the axis ranges
+--     below. Vertical is currently held centered by the caller until vision
+--     lands; horizontal is driven by the policy.
+--   * Trigger (shoot) and the cover/peek button are driven INDEPENDENTLY. We do
+--     NOT couple them (no "shoot and not cover"): the game itself only registers
+--     a shot when fully out of cover, so we just forward both button states and
+--     let the AI learn the hold-to-shoot timing.
 --   * Confirmed Guncon key names on this build:
 --       trigger = "P1 Trigger" (left mouse / shoot)
 --       cover   = "P1 A"       (right mouse)
---       axes    = "P1 X Axis" (0..2640), "P1 Y Axis" (16..256)  [unused for now]
+--       axes    = "P1 X Axis" (0..2640), "P1 Y Axis" (16..256)
 
 local DOMAIN = "MainRAM"
 
@@ -63,9 +74,14 @@ local hud_lines = {}
 -- pending frames to advance, consumed one-per-iteration by the main loop
 local pending_steps = 0
 
--- Confirmed Guncon buttons (axes intentionally not written yet).
+-- Confirmed Guncon controls on this build.
 local GUNCON_TRIGGER_KEY = "P1 Trigger"
 local GUNCON_COVER_KEY   = "P1 A"
+local GUNCON_AIM_X_KEY   = "P1 X Axis"
+local GUNCON_AIM_Y_KEY   = "P1 Y Axis"
+-- Axis ranges the Guncon expects (from RAM/input probing on this build).
+local GUNCON_X_MIN, GUNCON_X_MAX = 0, 2640
+local GUNCON_Y_MIN, GUNCON_Y_MAX = 16, 256
 
 local function parse_int(s)
   if not s then return nil end
@@ -88,10 +104,20 @@ local function draw_hud()
 end
 
 local function apply_input()
-  -- Buttons only for now. Trigger suppressed while covering.
+  -- Buttons: forward trigger and cover/peek INDEPENDENTLY. The game only lets a
+  -- shot register when fully out of cover, so we don't couple them here -- the
+  -- AI learns the timing (and the ~0.2s cover transition) on its own.
   joypad.set({
-    [GUNCON_TRIGGER_KEY] = shoot and not cover,
+    [GUNCON_TRIGGER_KEY] = shoot,
     [GUNCON_COVER_KEY]   = cover,
+  })
+  -- Aim: drive the Guncon axes ourselves so the AI, not the host mouse, aims.
+  -- Map normalized 0..1 (0 = left/top) onto the axis ranges and round to int.
+  local ax = GUNCON_X_MIN + aim_x_norm * (GUNCON_X_MAX - GUNCON_X_MIN)
+  local ay = GUNCON_Y_MIN + aim_y_norm * (GUNCON_Y_MAX - GUNCON_Y_MIN)
+  joypad.setanalog({
+    [GUNCON_AIM_X_KEY] = math.floor(ax + 0.5),
+    [GUNCON_AIM_Y_KEY] = math.floor(ay + 0.5),
   })
 end
 
@@ -152,6 +178,29 @@ end
 -- guard below treats as "no command this frame".
 comm.socketServerSetTimeout(1)
 
+-- Un-throttle emulation. The loop only advances a frame per "step" command, but
+-- BizHawk still throttles frameadvance to the configured speed (100% = 60fps),
+-- which makes a full ES generation take hours. Set this high for training; drop
+-- it to 100 if you want to WATCH the run in real time.
+local EMULATOR_SPEED_PERCENT = 3200
+client.speedmode(EMULATOR_SPEED_PERCENT)
+
+-- One-time diagnostic: dump every control name the core exposes for controller
+-- 1 so we can confirm the exact analog axis key strings (they vary by core /
+-- Guncon binding). If the aim axes below silently do nothing, read this dump in
+-- the Lua console and fix GUNCON_AIM_X_KEY / GUNCON_AIM_Y_KEY to match.
+do
+  local ok, state = pcall(joypad.get, 1)
+  if ok and type(state) == "table" then
+    print("[bridge] controller 1 controls:")
+    for name, value in pairs(state) do
+      print(string.format("  %-18s = %s", tostring(name), tostring(value)))
+    end
+  else
+    print("[bridge] joypad.get(1) diagnostic failed: " .. tostring(state))
+  end
+end
+
 -- Announce readiness exactly once so Python's connect() can stop blocking and
 -- know the script is live and able to service commands.
 comm.socketServerSend("READY\n")
@@ -163,10 +212,14 @@ print("[bridge] sent READY -- waiting for commands")
 -- (Python waits for READY, Lua waits for a command) and BizHawk freezes.
 emu.frameadvance()
 
--- Single, canonical frame loop. Exactly one emu.frameadvance() per iteration.
--- Drain any waiting command, then advance one frame (applying input if a
--- step is pending). We advance every iteration regardless of whether a command
--- arrived, so the comm transport keeps pumping and never deadlocks.
+-- Main loop. KEY FIX: a game frame is advanced ONLY when a "step" is pending.
+-- Every other command (read_u16, set_input, load/save, frame, hud) is a pure
+-- query/config and must NOT consume a frame -- otherwise a single decision tick
+-- (set_input + step + 4 reads, x5 frame-skips) would advance ~30 frames instead
+-- of 5, throttle throughput to 60 cmd/s, and skew every RAM delta. When there is
+-- no frame to advance we call emu.yield() instead of emu.frameadvance(): it keeps
+-- the loop and BizHawk UI responsive (and the comm transport pumping) without
+-- moving the game forward.
 while true do
   local line = comm.socketServerResponse()
   if line and line ~= "" then
@@ -174,11 +227,13 @@ while true do
     comm.socketServerSend(ok and resp or ("ERR " .. tostring(resp) .. "\n"))
   end
 
+  draw_hud()
+
   if pending_steps > 0 then
     apply_input()
     pending_steps = pending_steps - 1
+    emu.frameadvance()   -- advance exactly one game frame for this step
+  else
+    emu.yield()          -- stay live without consuming a frame
   end
-
-  draw_hud()
-  emu.frameadvance()
 end

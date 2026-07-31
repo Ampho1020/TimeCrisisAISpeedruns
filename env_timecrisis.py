@@ -4,8 +4,9 @@ import numpy as np
 
 from bridge_client import BridgeClient
 from config import (
-    CLEAR_BONUS, DAMAGE_PENALTY, FAIL_PENALTY, FRAME_SKIP, HOST,
-    MAX_TICKS, PARTIAL_HIT_REWARD, PORT, RAM, STATE_SLOT,
+    CLEAR_BONUS, COVER_HOLD_REWARD, COVER_TRAVERSE_TICKS, DAMAGE_PENALTY,
+    FAIL_PENALTY, FRAME_SKIP, HOST, MAX_TICKS, PARTIAL_HIT_REWARD, PORT, RAM,
+    STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import act
@@ -21,12 +22,36 @@ def u16_delta(new_v: int, old_v: int) -> int:
     return d
 
 
+def cover_hold_reward(
+    cover_flags,
+    traverse_ticks: int = COVER_TRAVERSE_TICKS,
+    reward: float = COVER_HOLD_REWARD,
+) -> float:
+    """Reward each cover hold that survives the in/out traverse.
+
+    A hold that stays down for `traverse_ticks` consecutive decision ticks earns
+    `reward` once (holding longer is not double-paid). Spamming -- toggling the
+    button so no streak ever reaches the threshold -- earns nothing, so holding
+    is always scored strictly higher than spamming.
+    """
+    streak = 0
+    total = 0.0
+    for held in cover_flags:
+        if held:
+            streak += 1
+            if streak == traverse_ticks:
+                total += reward
+        else:
+            streak = 0
+    return total
+
+
 class TimeCrisisEnv:
     def __init__(self, host=HOST, port=PORT, state_slot=STATE_SLOT):
         self.client = BridgeClient(host, port)
         self.state_slot = state_slot
         self.phase_infer = PhaseInferer(vote_window=3)
-        self.prev = None
+        self.prev: dict[str, int] = {}
         self.start_timer = 0
         self.ticks = 0
 
@@ -73,13 +98,16 @@ class TimeCrisisEnv:
         return self._build_obs(self.prev, 0, 0)
 
     def step(self, theta: np.ndarray):
-        shoot, cover, _aim_bias = act(theta, self._build_obs(self.prev, 0, 0))
-        # TODO: Replace the placeholder center aim with real normalized target
-        # coordinates once the vision/aiming step lands.
-        aim_x, aim_y = 0.5, 0.5
+        shoot, cover, aim_bias = act(theta, self._build_obs(self.prev, 0, 0))
+        # Until the vision step lands, give the policy 1-D horizontal aim control
+        # through its aim_bias output ([-1, 1] -> [0, 1] across the screen). This
+        # is AI-driven aim, independent of the host mouse. Vertical stays centered;
+        # reactive 2-D aiming waits for enemy coordinates from vision.
+        aim_x = min(1.0, max(0.0, 0.5 + 0.5 * float(aim_bias)))
+        aim_y = 0.5
 
         total_fired = total_hit = total_life_loss = 0
-        cleared_guess = dead_guess = False
+        cleared_guess = dead_guess = timed_out_guess = False
         timer_at_tick_start = self.prev["timer"]
 
         for f in range(FRAME_SKIP):
@@ -108,9 +136,17 @@ class TimeCrisisEnv:
             # Replace with a real flag if you ever find one.
             if u16_delta(post["timer"], self.start_timer) > 100:
                 cleared_guess = True
+            # Timeout: the countdown reached zero -> "continue?" screen. Detect
+            # the zero-cross here (a large downward step across the tick also
+            # counts, in case the timer skips the exact zero sample).
+            timer_step = u16_delta(post["timer"], pre["timer"])
+            if post["timer"] <= TIMEOUT_TIMER_THRESHOLD or (
+                timer_step < 0 and pre["timer"] + timer_step <= TIMEOUT_TIMER_THRESHOLD
+            ):
+                timed_out_guess = True
 
             self.prev = post
-            if dead_guess or cleared_guess:
+            if dead_guess or cleared_guess or timed_out_guess:
                 break
 
         self.ticks += 1
@@ -121,7 +157,7 @@ class TimeCrisisEnv:
             life_delta=-total_life_loss,
             timer_delta=u16_delta(self.prev["timer"], timer_at_tick_start),
             cleared_guess=cleared_guess,
-            dead_guess=dead_guess,
+            dead_guess=dead_guess or timed_out_guess,
             can_fire_probe=(total_fired > 0),
         ))
 
@@ -134,8 +170,10 @@ class TimeCrisisEnv:
             "shots_fired_delta": total_fired,
             "shots_hit_delta": total_hit,
             "life_loss": total_life_loss,
-            "cleared": bool(cleared_guess and not dead_guess),
+            "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
             "dead": dead_guess,
+            "timed_out": timed_out_guess,
+            "cover": bool(cover),
             "phase": phase.name,
         }
         return obs, done, info
@@ -145,6 +183,9 @@ class TimeCrisisEnv:
         self.reset()
         total_hits = total_fired = total_life_loss = 0
         cleared = False
+        timed_out = dead = False
+        # Record cover per tick so we can reward deliberate holds afterward.
+        cover_flags = []
 
         while True:
             _, done, info = self.step(theta)
@@ -152,6 +193,9 @@ class TimeCrisisEnv:
             total_fired     += info["shots_fired_delta"]
             total_life_loss += info["life_loss"]
             cleared = cleared or info["cleared"]
+            timed_out = timed_out or info["timed_out"]
+            dead = dead or info["dead"]
+            cover_flags.append(info["cover"])
             if done:
                 break
 
@@ -163,9 +207,12 @@ class TimeCrisisEnv:
             # Partial credit ONLY on failure, so early generations have
             # something to climb. Never distorts successful runs.
             fitness = PARTIAL_HIT_REWARD * total_hits - FAIL_PENALTY
+        fitness += cover_hold_reward(cover_flags)
 
         return float(fitness), {
             "cleared": cleared,
+            "timed_out": bool(timed_out),
+            "dead": bool(dead),
             "elapsed": float(elapsed),
             "damage": float(total_life_loss),
             "accuracy": float(total_hits / max(total_fired, 1)),

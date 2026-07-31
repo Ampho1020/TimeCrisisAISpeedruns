@@ -111,10 +111,9 @@ Expect the first ~20 generations to look like nothing is happening. That's norma
 
 ## Known limitations (v1)
 
-- **Aim is still a placeholder.** The bridge now carries normalized `aim_x` /
-  `aim_y`, but `env_timecrisis.py` currently feeds a temporary center-screen
-  `(0.5, 0.5)` aim until the vision step lands.
+- **Aim is AI-driven but 1-D.** The bridge now writes the Guncon `P1 X Axis` /
+  `P1 Y Axis` via `joypad.setanalog` (overriding the host mouse), and
+  `env_timecrisis.py` maps the policy's `aim_bias` output to horizontal aim.
+  Vertical stays centered and there is no enemy tracking yet — reactive 2-D
+  aiming waits for the vision step.
 - **Clear detection is a heuristic** (`timer` jumping upward by >100). It may misfire. Replace it if a real area-clear RAM flag turns up.
-- **Policy output is still scalar-only.** `policy.py` still emits `aim_bias`; the
-  bridge keeps a backward-compatible fallback, but real training progress on
-  aiming will wait for vision-based X/Y targets.
