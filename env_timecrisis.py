@@ -27,32 +27,37 @@ def cover_hold_reward(
     traverse_ticks: int = COVER_TRAVERSE_TICKS,
     reward: float = COVER_HOLD_REWARD,
 ) -> float:
-    """Dense reward for HOLDING cover, shaped so evolution can climb toward it.
+    """Dense reward for holding EITHER cover state long enough for the
+    transition animation to complete -- applied symmetrically to in-cover
+    (True) and out-of-cover (False) runs.
 
-    For each maximal run of consecutive held ticks of length L, add
-    ``reward * min(L - 1, traverse_ticks - 1)``:
-      * a length-1 tap (spam) earns nothing,
-      * every extra held tick up to the traverse adds ``reward`` -- a smooth
-        gradient ES can follow from spamming toward holding (the earlier
-        all-or-nothing bonus was a flat plateau: no candidate ever reached the
-        threshold, so there was no gradient to climb),
-      * holding past the traverse is capped, so there's no incentive to camp.
+    For each maximal run of consecutive same-state ticks of length L:
+      * L == 1 (single-tick flip) earns nothing,
+      * each extra tick up to traverse_ticks adds ``reward``,
+      * runs longer than traverse_ticks are capped -- no camping bonus.
 
-    Purely additive with no penalties, so it never punishes a short or partial
-    hold -- important for the future half-out "peek" the agent needs once vision
-    lets it read incoming bullets mid-transition.
+    Symmetry is the key fix: previously only True runs were rewarded, so the
+    optimal strategy was "3 ticks in-cover, 1 tick out" -- the 1-tick
+    out-of-cover period (5 frames) is shorter than the ~12-frame exit
+    animation, so the character never fully exits and shots never register.
+    Rewarding out-of-cover holds equally forces the agent to spend at least
+    traverse_ticks ticks OUT as well, completing the exit traverse and letting
+    shots land.
     """
     def run_value(run: int) -> float:
         return reward * min(max(run - 1, 0), traverse_ticks - 1)
 
+    if not cover_flags:
+        return 0.0
+
     total = 0.0
-    run = 0
-    for held in cover_flags:
-        if held:
+    run = 1
+    for i in range(1, len(cover_flags)):
+        if cover_flags[i] == cover_flags[i - 1]:
             run += 1
         else:
             total += run_value(run)
-            run = 0
+            run = 1
     total += run_value(run)
     return total
 
