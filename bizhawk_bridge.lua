@@ -67,6 +67,11 @@
 
 local DOMAIN = "MainRAM"
 
+-- Debug input logging. Set true to get READ_BACK lines in the Lua console.
+-- Must be declared here (top of file) so apply_input() and startup code both see it.
+local DEBUG_INPUT_LOG = true   -- set false for normal training
+local debug_frame_count = 0
+
 local shoot, cover = false, false
 local aim_x_norm, aim_y_norm = 0.5, 0.5   -- stored only; not written yet
 local hud_lines = {}
@@ -231,12 +236,6 @@ print("[bridge] sent READY -- waiting for commands")
 -- block on socketServerResponse() before READY is ever sent -> deadlock
 -- (Python waits for READY, Lua waits for a command) and BizHawk freezes.
 emu.frameadvance()
-
--- Debug input logging.  Set to true to print cover/shoot/aim each frame to the
--- Lua console -- useful for verifying the bridge is sending what Python intends.
--- Keep false during training (high-speed printing hammers the UI).
-local DEBUG_INPUT_LOG = true   -- set false for normal training
-local debug_frame_count = 0   -- used by main-loop rate limiter
 
 -- Main loop.
 -- CRITICAL ORDERING: the frame advance MUST happen before reading the next
