@@ -37,10 +37,16 @@ local ADDR_TIMER        = 0x0B1D64
 -- joypad.set, which makes every phase of this diagnostic look like "no input"
 -- and gives the false conclusion that A can't be the cover button. Keep these
 -- in sync with GUNCON_*_KEY in bizhawk_bridge.lua.
+--
+-- CRITICAL: bare key names REQUIRE a controller index on joypad.set /
+-- joypad.setanalog. We pass CONTROLLER = 1 on every call below -- omitting it
+-- makes BizHawk silently drop the override table, which is precisely what was
+-- happening to the training bridge (SET != READ_BACK) before this fix.
 local TRIGGER_KEY = "Trigger"
 local COVER_KEY   = "A"
 local AIM_X_KEY   = "X Axis"
 local AIM_Y_KEY   = "Y Axis"
+local CONTROLLER  = 1
 local X_MIN, X_MAX = 0, 2640
 local Y_MIN, Y_MAX = 16, 256
 
@@ -75,11 +81,11 @@ local function run_phase(label, frames, btn_cover, btn_shoot, aim_x, aim_y)
         joypad.set({
             [TRIGGER_KEY] = btn_shoot,
             [COVER_KEY]   = btn_cover,
-        })
+        }, CONTROLLER)
         joypad.setanalog({
             [AIM_X_KEY] = aim_x,
             [AIM_Y_KEY] = aim_y,
-        })
+        }, CONTROLLER)
         emu.frameadvance()
     end
 

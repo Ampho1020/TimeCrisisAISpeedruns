@@ -111,6 +111,14 @@ local function draw_hud()
   end
 end
 
+-- Controller index for the GunCon. joypad.set / joypad.setanalog MUST be told
+-- which controller to write to whenever the button names are bare ("A",
+-- "Trigger", "X Axis", "Y Axis") -- BizHawk's convention is that bare names
+-- require a controller argument, while prefixed names ("P1 A") do not. Passing
+-- 1 explicitly is unambiguous and matches the joypad.get(1) diagnostic dump
+-- that these key names were sourced from.
+local GUNCON_CONTROLLER = 1
+
 local function apply_input()
   -- Buttons: forward trigger and cover/peek INDEPENDENTLY. The game only lets a
   -- shot register when fully out of cover, so we don't couple them here -- the
@@ -119,25 +127,34 @@ local function apply_input()
   -- IMPORTANT: cover=true means the A button IS PRESSED, which causes the
   -- character to LEAVE cover (exposed). cover=false = A released = IN cover.
   -- The Python variable name is the inverse of the in-game cover state.
+  --
+  -- CRITICAL: the 2nd arg (controller index) is REQUIRED because our keys are
+  -- bare ("A", "Trigger"). Without it, joypad.set silently drops the override
+  -- table -- which was the root cause of SET != READ_BACK during training.
   joypad.set({
     [GUNCON_TRIGGER_KEY] = shoot,
     [GUNCON_COVER_KEY]   = cover,
-  })
+  }, GUNCON_CONTROLLER)
   -- Aim: drive the Guncon axes ourselves so the AI, not the host mouse, aims.
   -- Map normalized 0..1 (0 = left/top) onto the axis ranges and round to int.
+  -- Same controller-index requirement as joypad.set above.
   local ax = GUNCON_X_MIN + aim_x_norm * (GUNCON_X_MAX - GUNCON_X_MIN)
   local ay = GUNCON_Y_MIN + aim_y_norm * (GUNCON_Y_MAX - GUNCON_Y_MIN)
   joypad.setanalog({
     [GUNCON_AIM_X_KEY] = math.floor(ax + 0.5),
     [GUNCON_AIM_Y_KEY] = math.floor(ay + 0.5),
-  })
+  }, GUNCON_CONTROLLER)
 
-  -- Verify: read back with BARE key names ("A", "Trigger") from joypad.get dump,
-  -- regardless of what key name joypad.set uses.
+  -- Verify: read back with BARE key names ("A", "Trigger") from joypad.get dump.
+  -- NOTE: this reads the CURRENT input state; on some cores/builds it reflects
+  -- the override we just applied, on others it lags by a frame (shows the
+  -- previous poll). If SET and READ_BACK are consistently OPPOSITE (not just
+  -- one-frame behind), the setter is being dropped -- most commonly because
+  -- joypad.set was called without a controller index for bare key names.
   if DEBUG_INPUT_LOG and emu.framecount() % 30 == 0 then
-    local ok2, actual = pcall(joypad.get, 1)
-    local a_actual = ok2 and actual and tostring(actual["A"])       or "?"
-    local t_actual = ok2 and actual and tostring(actual["Trigger"]) or "?"
+    local ok2, actual = pcall(joypad.get, GUNCON_CONTROLLER)
+    local a_actual = ok2 and actual and tostring(actual[GUNCON_COVER_KEY])   or "?"
+    local t_actual = ok2 and actual and tostring(actual[GUNCON_TRIGGER_KEY]) or "?"
     print(string.format(
       "[apply fc=%d] SET cover=%s shoot=%s | READ_BACK A=%s trigger=%s | aim=(%.3f,%.3f)",
       emu.framecount(), tostring(cover), tostring(shoot),
@@ -209,19 +226,29 @@ comm.socketServerSetTimeout(1)
 local EMULATOR_SPEED_PERCENT = 3200
 client.speedmode(EMULATOR_SPEED_PERCENT)
 
--- One-time diagnostic: dump every control name the core exposes for controller
--- 1 so we can confirm the exact analog axis key strings (they vary by core /
--- Guncon binding). If the aim axes below silently do nothing, read this dump in
--- the Lua console and fix GUNCON_AIM_X_KEY / GUNCON_AIM_Y_KEY to match.
+-- One-time diagnostic: dump the control names the core exposes so we can
+-- confirm the exact key strings the setter needs. We dump BOTH views:
+--   * joypad.get(1) -> bare names ("A", "Trigger"). These are what our bridge
+--     uses, combined with GUNCON_CONTROLLER=1 on every joypad.set call.
+--   * joypad.get()  -> prefixed names ("P1 A", ...). Useful if the prefix on
+--     this build is unexpected (e.g. "Guncon", "Lightgun") -- if so, adjust
+--     GUNCON_CONTROLLER or fall back to the prefixed style.
 do
   local ok, state = pcall(joypad.get, 1)
   if ok and type(state) == "table" then
-    print("[bridge] controller 1 controls:")
+    print("[bridge] controller 1 controls (bare, via joypad.get(1)):")
     for name, value in pairs(state) do
       print(string.format("  %-18s = %s", tostring(name), tostring(value)))
     end
   else
     print("[bridge] joypad.get(1) diagnostic failed: " .. tostring(state))
+  end
+  local ok2, all_state = pcall(joypad.get)
+  if ok2 and type(all_state) == "table" then
+    print("[bridge] all controls (prefixed, via joypad.get()):")
+    for name, value in pairs(all_state) do
+      print(string.format("  %-22s = %s", tostring(name), tostring(value)))
+    end
   end
 end
 
