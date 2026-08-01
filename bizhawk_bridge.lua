@@ -123,6 +123,21 @@ local function apply_input()
     [GUNCON_AIM_X_KEY] = math.floor(ax + 0.5),
     [GUNCON_AIM_Y_KEY] = math.floor(ay + 0.5),
   })
+
+  -- Verify: read the input state back so we can confirm BizHawk is applying
+  -- our overrides (not letting hardware/mouse bleed through).
+  if DEBUG_INPUT_LOG then
+    debug_frame_count = debug_frame_count + 1
+    if debug_frame_count % 60 == 0 then
+      local ok2, actual = pcall(joypad.get, 1)
+      local a_actual = ok2 and actual and tostring(actual[GUNCON_COVER_KEY])   or "?"
+      local t_actual = ok2 and actual and tostring(actual[GUNCON_TRIGGER_KEY]) or "?"
+      print(string.format(
+        "[apply fc=%d] SET cover=%s shoot=%s | READ_BACK P1A=%s trigger=%s | aim=(%.3f,%.3f)",
+        emu.framecount(), tostring(cover), tostring(shoot),
+        a_actual, t_actual, aim_x_norm, aim_y_norm))
+    end
+  end
 end
 
 local function handle(line)
