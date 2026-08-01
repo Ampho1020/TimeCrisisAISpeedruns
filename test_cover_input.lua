@@ -32,10 +32,15 @@ local ADDR_SHOTS_FIRED  = 0x0B1F94
 local ADDR_TIMER        = 0x0B1D64
 
 -- GunCon keys and ranges (same as bridge)
-local TRIGGER_KEY = "P1 Trigger"
-local COVER_KEY   = "P1 A"
-local AIM_X_KEY   = "P1 X Axis"
-local AIM_Y_KEY   = "P1 Y Axis"
+-- NOTE: on this BizHawk 2.11.1 / Nymashock build the joypad.get() dump shows
+-- BARE key names (no "P1 " prefix). Using "P1 A" etc. here silently no-ops on
+-- joypad.set, which makes every phase of this diagnostic look like "no input"
+-- and gives the false conclusion that A can't be the cover button. Keep these
+-- in sync with GUNCON_*_KEY in bizhawk_bridge.lua.
+local TRIGGER_KEY = "Trigger"
+local COVER_KEY   = "A"
+local AIM_X_KEY   = "X Axis"
+local AIM_Y_KEY   = "Y Axis"
 local X_MIN, X_MAX = 0, 2640
 local Y_MIN, Y_MAX = 16, 256
 

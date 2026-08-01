@@ -66,7 +66,8 @@ class TimeCrisisEnv:
         self.ticks = 0
         self.prev_cover: bool = False
         self.cover_ticks: int = 0
-        self.cover_lock: int = 0   # minimum hold: once A is pressed keep it held
+        self.cover_lock: int = 0   # minimum hold: any transition holds for COVER_TRAVERSE_TICKS
+        self.cover_locked_value: bool = False   # what state the lock is holding
 
     # -- lifecycle ------------------------------------------------------
 
@@ -117,6 +118,7 @@ class TimeCrisisEnv:
         self.prev_cover = False
         self.cover_ticks = 0
         self.cover_lock = 0
+        self.cover_locked_value = False
         self.phase_infer.reset()
         return self._build_obs(self.prev, 0, 0, 0.0)
 
@@ -127,17 +129,19 @@ class TimeCrisisEnv:
         # cover=False -> A button RELEASED -> character STAYS in cover (protected)
         # The name is inverted vs. the game state; see cover_hold_reward docstring.
 
-        # Minimum hold lock: once the agent presses A (cover=True), keep it held
-        # for at least COVER_TRAVERSE_TICKS ticks so the exit animation completes.
-        # Shots can't register mid-transition anyway, so this costs nothing and
-        # prevents 1-tick taps that visually look like spam and never expose the
-        # character long enough to shoot.
+        # Minimum hold lock: BOTH transitions (into cover and out of cover) have
+        # to be held for COVER_TRAVERSE_TICKS ticks so the traverse animation can
+        # complete. Previously only the False→True transition (leaving cover) was
+        # locked, which let the policy re-enter cover for just a single tick
+        # before being forced back out -- the "1 tick cover in-out" flicker
+        # observed during training. Locking symmetrically kills that oscillation.
         if self.cover_lock > 0:
-            cover = True
+            cover = self.cover_locked_value
             self.cover_lock -= 1
-        elif cover and not self.prev_cover:
-            # Transition False→True: start the lock
+        elif cover != self.prev_cover:
+            # Any transition: lock the new state
             self.cover_lock = COVER_TRAVERSE_TICKS - 1  # -1 because this tick counts
+            self.cover_locked_value = cover
 
         # Gate the trigger: shots only register when the character is FULLY out of
         # cover (A held for at least COVER_TRAVERSE_TICKS consecutive ticks).  Firing
