@@ -87,6 +87,8 @@ FAIL_PENALTY       = 200.0
 COVER_TRAVERSE_TICKS = 3     # ticks (x FRAME_SKIP frames) to clear the traverse
 COVER_HOLD_REWARD    = 12.0  # per extra held tick, up to the traverse; capped
 COVER_FLIP_PENALTY   = 10.0  # subtracted from fitness per cover state toggle
+COVER_TIME_PENALTY   = 0.3   # per tick spent in cover; discourages camping
+SHOT_FIRED_REWARD    = 3.0   # per shot attempted; incentivises exposing to shoot
 
 # -----------------------------
 # Policy dims

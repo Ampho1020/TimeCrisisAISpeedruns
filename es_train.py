@@ -72,15 +72,16 @@ def train():
             clear_rate = float(np.mean([1.0 if x["cleared"] else 0.0 for x in infos]))
             timeout_rate = float(np.mean([1.0 if x["timed_out"] else 0.0 for x in infos]))
             mean_acc = float(np.mean([x["accuracy"] for x in infos]))
-            mean_flips = float(np.mean([x["cover_flips"] for x in infos]))
-            mean_hold  = float(np.mean([x["cover_hold_score"] for x in infos]))
+            mean_flips      = float(np.mean([x["cover_flips"]      for x in infos]))
+            mean_hold       = float(np.mean([x["cover_hold_score"] for x in infos]))
+            mean_cover_time = float(np.mean([x["cover_time"]       for x in infos]))
 
             print(
                 f"\n=== gen {gen:03d} | best {fitnesses[best_i]:8.2f} "
                 f"| mean {fitnesses.mean():8.2f} | std {std:7.2f} | spread {spread:8.2f} "
                 f"| clear {clear_rate:5.1%} | timeout {timeout_rate:5.1%} | t {best['elapsed']:6.1f} "
                 f"| dmg {best['damage']:4.0f} | acc {best['accuracy']:5.1%} "
-                f"| flips {mean_flips:5.1f} | hold {mean_hold:6.1f} ===\n",
+                f"| ctime {mean_cover_time:5.1f} | flips {mean_flips:5.1f} | hold {mean_hold:5.1f} ===\n",
                 flush=True,
             )
 
@@ -109,6 +110,7 @@ def train():
                 "mean_acc": mean_acc,
                 "mean_cover_flips": mean_flips,
                 "mean_cover_hold": mean_hold,
+                "mean_cover_time": mean_cover_time,
             })
 
             if gen % CHECKPOINT_EVERY == 0:

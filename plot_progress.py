@@ -37,27 +37,27 @@ def main():
     ax[1][1].set_title("best clear time")
 
     # --- cover behaviour ---
-    flips_g = col_gens("mean_cover_flips")
+    ctime_g = col_gens("mean_cover_time")
     hold_g  = col_gens("mean_cover_hold")
 
-    if flips_g:
-        ax[2][0].plot(flips_g, col("mean_cover_flips"), color="tab:purple")
-        ax[2][0].axhline(y=450, color="grey", linestyle="--", linewidth=0.8,
-                         label="random baseline (~450)")
-        ax[2][0].set_title("mean cover flips per episode   (↓ = less spam)")
+    if ctime_g:
+        ax[2][0].plot(ctime_g, col("mean_cover_time"), color="tab:purple")
+        ax[2][0].axhline(y=900, color="grey", linestyle="--", linewidth=0.8,
+                         label="always-cover baseline (900 ticks)")
+        ax[2][0].set_title("mean ticks in cover   (↓ = less camping)")
         ax[2][0].legend(fontsize=8)
     else:
         ax[2][0].text(0.5, 0.5, "no cover data yet",
                       ha="center", va="center", transform=ax[2][0].transAxes)
-        ax[2][0].set_title("mean cover flips per episode")
+        ax[2][0].set_title("mean ticks in cover per episode")
 
     if hold_g:
         ax[2][1].plot(hold_g, col("mean_cover_hold"), color="tab:cyan")
-        ax[2][1].set_title("mean cover hold score per episode   (↑ = better holds)")
+        ax[2][1].set_title("mean out-of-cover hold score   (↑ = proper uncover cycles)")
     else:
         ax[2][1].text(0.5, 0.5, "no cover data yet",
                       ha="center", va="center", transform=ax[2][1].transAxes)
-        ax[2][1].set_title("mean cover hold score per episode")
+        ax[2][1].set_title("mean out-of-cover hold score")
 
     for row in ax:
         for a in row:

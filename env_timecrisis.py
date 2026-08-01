@@ -4,9 +4,10 @@ import numpy as np
 
 from bridge_client import BridgeClient
 from config import (
-    CLEAR_BONUS, COVER_FLIP_PENALTY, COVER_HOLD_REWARD, COVER_TRAVERSE_TICKS,
-    DAMAGE_PENALTY, FAIL_PENALTY, FRAME_SKIP, HOST, MAX_TICKS,
-    PARTIAL_HIT_REWARD, PORT, RAM, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
+    CLEAR_BONUS, COVER_FLIP_PENALTY, COVER_HOLD_REWARD, COVER_TIME_PENALTY,
+    COVER_TRAVERSE_TICKS, DAMAGE_PENALTY, FAIL_PENALTY, FRAME_SKIP, HOST,
+    MAX_TICKS, PARTIAL_HIT_REWARD, PORT, RAM, SHOT_FIRED_REWARD, STATE_SLOT,
+    TIMEOUT_TIMER_THRESHOLD,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import act
@@ -27,38 +28,28 @@ def cover_hold_reward(
     traverse_ticks: int = COVER_TRAVERSE_TICKS,
     reward: float = COVER_HOLD_REWARD,
 ) -> float:
-    """Dense reward for holding EITHER cover state long enough for the
-    transition animation to complete -- applied symmetrically to in-cover
-    (True) and out-of-cover (False) runs.
+    """Reward for holding OUT OF COVER long enough for the exit animation
+    to complete.  Only False (out-of-cover) runs are counted:
 
-    For each maximal run of consecutive same-state ticks of length L:
-      * L == 1 (single-tick flip) earns nothing,
-      * each extra tick up to traverse_ticks adds ``reward``,
-      * runs longer than traverse_ticks are capped -- no camping bonus.
+      * a single-tick pop-out earns nothing,
+      * each additional tick out, up to traverse_ticks, adds ``reward``,
+      * runs longer than traverse_ticks are capped (no extra camping bonus).
 
-    Symmetry is the key fix: previously only True runs were rewarded, so the
-    optimal strategy was "3 ticks in-cover, 1 tick out" -- the 1-tick
-    out-of-cover period (5 frames) is shorter than the ~12-frame exit
-    animation, so the character never fully exits and shots never register.
-    Rewarding out-of-cover holds equally forces the agent to spend at least
-    traverse_ticks ticks OUT as well, completing the exit traverse and letting
-    shots land.
+    In-cover time is penalised separately via COVER_TIME_PENALTY so there is
+    no benefit to staying in cover -- the agent must come out to earn anything.
     """
     def run_value(run: int) -> float:
         return reward * min(max(run - 1, 0), traverse_ticks - 1)
 
-    if not cover_flags:
-        return 0.0
-
     total = 0.0
-    run = 1
-    for i in range(1, len(cover_flags)):
-        if cover_flags[i] == cover_flags[i - 1]:
+    run = 0
+    for held in cover_flags:
+        if not held:          # out of cover: extend the run
             run += 1
-        else:
+        else:                 # entering cover: finalise the out-of-cover run
             total += run_value(run)
-            run = 1
-    total += run_value(run)
+            run = 0
+    total += run_value(run)   # finalise last run
     return total
 
 
@@ -246,7 +237,10 @@ class TimeCrisisEnv:
             1 for i in range(1, len(cover_flags))
             if cover_flags[i] != cover_flags[i - 1]
         )
+        ticks_in_cover = sum(cover_flags)
         fitness += hold_score - COVER_FLIP_PENALTY * cover_flips
+        fitness -= COVER_TIME_PENALTY * ticks_in_cover
+        fitness += SHOT_FIRED_REWARD * total_fired
 
         return float(fitness), {
             "cleared": cleared,
@@ -259,4 +253,5 @@ class TimeCrisisEnv:
             "shots_hit": int(total_hits),
             "cover_flips": int(cover_flips),
             "cover_hold_score": float(hold_score),
+            "cover_time": int(ticks_in_cover),
         }
