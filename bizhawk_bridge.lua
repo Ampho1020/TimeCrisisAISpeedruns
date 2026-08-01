@@ -80,7 +80,9 @@ local hud_lines = {}
 local pending_steps = 0
 
 -- Confirmed Guncon controls on this build.
--- Keys are WITHOUT the "P1 " prefix on this core/build -- confirmed by joypad.get() dump.
+-- joypad.get() returns bare keys ("A", "Trigger", "X Axis", "Y Axis").
+-- joypad.set/setanalog use the same bare keys -- confirmed correct after
+-- controller dump showed no "P1 " prefix on this core/build.
 local GUNCON_TRIGGER_KEY = "Trigger"
 local GUNCON_COVER_KEY   = "A"
 local GUNCON_AIM_X_KEY   = "X Axis"
@@ -130,14 +132,14 @@ local function apply_input()
     [GUNCON_AIM_Y_KEY] = math.floor(ay + 0.5),
   })
 
-  -- Verify: read the input state back so we can confirm BizHawk is applying
-  -- our overrides (not letting hardware/mouse bleed through).
+  -- Verify: read back with BARE key names ("A", "Trigger") from joypad.get dump,
+  -- regardless of what key name joypad.set uses.
   if DEBUG_INPUT_LOG and emu.framecount() % 30 == 0 then
     local ok2, actual = pcall(joypad.get, 1)
-    local a_actual = ok2 and actual and tostring(actual[GUNCON_COVER_KEY])   or "?"
-    local t_actual = ok2 and actual and tostring(actual[GUNCON_TRIGGER_KEY]) or "?"
+    local a_actual = ok2 and actual and tostring(actual["A"])       or "?"
+    local t_actual = ok2 and actual and tostring(actual["Trigger"]) or "?"
     print(string.format(
-      "[apply fc=%d] SET cover=%s shoot=%s | READ_BACK P1A=%s trigger=%s | aim=(%.3f,%.3f)",
+      "[apply fc=%d] SET cover=%s shoot=%s | READ_BACK A=%s trigger=%s | aim=(%.3f,%.3f)",
       emu.framecount(), tostring(cover), tostring(shoot),
       a_actual, t_actual, aim_x_norm, aim_y_norm))
   end
@@ -237,14 +239,6 @@ print("[bridge] sent READY -- waiting for commands")
 -- block on socketServerResponse() before READY is ever sent -> deadlock
 -- (Python waits for READY, Lua waits for a command) and BizHawk freezes.
 emu.frameadvance()
-
--- GunCon input workaround.
--- joypad.set() called before emu.frameadvance() writes to an override table that
--- the Nymashock PS1 core does NOT consult when polling the GunCon; the core reads
--- its own internal controller state during frame execution instead.  Registering
--- apply_input() as an onframestart callback ensures the joypad overrides are
--- (re-)applied at the moment the PS1 actually polls, which makes them take effect.
-event.onframestart(apply_input, "GunConInputOverride")
 
 -- Main loop.
 -- CRITICAL ORDERING: the frame advance MUST happen before reading the next
