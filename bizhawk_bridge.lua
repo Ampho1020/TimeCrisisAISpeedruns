@@ -126,7 +126,7 @@ local function apply_input()
 
   -- Verify: read the input state back so we can confirm BizHawk is applying
   -- our overrides (not letting hardware/mouse bleed through).
-  if DEBUG_INPUT_LOG and emu.framecount() % 120 == 0 then
+  if DEBUG_INPUT_LOG and emu.framecount() % 30 == 0 then
     local ok2, actual = pcall(joypad.get, 1)
     local a_actual = ok2 and actual and tostring(actual[GUNCON_COVER_KEY])   or "?"
     local t_actual = ok2 and actual and tostring(actual[GUNCON_TRIGGER_KEY]) or "?"
@@ -219,6 +219,10 @@ end
 
 -- Announce readiness exactly once so Python's connect() can stop blocking and
 -- know the script is live and able to service commands.
+print("======================================================")
+print("[bridge] *** SCRIPT RELOADED -- VERSION WITH READ-BACK DEBUG ***")
+print("[bridge] DEBUG_INPUT_LOG = " .. tostring(DEBUG_INPUT_LOG))
+print("======================================================")
 comm.socketServerSend("READY\n")
 print("[bridge] sent READY -- waiting for commands")
 
@@ -231,8 +235,8 @@ emu.frameadvance()
 -- Debug input logging.  Set to true to print cover/shoot/aim each frame to the
 -- Lua console -- useful for verifying the bridge is sending what Python intends.
 -- Keep false during training (high-speed printing hammers the UI).
-local DEBUG_INPUT_LOG = false
-local debug_frame_count = 0
+local DEBUG_INPUT_LOG = true   -- set false for normal training
+local debug_frame_count = 0   -- used by main-loop rate limiter
 
 -- Main loop.
 -- CRITICAL ORDERING: the frame advance MUST happen before reading the next
