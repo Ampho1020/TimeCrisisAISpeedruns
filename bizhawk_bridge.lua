@@ -126,17 +126,14 @@ local function apply_input()
 
   -- Verify: read the input state back so we can confirm BizHawk is applying
   -- our overrides (not letting hardware/mouse bleed through).
-  if DEBUG_INPUT_LOG then
-    debug_frame_count = debug_frame_count + 1
-    if debug_frame_count % 60 == 0 then
-      local ok2, actual = pcall(joypad.get, 1)
-      local a_actual = ok2 and actual and tostring(actual[GUNCON_COVER_KEY])   or "?"
-      local t_actual = ok2 and actual and tostring(actual[GUNCON_TRIGGER_KEY]) or "?"
-      print(string.format(
-        "[apply fc=%d] SET cover=%s shoot=%s | READ_BACK P1A=%s trigger=%s | aim=(%.3f,%.3f)",
-        emu.framecount(), tostring(cover), tostring(shoot),
-        a_actual, t_actual, aim_x_norm, aim_y_norm))
-    end
+  if DEBUG_INPUT_LOG and emu.framecount() % 120 == 0 then
+    local ok2, actual = pcall(joypad.get, 1)
+    local a_actual = ok2 and actual and tostring(actual[GUNCON_COVER_KEY])   or "?"
+    local t_actual = ok2 and actual and tostring(actual[GUNCON_TRIGGER_KEY]) or "?"
+    print(string.format(
+      "[apply fc=%d] SET cover=%s shoot=%s | READ_BACK P1A=%s trigger=%s | aim=(%.3f,%.3f)",
+      emu.framecount(), tostring(cover), tostring(shoot),
+      a_actual, t_actual, aim_x_norm, aim_y_norm))
   end
 end
 
@@ -250,14 +247,6 @@ while true do
   if pending_steps > 0 then
     -- Advance the queued frame BEFORE reading any new commands.
     draw_hud()
-    if DEBUG_INPUT_LOG then
-      debug_frame_count = debug_frame_count + 1
-      if debug_frame_count % 10 == 0 then
-        print(string.format("[input fc=%d] cover=%s shoot=%s aim_x=%.3f aim_y=%.3f",
-              emu.framecount(), tostring(cover), tostring(shoot),
-              aim_x_norm, aim_y_norm))
-      end
-    end
     apply_input()
     pending_steps = pending_steps - 1
     emu.frameadvance()
