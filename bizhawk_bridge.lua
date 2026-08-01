@@ -238,6 +238,14 @@ print("[bridge] sent READY -- waiting for commands")
 -- (Python waits for READY, Lua waits for a command) and BizHawk freezes.
 emu.frameadvance()
 
+-- GunCon input workaround.
+-- joypad.set() called before emu.frameadvance() writes to an override table that
+-- the Nymashock PS1 core does NOT consult when polling the GunCon; the core reads
+-- its own internal controller state during frame execution instead.  Registering
+-- apply_input() as an onframestart callback ensures the joypad overrides are
+-- (re-)applied at the moment the PS1 actually polls, which makes them take effect.
+event.onframestart(apply_input, "GunConInputOverride")
+
 -- Main loop.
 -- CRITICAL ORDERING: the frame advance MUST happen before reading the next
 -- socket command.  The `step` handler responds "OK" immediately (before the
