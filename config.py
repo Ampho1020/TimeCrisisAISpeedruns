@@ -86,11 +86,12 @@ FAIL_PENALTY       = 200.0
 # future half-out "peek" the agent uses to read incoming bullets.
 COVER_TRAVERSE_TICKS = 3     # ticks (x FRAME_SKIP frames) to clear the traverse
 COVER_HOLD_REWARD    = 12.0  # per extra held tick, up to the traverse; capped
-COVER_FLIP_PENALTY   = 4.0   # subtracted from fitness per cover state toggle
+COVER_FLIP_PENALTY   = 10.0  # subtracted from fitness per cover state toggle
 
 # -----------------------------
 # Policy dims
-# obs = [timer_norm, life_norm, fired_norm, hit_norm, acc, last_hit, last_miss, prev_cover]
+# obs = [timer_norm, life_norm, fired_norm, hit_norm, acc, last_hit, last_miss, cover_phase]
+# cover_phase in [-1, +1]: sign = current cover state, magnitude = ticks_held / COVER_TRAVERSE_TICKS
 # act = [shoot_logit, cover_logit, aim_bias]
 # The bridge now accepts normalized aim_x/aim_y, but policy.py still emits a
 # single aim_bias scalar until the vision-based aiming step lands.

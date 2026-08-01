@@ -66,6 +66,7 @@ class TimeCrisisEnv:
         self.start_timer = 0
         self.ticks = 0
         self.prev_cover: bool = False
+        self.cover_ticks: int = 0
 
     # -- lifecycle ------------------------------------------------------
 
@@ -92,7 +93,7 @@ class TimeCrisisEnv:
         }
 
     @staticmethod
-    def _build_obs(cur, last_hit: int, last_miss: int, prev_cover: bool = False) -> np.ndarray:
+    def _build_obs(cur, last_hit: int, last_miss: int, cover_phase: float = 0.0) -> np.ndarray:
         fired = max(cur["shots_fired"], 1)
         return np.array([
             cur["timer"] / 10000.0,
@@ -102,7 +103,7 @@ class TimeCrisisEnv:
             cur["shots_hit"] / fired,
             float(last_hit),
             float(last_miss),
-            float(prev_cover),
+            cover_phase,
         ], dtype=np.float32)
 
     # -- episode --------------------------------------------------------
@@ -114,11 +115,13 @@ class TimeCrisisEnv:
         self.start_timer = self.prev["timer"]
         self.ticks = 0
         self.prev_cover = False
+        self.cover_ticks = 0
         self.phase_infer.reset()
-        return self._build_obs(self.prev, 0, 0, False)
+        return self._build_obs(self.prev, 0, 0, 0.0)
 
     def step(self, theta: np.ndarray):
-        shoot, cover, aim_bias = act(theta, self._build_obs(self.prev, 0, 0, self.prev_cover))
+        cover_phase = (self.cover_ticks / COVER_TRAVERSE_TICKS) * (1.0 if self.prev_cover else -1.0)
+        shoot, cover, aim_bias = act(theta, self._build_obs(self.prev, 0, 0, cover_phase))
         # Until the vision step lands, give the policy 1-D horizontal aim control
         # through its aim_bias output ([-1, 1] -> [0, 1] across the screen). This
         # is AI-driven aim, independent of the host mouse. Vertical stays centered;
@@ -183,8 +186,13 @@ class TimeCrisisEnv:
 
         last_hit  = 1 if total_hit > 0 else 0
         last_miss = 1 if (total_fired > 0 and total_hit == 0) else 0
-        obs = self._build_obs(self.prev, last_hit, last_miss, cover)
+        if cover == self.prev_cover:
+            self.cover_ticks = min(self.cover_ticks + 1, COVER_TRAVERSE_TICKS)
+        else:
+            self.cover_ticks = 1
         self.prev_cover = cover
+        cover_phase_next = (self.cover_ticks / COVER_TRAVERSE_TICKS) * (1.0 if cover else -1.0)
+        obs = self._build_obs(self.prev, last_hit, last_miss, cover_phase_next)
 
         done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
         info = {
