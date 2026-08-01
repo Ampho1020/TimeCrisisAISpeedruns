@@ -107,6 +107,10 @@ local function apply_input()
   -- Buttons: forward trigger and cover/peek INDEPENDENTLY. The game only lets a
   -- shot register when fully out of cover, so we don't couple them here -- the
   -- AI learns the timing (and the ~0.2s cover transition) on its own.
+  --
+  -- IMPORTANT: cover=true means the A button IS PRESSED, which causes the
+  -- character to LEAVE cover (exposed). cover=false = A released = IN cover.
+  -- The Python variable name is the inverse of the in-game cover state.
   joypad.set({
     [GUNCON_TRIGGER_KEY] = shoot,
     [GUNCON_COVER_KEY]   = cover,

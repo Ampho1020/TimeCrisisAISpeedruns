@@ -28,15 +28,18 @@ def cover_hold_reward(
     traverse_ticks: int = COVER_TRAVERSE_TICKS,
     reward: float = COVER_HOLD_REWARD,
 ) -> float:
-    """Reward for holding OUT OF COVER long enough for the exit animation
-    to complete.  Only False (out-of-cover) runs are counted:
+    """Reward for holding the EXPOSE button (A) long enough for the exit
+    animation to complete.
 
-      * a single-tick pop-out earns nothing,
-      * each additional tick out, up to traverse_ticks, adds ``reward``,
-      * runs longer than traverse_ticks are capped (no extra camping bonus).
+    NOTE ON NAMING: ``cover=True`` in code means the A button IS PRESSED,
+    which makes the character EXIT cover (exposed, can shoot, can be hit).
+    ``cover=False`` means A is NOT pressed = character stays IN cover.
+    This is the opposite of what the variable name suggests.
 
-    In-cover time is penalised separately via COVER_TIME_PENALTY so there is
-    no benefit to staying in cover -- the agent must come out to earn anything.
+    Only True (A-pressed = exposed) runs are counted:
+      * a single-tick tap earns nothing,
+      * each additional tick exposed, up to traverse_ticks, adds ``reward``,
+      * runs longer than traverse_ticks are capped.
     """
     def run_value(run: int) -> float:
         return reward * min(max(run - 1, 0), traverse_ticks - 1)
@@ -44,9 +47,9 @@ def cover_hold_reward(
     total = 0.0
     run = 0
     for held in cover_flags:
-        if not held:          # out of cover: extend the run
+        if held:              # A pressed = character exiting/out of cover
             run += 1
-        else:                 # entering cover: finalise the out-of-cover run
+        else:                 # A released = back to cover: finalise the exposed run
             total += run_value(run)
             run = 0
     total += run_value(run)   # finalise last run
@@ -118,6 +121,15 @@ class TimeCrisisEnv:
     def step(self, theta: np.ndarray):
         cover_phase = (self.cover_ticks / COVER_TRAVERSE_TICKS) * (1.0 if self.prev_cover else -1.0)
         shoot, cover, aim_bias = act(theta, self._build_obs(self.prev, 0, 0, cover_phase))
+        # cover=True  -> A button PRESSED  -> character EXITS cover (exposed, can shoot)
+        # cover=False -> A button RELEASED -> character STAYS in cover (protected)
+        # The name is inverted vs. the game state; see cover_hold_reward docstring.
+
+        # Gate the trigger: shots only register when the character is FULLY out of
+        # cover (A held for at least COVER_TRAVERSE_TICKS consecutive ticks).  Firing
+        # during the transition animation silently fails in-game, so we block it here
+        # to avoid wasting the edge-trigger on a guaranteed miss.
+        shoot_allowed = cover and self.prev_cover and self.cover_ticks >= COVER_TRAVERSE_TICKS
         # Until the vision step lands, give the policy 1-D horizontal aim control
         # through its aim_bias output ([-1, 1] -> [0, 1] across the screen). This
         # is AI-driven aim, independent of the host mouse. Vertical stays centered;
@@ -132,8 +144,9 @@ class TimeCrisisEnv:
         for f in range(FRAME_SKIP):
             # Edge-trigger the shot: press briefly, release. Holding the
             # button for all 5 frames makes fire rate uncontrollable.
+            # shoot_allowed ensures the trigger only fires when fully exposed.
             self.client.set_input(
-                shoot=bool(shoot and f < 2),
+                shoot=bool(shoot and shoot_allowed and f < 2),
                 cover=cover,
                 aim_x=aim_x,
                 aim_y=aim_y,
@@ -237,7 +250,7 @@ class TimeCrisisEnv:
             1 for i in range(1, len(cover_flags))
             if cover_flags[i] != cover_flags[i - 1]
         )
-        ticks_in_cover = sum(cover_flags)
+        ticks_in_cover = sum(1 for f in cover_flags if not f)  # A NOT pressed = protected
         fitness += hold_score - COVER_FLIP_PENALTY * cover_flips
         fitness -= COVER_TIME_PENALTY * ticks_in_cover
         fitness += SHOT_FIRED_REWARD * total_fired
