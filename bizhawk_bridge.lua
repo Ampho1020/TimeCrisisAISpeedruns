@@ -80,10 +80,11 @@ local hud_lines = {}
 local pending_steps = 0
 
 -- Confirmed Guncon controls on this build.
-local GUNCON_TRIGGER_KEY = "P1 Trigger"
-local GUNCON_COVER_KEY   = "P1 A"
-local GUNCON_AIM_X_KEY   = "P1 X Axis"
-local GUNCON_AIM_Y_KEY   = "P1 Y Axis"
+-- Keys are WITHOUT the "P1 " prefix on this core/build -- confirmed by joypad.get() dump.
+local GUNCON_TRIGGER_KEY = "Trigger"
+local GUNCON_COVER_KEY   = "A"
+local GUNCON_AIM_X_KEY   = "X Axis"
+local GUNCON_AIM_Y_KEY   = "Y Axis"
 -- Axis ranges the Guncon expects (from RAM/input probing on this build).
 local GUNCON_X_MIN, GUNCON_X_MAX = 0, 2640
 local GUNCON_Y_MIN, GUNCON_Y_MAX = 16, 256
