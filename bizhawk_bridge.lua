@@ -216,28 +216,44 @@ print("[bridge] sent READY -- waiting for commands")
 -- (Python waits for READY, Lua waits for a command) and BizHawk freezes.
 emu.frameadvance()
 
--- Main loop. KEY FIX: a game frame is advanced ONLY when a "step" is pending.
--- Every other command (read_u16, set_input, load/save, frame, hud) is a pure
--- query/config and must NOT consume a frame -- otherwise a single decision tick
--- (set_input + step + 4 reads, x5 frame-skips) would advance ~30 frames instead
--- of 5, throttle throughput to 60 cmd/s, and skew every RAM delta. When there is
--- no frame to advance we call emu.yield() instead of emu.frameadvance(): it keeps
--- the loop and BizHawk UI responsive (and the comm transport pumping) without
--- moving the game forward.
+-- Debug input logging.  Set to true to print cover/shoot/aim each frame to the
+-- Lua console -- useful for verifying the bridge is sending what Python intends.
+-- Keep false during training (high-speed printing hammers the UI).
+local DEBUG_INPUT_LOG = false
+local debug_frame_count = 0
+
+-- Main loop.
+-- CRITICAL ORDERING: the frame advance MUST happen before reading the next
+-- socket command.  The `step` handler responds "OK" immediately (before the
+-- frame is actually advanced), so at high emulation speed Python can send the
+-- next tick's set_input before we've called apply_input() for the current tick.
+-- If we read the socket first (old order), that next set_input overwrites
+-- cover/shoot and the wrong values get applied -- producing 1-frame spam.
+-- Solution: check pending_steps at the TOP of the loop; only read the socket
+-- when there is nothing left to advance.
 while true do
-  local line = comm.socketServerResponse()
-  if line and line ~= "" then
-    local ok, resp = pcall(handle, line)
-    comm.socketServerSend(ok and resp or ("ERR " .. tostring(resp) .. "\n"))
-  end
-
-  draw_hud()
-
   if pending_steps > 0 then
+    -- Advance the queued frame BEFORE reading any new commands.
+    draw_hud()
+    if DEBUG_INPUT_LOG then
+      debug_frame_count = debug_frame_count + 1
+      if debug_frame_count % 10 == 0 then
+        print(string.format("[input fc=%d] cover=%s shoot=%s aim_x=%.3f aim_y=%.3f",
+              emu.framecount(), tostring(cover), tostring(shoot),
+              aim_x_norm, aim_y_norm))
+      end
+    end
     apply_input()
     pending_steps = pending_steps - 1
-    emu.frameadvance()   -- advance exactly one game frame for this step
+    emu.frameadvance()
   else
-    emu.yield()          -- stay live without consuming a frame
+    -- No frame pending: read and service exactly one socket command, then yield.
+    local line = comm.socketServerResponse()
+    if line and line ~= "" then
+      local ok, resp = pcall(handle, line)
+      comm.socketServerSend(ok and resp or ("ERR " .. tostring(resp) .. "\n"))
+    end
+    draw_hud()
+    emu.yield()
   end
 end
