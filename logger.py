@@ -8,6 +8,7 @@ class TrainingLogger:
     FIELDS = [
         "gen", "best", "mean", "std", "spread",
         "clear_rate", "best_time", "best_damage", "best_acc", "mean_acc",
+        "mean_cover_flips", "mean_cover_hold",
     ]
 
     def __init__(self, path: str):

@@ -236,12 +236,12 @@ class TimeCrisisEnv:
             # Partial credit ONLY on failure, so early generations have
             # something to climb. Never distorts successful runs.
             fitness = PARTIAL_HIT_REWARD * total_hits - FAIL_PENALTY
-        fitness += cover_hold_reward(cover_flags)
+        hold_score = cover_hold_reward(cover_flags)
         cover_flips = sum(
             1 for i in range(1, len(cover_flags))
             if cover_flags[i] != cover_flags[i - 1]
         )
-        fitness -= COVER_FLIP_PENALTY * cover_flips
+        fitness += hold_score - COVER_FLIP_PENALTY * cover_flips
 
         return float(fitness), {
             "cleared": cleared,
@@ -252,4 +252,6 @@ class TimeCrisisEnv:
             "accuracy": float(total_hits / max(total_fired, 1)),
             "shots_fired": int(total_fired),
             "shots_hit": int(total_hits),
+            "cover_flips": int(cover_flips),
+            "cover_hold_score": float(hold_score),
         }

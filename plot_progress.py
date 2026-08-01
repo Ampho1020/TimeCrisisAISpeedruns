@@ -16,9 +16,10 @@ def main():
         return
 
     gens = [int(r["gen"]) for r in rows]
-    col = lambda k: [float(r[k]) for r in rows]
+    col = lambda k: [float(r[k]) for r in rows if r.get(k, "") != ""]
+    col_gens = lambda k: [int(r["gen"]) for r in rows if r.get(k, "") != ""]
 
-    fig, ax = plt.subplots(2, 2, figsize=(11, 7))
+    fig, ax = plt.subplots(3, 2, figsize=(11, 10))
 
     ax[0][0].plot(gens, col("best"), label="best")
     ax[0][0].plot(gens, col("mean"), label="mean")
@@ -34,6 +35,29 @@ def main():
 
     ax[1][1].plot(gens, col("best_time"), color="tab:red")
     ax[1][1].set_title("best clear time")
+
+    # --- cover behaviour ---
+    flips_g = col_gens("mean_cover_flips")
+    hold_g  = col_gens("mean_cover_hold")
+
+    if flips_g:
+        ax[2][0].plot(flips_g, col("mean_cover_flips"), color="tab:purple")
+        ax[2][0].axhline(y=450, color="grey", linestyle="--", linewidth=0.8,
+                         label="random baseline (~450)")
+        ax[2][0].set_title("mean cover flips per episode   (↓ = less spam)")
+        ax[2][0].legend(fontsize=8)
+    else:
+        ax[2][0].text(0.5, 0.5, "no cover data yet",
+                      ha="center", va="center", transform=ax[2][0].transAxes)
+        ax[2][0].set_title("mean cover flips per episode")
+
+    if hold_g:
+        ax[2][1].plot(hold_g, col("mean_cover_hold"), color="tab:cyan")
+        ax[2][1].set_title("mean cover hold score per episode   (↑ = better holds)")
+    else:
+        ax[2][1].text(0.5, 0.5, "no cover data yet",
+                      ha="center", va="center", transform=ax[2][1].transAxes)
+        ax[2][1].set_title("mean cover hold score per episode")
 
     for row in ax:
         for a in row:
