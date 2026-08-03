@@ -68,6 +68,8 @@ class TimeCrisisEnv:
         self.cover_lock: int = 0   # minimum hold: any transition holds for COVER_TRAVERSE_TICKS
         self.cover_locked_value: bool = False   # what state the lock is holding
         self.ammo_left: int = AMMO_MAX_ROUNDS
+        self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
+        self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
 
     # -- lifecycle ------------------------------------------------------
 
@@ -95,7 +97,8 @@ class TimeCrisisEnv:
 
     @staticmethod
     def _build_obs(cur, last_hit: int, last_miss: int, cover_phase: float = 0.0,
-                   ammo_left: int = AMMO_MAX_ROUNDS) -> np.ndarray:
+                   ammo_left: int = AMMO_MAX_ROUNDS,
+                   prev_aim_x_bias: float = 0.0, prev_aim_y_bias: float = 0.0) -> np.ndarray:
         fired = max(cur["shots_fired"], 1)
         return np.array([
             cur["timer"] / 10000.0,
@@ -107,6 +110,8 @@ class TimeCrisisEnv:
             float(last_miss),
             cover_phase,
             ammo_left / AMMO_MAX_ROUNDS,
+            prev_aim_x_bias,
+            prev_aim_y_bias,
         ], dtype=np.float32)
 
     # -- episode --------------------------------------------------------
@@ -122,14 +127,27 @@ class TimeCrisisEnv:
         self.cover_lock = 0
         self.cover_locked_value = False
         self.ammo_left = AMMO_MAX_ROUNDS
+        self.prev_aim_x_bias = 0.0
+        self.prev_aim_y_bias = 0.0
         self.phase_infer.reset()
-        return self._build_obs(self.prev, 0, 0, 0.0, self.ammo_left)
+        return self._build_obs(self.prev, 0, 0, 0.0, self.ammo_left, self.prev_aim_x_bias, self.prev_aim_y_bias)
 
     def step(self, theta: np.ndarray):
         cover_phase = (self.cover_ticks / COVER_TRAVERSE_TICKS) * (1.0 if self.prev_cover else -1.0)
         shoot, cover, aim_x_bias, aim_y_bias = act(
-            theta, self._build_obs(self.prev, 0, 0, cover_phase, self.ammo_left)
+            theta, self._build_obs(
+                self.prev, 0, 0, cover_phase, self.ammo_left,
+                self.prev_aim_x_bias, self.prev_aim_y_bias,
+            )
         )
+        # Feed this tick's aim decision back as next tick's "previous aim" obs.
+        # The policy is a plain feedforward net with no recurrence of its own;
+        # without this it can't tell what it last aimed at and has no signal
+        # to shift away from a spot that isn't working. Storing the raw
+        # [-1, 1] bias (not the clamped screen position) keeps it in the same
+        # scale the network already outputs/consumes.
+        self.prev_aim_x_bias = float(aim_x_bias)
+        self.prev_aim_y_bias = float(aim_y_bias)
         # cover=True  -> A button PRESSED  -> character EXITS cover (exposed, can shoot)
         # cover=False -> A button RELEASED -> character STAYS in cover (protected)
         # The name is inverted vs. the game state; see cover_hold_reward docstring.
@@ -245,7 +263,10 @@ class TimeCrisisEnv:
             self.cover_ticks = 1
         self.prev_cover = cover
         cover_phase_next = (self.cover_ticks / COVER_TRAVERSE_TICKS) * (1.0 if cover else -1.0)
-        obs = self._build_obs(self.prev, last_hit, last_miss, cover_phase_next, self.ammo_left)
+        obs = self._build_obs(
+            self.prev, last_hit, last_miss, cover_phase_next, self.ammo_left,
+            self.prev_aim_x_bias, self.prev_aim_y_bias,
+        )
 
         done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
         info = {

@@ -34,7 +34,11 @@ STATE_SLOT = 1        # savestate slot holding Stage 1 Area A start
 # We catch the moment the timer reaches this threshold so the episode ends as a
 # timeout failure. If you locate a dedicated continue-screen RAM flag, wire it in
 # via RamMap and prefer it -- this timer zero-cross is the address-free fallback.
-TIMEOUT_TIMER_THRESHOLD = 0
+# Set with margin above the true zero: at FRAME_SKIP-sized steps a fast tick can
+# jump clean past 0 without ever sampling it, missing the exact zero-cross. No
+# clear is ever legitimately optimal with under a second left, so treating
+# anything <= 60 (one second at 60Hz) as "timed out" catches the drop reliably.
+TIMEOUT_TIMER_THRESHOLD = 60
 
 # -----------------------------
 # ES hyperparameters
@@ -118,13 +122,18 @@ RELOAD_BONUS = 15.0
 # -----------------------------
 # Policy dims
 # obs = [timer_norm, life_norm, fired_norm, hit_norm, acc, last_hit, last_miss,
-#        cover_phase, ammo_norm]
+#        cover_phase, ammo_norm, prev_aim_x_bias, prev_aim_y_bias]
 # cover_phase in [-1, +1]: sign = current cover state, magnitude = ticks_held / COVER_TRAVERSE_TICKS
 # ammo_norm = ammo_left / AMMO_MAX_ROUNDS, in [0, 1]
+# prev_aim_x_bias / prev_aim_y_bias in [-1, 1]: the aim_x_bias/aim_y_bias the
+# policy itself output on the PREVIOUS tick, fed back in as the next tick's
+# input. The net is otherwise purely feedforward/memoryless, so without this
+# it has no way to know what it last chose -- this closes that loop, letting
+# weights learn to shift aim across ticks instead of latching onto one spot.
 # act = [shoot_logit, cover_logit, aim_x_bias, aim_y_bias]
 # Both aim axes are policy-controlled: bias in [-1, 1] -> screen position in [0, 1].
 # -----------------------------
-OBS_DIM = 9
+OBS_DIM = 11
 HIDDEN  = 64
 ACT_DIM = 4
 
