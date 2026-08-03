@@ -63,10 +63,10 @@ BASE_PORT   = PORT            # worker i listens on BASE_PORT + i
 # per-window commands). Fill in the paths for your machine. If False, launch
 # NUM_WORKERS instances yourself, each with --socket_port = BASE_PORT + i, and
 # Python just connects to them.
-AUTO_LAUNCH_BIZHAWK = False
-BIZHAWK_LAUNCH      = "./EmuHawkMono.sh"  # EmuHawk launcher (Linux: EmuHawkMono.sh)
-BIZHAWK_ROM         = ""                  # absolute path to the Time Crisis disc image
-BIZHAWK_LUA         = "bizhawk_bridge.lua"  # absolute path recommended
+AUTO_LAUNCH_BIZHAWK = True
+BIZHAWK_LAUNCH      = "/home/ampho/Downloads/BizHawk/BizHawk-2.11.1-linux-x64/./EmuHawkMono.sh"  # EmuHawk launcher (Linux: EmuHawkMono.sh)
+BIZHAWK_ROM         = "/home/ampho/Downloads/TimeCrisis_NTSC/Time Crisis.cue"                  # absolute path to the Time Crisis disc image
+BIZHAWK_LUA         = "/home/ampho/TimeCrisisAISpeedruns/bizhawk_bridge.lua"  # absolute path recommended
 BIZHAWK_EXTRA_ARGS  = []                  # any extra EmuHawk CLI flags
 
 # -----------------------------
