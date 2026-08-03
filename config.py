@@ -74,33 +74,59 @@ BIZHAWK_EXTRA_ARGS  = []                  # any extra EmuHawk CLI flags
 # -----------------------------
 CLEAR_BONUS        = 1000.0
 DAMAGE_PENALTY     = 300.0   # deliberately harsh: a hit is never worth it
-PARTIAL_HIT_REWARD = 8.0     # only applies to FAILED episodes
+HIT_REWARD         = 5.0     # per confirmed hit, all episodes; teaches aim
 FAIL_PENALTY       = 200.0
 
-# Cover is a HOLD, not a tap: the ~0.2s (~12-frame) in/out traverse is only
-# useful if the button is held through it. We reward holding DENSELY -- each
-# extra consecutive held tick, up to COVER_TRAVERSE_TICKS, adds COVER_HOLD_REWARD
-# -- so evolution gets a smooth gradient to climb from spamming toward holding.
-# A length-1 tap earns nothing and holding past the traverse is capped (no
-# camping). It never penalizes short/partial holds, so it won't punish the
-# future half-out "peek" the agent uses to read incoming bullets.
+# Cover is a HOLD, not a tap: the ~0.2s (~12-frame) in/out traverse only
+# completes if the button is held through it. COVER_TRAVERSE_TICKS is a game-
+# mechanics constant (minimum hold lock so a transition can't be reversed
+# mid-animation; also gates when shots are allowed to register) -- it is NOT
+# a reward shaping knob. We used to also reward holding densely
+# (COVER_HOLD_REWARD), penalize flip-flopping (COVER_FLIP_PENALTY) and camping
+# (COVER_TIME_PENALTY), and give extra hit credit only on failed episodes
+# (PARTIAL_HIT_REWARD). All four were removed: they just layered noisy shaping
+# on top of the raw ES signal instead of letting evolution optimize the actual
+# outcome (clear/fail, elapsed time, damage, hits). cover_flips/cover_hold/
+# cover_time are still tracked and logged for diagnostics, just no longer fed
+# into fitness.
 COVER_TRAVERSE_TICKS = 3     # ticks (x FRAME_SKIP frames) to clear the traverse
-COVER_HOLD_REWARD    = 12.0  # per extra held tick, up to the traverse; capped
-COVER_FLIP_PENALTY   = 10.0  # subtracted from fitness per cover state toggle
-COVER_TIME_PENALTY   = 0.3   # per tick spent in cover; discourages camping
-SHOT_FIRED_REWARD    = 3.0   # per shot attempted; incentivises exposing to shoot
+
+# NOTE: we deliberately do NOT reward raw shots fired (nor per-shot reload/
+# active-fire bonuses). Any reward that scales with shot COUNT is a magdump
+# hack -- the policy learns to spam the trigger for free reward regardless of
+# whether it hits anything. Only HIT_REWARD (accuracy) and RELOAD_BONUS (a
+# flat, count-independent event reward, see below) touch shooting behaviour.
+
+# Rounds per clip. Time Crisis' Guncon always starts a screen with a full 6-
+# round clip; we mirror that in software (ammo_left is not read from RAM --
+# there's no known counter for it) so the policy can observe when it's about
+# to run dry and learn to duck instead of dry-firing.
+AMMO_MAX_ROUNDS = 6
+
+# Penalty per tick the agent is fully exposed with an EMPTY clip (ammo_left
+# == 0 at the start of the tick) instead of ducking back into cover to
+# reload. This no longer fires just because the agent chose not to shoot --
+# only true "should have ducked, gun is empty" ticks count.
+DRY_FIRE_PENALTY = 2.0
+
+# Flat bonus (NOT scaled by shots fired) awarded exactly once, on the tick
+# the agent ducks back into cover with an empty clip (ammo_left == 0).
+# Reinforces the "empty clip -> duck to reload" loop without rewarding shot
+# count itself, so it can't be farmed by magdumping.
+RELOAD_BONUS = 15.0
 
 # -----------------------------
 # Policy dims
-# obs = [timer_norm, life_norm, fired_norm, hit_norm, acc, last_hit, last_miss, cover_phase]
+# obs = [timer_norm, life_norm, fired_norm, hit_norm, acc, last_hit, last_miss,
+#        cover_phase, ammo_norm]
 # cover_phase in [-1, +1]: sign = current cover state, magnitude = ticks_held / COVER_TRAVERSE_TICKS
-# act = [shoot_logit, cover_logit, aim_bias]
-# The bridge now accepts normalized aim_x/aim_y, but policy.py still emits a
-# single aim_bias scalar until the vision-based aiming step lands.
+# ammo_norm = ammo_left / AMMO_MAX_ROUNDS, in [0, 1]
+# act = [shoot_logit, cover_logit, aim_x_bias, aim_y_bias]
+# Both aim axes are policy-controlled: bias in [-1, 1] -> screen position in [0, 1].
 # -----------------------------
-OBS_DIM = 8
+OBS_DIM = 9
 HIDDEN  = 64
-ACT_DIM = 3
+ACT_DIM = 4
 
 # -----------------------------
 # Logging / feedback

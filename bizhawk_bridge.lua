@@ -69,7 +69,7 @@ local DOMAIN = "MainRAM"
 
 -- Debug input logging. Set true to get READ_BACK lines in the Lua console.
 -- Must be declared here (top of file) so apply_input() and startup code both see it.
-local DEBUG_INPUT_LOG = true   -- set false for normal training
+local DEBUG_INPUT_LOG = false   -- set false for normal training
 local debug_frame_count = 0
 
 local shoot, cover = false, false
