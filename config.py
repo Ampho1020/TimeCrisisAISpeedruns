@@ -64,9 +64,22 @@ CHECKPOINT_EVERY = 10
 # SIGMA * STAGNATION_SIGMA_MULT instead of SIGMA, to try to reintroduce
 # variance and escape the flat/no-gradient trap. Reverts to normal SIGMA as
 # soon as std recovers above the threshold for one generation.
+#
+# Values tuned against the harder 12-enemy/3-target sim model
+# (tests/test_simulation.py ExtendedMiniESTrendSuite, 2026-08-04): the
+# tougher task made the ES population stall into flat multi-generation
+# "never expose" collapses more often than the original 6-enemy sim. A/B
+# comparison across 5 seeds x 80 generations (patience=3/mult=3.0 baseline vs
+# patience=2/mult=5.0) showed reacting sooner (patience 3 -> 2) with a
+# stronger kick (mult 3.0 -> 5.0) meaningfully improves outcomes: more
+# generations reaching a clear (10.4 vs 8.2 avg), fewer flat/collapsed
+# generations (13.4 vs 15.6 avg), and a less negative final-generation mean
+# fitness (-299.3 vs -633.5 avg). Not a full grid search -- if real training
+# still stalls often, re-run that A/B experiment (see repo memory) with a
+# wider sweep before hand-tuning further.
 STD_STAGNATION_THRESHOLD = 1e-3
-STAGNATION_PATIENCE      = 3     # consecutive flat generations before kicking
-STAGNATION_SIGMA_MULT    = 3.0   # SIGMA multiplier while kicking
+STAGNATION_PATIENCE      = 2     # consecutive flat generations before kicking
+STAGNATION_SIGMA_MULT    = 5.0   # SIGMA multiplier while kicking
 
 # -----------------------------
 # Parallel training

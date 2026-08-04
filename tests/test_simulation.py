@@ -23,6 +23,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import (
     ACT_DIM, AMMO_MAX_ROUNDS, HIDDEN, OBS_DIM, PEEK_TRAVERSE_TICKS, RAM,
+    SIGMA as CFG_SIGMA, STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT,
+    STD_STAGNATION_THRESHOLD,
 )
 from env_timecrisis import TimeCrisisEnv
 from phase_inference import PhaseInferer
@@ -38,8 +40,19 @@ class SimulatedGame:
 
     Models:
       * a countdown timer (heuristic clear = timer jumps up)
-      * an enemy health pool  (ENEMIES hits clear the screen)
-      * shooting while peeking (hit probability scales with aim centering)
+      * a screen with MORE enemies than fit in one magazine
+        (ENEMIES_TOTAL > AMMO_MAX_ROUNDS), spawned in waves of
+        TARGET_POSITIONS at a time -- clearing a screen requires at least
+        one real duck-to-reload cycle, unlike the earlier
+        one-clip-clears-everything model.
+      * shooting while peeking: a hit only registers if the aim lands near
+        one of the current wave's alive target positions (Euclidean
+        distance with a linear falloff, floored at a minimum chance) --
+        not just "close to screen center" like the old model. This is a
+        deliberately rough approximation of real enemy hitboxes ("3
+        certain spots"), good enough to force the aim to actually move
+        between distinct locations instead of camping one spot or
+        exploiting a screen-centered heuristic.
       * a magazine capped at AMMO_MAX_ROUNDS: once empty, further trigger
         pulls have no game-side effect (no shots_fired/shots_hit increment)
         until the character ducks back into cover, which reloads a full clip.
@@ -51,10 +64,18 @@ class SimulatedGame:
     """
 
     TIMER_START = 5000
-    ENEMIES = 6           # hits needed to clear (one full clip)
-    HIT_PROB_CENTERED = 0.75   # hit chance with perfectly centred aim
+    # 3 fixed on-screen target spots ("good enough", not real Time Crisis
+    # coordinates) that enemies spawn at, one wave (<= 3 alive) at a time.
+    TARGET_POSITIONS = [(0.3, 0.4), (0.5, 0.65), (0.7, 0.4)]
+    HIT_PROB_PEAK       = 0.75   # hit chance with aim exactly on a target
+    HIT_PROB_FLOOR      = 0.05   # hit chance floor once aim is far from every target
+    HIT_FALLOFF_RADIUS  = 0.3    # distance at which hit_prob decays to the floor
+    # More enemies than one magazine (AMMO_MAX_ROUNDS) can clear -- a real
+    # clear needs at least one duck-to-reload cycle. Kept a multiple of
+    # len(TARGET_POSITIONS) so every wave is a full 3-enemy wave.
+    ENEMIES_TOTAL = 12
     DAMAGE_PER_HIT = 20        # player HP lost per enemy shot
-    DAMAGE_PROB_PER_FRAME = 0.002  # ~12% / second when exposed
+    DAMAGE_PROB_PER_FRAME = 0.002  # ~12% / second when exposed while enemies remain
 
     def __init__(self, seed: int = 0):
         self._rng = np.random.default_rng(seed)
@@ -66,13 +87,22 @@ class SimulatedGame:
         self.shots_hit = 0
         self.timer = self.TIMER_START
         self.life = 100
-        self.enemies_left = self.ENEMIES
+        self.enemies_left = self.ENEMIES_TOTAL   # total kills still needed
         self.cleared = False
         self._shoot = False
         self._peek = False
         self._aim_x = 0.5
         self._aim_y = 0.5
         self.ammo = AMMO_MAX_ROUNDS
+        self._wave_alive = [False] * len(self.TARGET_POSITIONS)
+        self._spawn_wave()
+
+    def _spawn_wave(self):
+        """(Re)populate up to len(TARGET_POSITIONS) targets from the
+        remaining pool. Called on reset and whenever a wave is fully
+        cleared but enemies still remain."""
+        n_active = min(len(self.TARGET_POSITIONS), self.enemies_left)
+        self._wave_alive = [i < n_active for i in range(len(self.TARGET_POSITIONS))]
 
     def reset(self):
         """Called by load_state; resets game state but not the RNG."""
@@ -89,6 +119,19 @@ class SimulatedGame:
         self._aim_x = float(aim_x)
         self._aim_y = float(aim_y)
 
+    def _nearest_alive_target(self):
+        """Return (index, distance) of the alive target nearest the current
+        aim, or (None, None) if no target is currently alive."""
+        best_i, best_d = None, None
+        for i, (pos, alive) in enumerate(zip(self.TARGET_POSITIONS, self._wave_alive)):
+            if not alive:
+                continue
+            tx, ty = pos
+            d = ((self._aim_x - tx) ** 2 + (self._aim_y - ty) ** 2) ** 0.5
+            if best_d is None or d < best_d:
+                best_i, best_d = i, d
+        return best_i, best_d
+
     def step_frame(self):
         """Advance one emulator frame."""
         self.frame_count += 1
@@ -104,15 +147,23 @@ class SimulatedGame:
         if self._shoot and self.enemies_left > 0 and self.ammo > 0:
             self.ammo -= 1
             self.shots_fired = (self.shots_fired + 1) & 0xFFFF
-            aim_error = abs(self._aim_x - 0.5) + abs(self._aim_y - 0.5)
-            hit_prob  = max(0.05, self.HIT_PROB_CENTERED - aim_error)
-            if self._rng.random() < hit_prob:
-                self.shots_hit    = (self.shots_hit + 1) & 0xFFFF
-                self.enemies_left -= 1
-                if self.enemies_left == 0:
-                    # Stage clear: jump timer upward so the Python heuristic fires.
-                    self.cleared = True
-                    self.timer   = (self.timer + 10_000) & 0xFFFF
+            idx, dist = self._nearest_alive_target()
+            if idx is not None:
+                hit_prob = max(
+                    self.HIT_PROB_FLOOR,
+                    self.HIT_PROB_PEAK - (self.HIT_PROB_PEAK - self.HIT_PROB_FLOOR)
+                    * dist / self.HIT_FALLOFF_RADIUS,
+                )
+                if self._rng.random() < hit_prob:
+                    self.shots_hit = (self.shots_hit + 1) & 0xFFFF
+                    self.enemies_left -= 1
+                    self._wave_alive[idx] = False
+                    if self.enemies_left == 0:
+                        # Stage clear: jump timer upward so the Python heuristic fires.
+                        self.cleared = True
+                        self.timer   = (self.timer + 10_000) & 0xFFFF
+                    elif not any(self._wave_alive):
+                        self._spawn_wave()
 
         # Incoming damage while exposed
         if self._rng.random() < self.DAMAGE_PROB_PER_FRAME and self.enemies_left > 0:
@@ -215,10 +266,14 @@ def _theta_warm_start(seed: int = 42) -> np.ndarray:
     get fitness=-FAIL_PENALTY, and fitness std=0. The bias ensures agents
     explore shooting from generation 0 so training tests have non-trivial
     variance -- which is also the recommended real-world initialization.
+
+    Bias values (+2.0 shoot / +1.0 peek) mirror es_train.py's actual
+    warm-start exactly -- keep these two in sync (see the "+2 peek bias
+    overcorrected" note in repo memory for why they're asymmetric).
     """
     rng = np.random.default_rng(seed)
     theta = rng.normal(0.0, 0.1, PARAM_COUNT)
-    theta[_B2_OFFSET + 0] += 1.0  # shoot logit: P(shoot=True) >> 50 %
+    theta[_B2_OFFSET + 0] += 2.0  # shoot logit: P(shoot=True) >> 50 %
     theta[_B2_OFFSET + 1] += 1.0  # peek  logit: P(peek=True)  >> 50 %
     return theta
 
@@ -269,6 +324,41 @@ def _unpack_theta_view(theta: np.ndarray):
     w2 = theta[i:i + HIDDEN * ACT_DIM].reshape(HIDDEN, ACT_DIM); i += HIDDEN * ACT_DIM
     b2 = theta[i:i + ACT_DIM]
     return w1, b1, w2, b2
+
+
+def _aim_bias_for(target_pos: float) -> float:
+    """Return the b2 bias that makes ``tanh(b2) == target_pos - 0.5``, i.e.
+    the raw bias whose saturation-free output makes act()'s aim_x/aim_y land
+    exactly on ``target_pos`` (env maps aim = clip(0.5 + tanh(out), 0, 1))."""
+    y = float(np.clip(target_pos - 0.5, -0.999, 0.999))
+    return float(np.arctanh(y))
+
+
+def _theta_always_aim(aim_x: float, aim_y: float) -> np.ndarray:
+    """peek=True, shoot=True permanently, aim pinned exactly at
+    (aim_x, aim_y) for the whole episode (no ammo/duck reactivity -- only
+    good for isolating single-clip aim/hit behavior)."""
+    theta = np.zeros(PARAM_COUNT)
+    theta[_B2_OFFSET + 0] = 50.0  # shoot logit: always shoot
+    theta[_B2_OFFSET + 1] = 50.0  # peek  logit: always exposed
+    theta[_B2_OFFSET + 2] = _aim_bias_for(aim_x)
+    theta[_B2_OFFSET + 3] = _aim_bias_for(aim_y)
+    return theta
+
+
+def _theta_reactive_ammo_duck_xy(aim_x: float, aim_y: float) -> np.ndarray:
+    """Like ``_theta_reactive_ammo_duck`` (ducks/reloads reactively on
+    ammo_norm), but pins aim at an independently-chosen (aim_x, aim_y)
+    instead of applying the same bias to both axes."""
+    theta = np.zeros(PARAM_COUNT)
+    w1, b1, w2, b2 = _unpack_theta_view(theta)
+    w1[_AMMO_OBS_INDEX, :] = 20.0
+    w2[:, 1] = 5.0 / HIDDEN
+    b2[1] = -1.0
+    b2[0] = 50.0
+    b2[2] = _aim_bias_for(aim_x)
+    b2[3] = _aim_bias_for(aim_y)
+    return theta
 
 
 def _episode_aim_trajectory(theta: np.ndarray, seed: int = 0, max_ticks: int = 200):
@@ -605,6 +695,91 @@ class DryFireBehaviorSuite(unittest.TestCase):
         )
 
 
+class MultiSpotTargetingSuite(unittest.TestCase):
+    """Verify the wave / 3-target-spot shooting model added to
+    SimulatedGame: hits require the aim to actually be near one of the
+    (<= 3) currently-alive target positions, and a full screen
+    (ENEMIES_TOTAL=12) now needs more rounds than one magazine
+    (AMMO_MAX_ROUNDS=6) holds -- so reload is genuinely mandatory for a
+    clear, not just a nice-to-have.
+    """
+
+    SEED = 0
+
+    def test_aim_on_a_target_hits_far_more_than_aim_off_all_targets(self):
+        """One magazine (6 shots) aimed exactly on a live target spot should
+        land meaningfully more hits than the same 6 shots aimed at a point
+        far from every target -- confirms hit registration depends on
+        proximity to a real target position, not just "shoot while exposed".
+        """
+        tx, ty = SimulatedGame.TARGET_POSITIONS[1]
+        on_target_theta  = _theta_always_aim(tx, ty)
+        off_target_theta = _theta_always_aim(0.02, 0.98)  # far from all 3 spots
+
+        env_on  = SimulatedTimeCrisisEnv(seed=self.SEED)
+        _, info_on = env_on.episode_fitness(on_target_theta)
+        env_off = SimulatedTimeCrisisEnv(seed=self.SEED)
+        _, info_off = env_off.episode_fitness(off_target_theta)
+
+        print(f"\n[on-target aim]  shots_fired={info_on['shots_fired']}  "
+              f"shots_hit={info_on['shots_hit']}")
+        print(f"[off-target aim] shots_fired={info_off['shots_fired']}  "
+              f"shots_hit={info_off['shots_hit']}")
+
+        self.assertGreater(
+            info_on["shots_hit"], info_off["shots_hit"],
+            "Aiming directly on a live target spot should land more hits "
+            "than aiming far from every target.",
+        )
+
+    def test_full_screen_requires_more_than_one_magazine(self):
+        """A theta that ducks/reloads reactively and clears the whole screen
+        must fire more shots -- and reload more than once -- than a single
+        magazine allows, confirming ENEMIES_TOTAL > AMMO_MAX_ROUNDS actually
+        forces multiple clips rather than being clearable in one burst."""
+        theta = _theta_reactive_ammo_duck()  # centered aim, reacts to ammo
+        env = SimulatedTimeCrisisEnv(seed=self.SEED)
+        _, info = env.episode_fitness(theta)
+
+        self.assertGreater(
+            info["shots_fired"], AMMO_MAX_ROUNDS,
+            f"Clearing the screen took only {info['shots_fired']} shots -- "
+            f"one magazine ({AMMO_MAX_ROUNDS} rounds) should no longer be "
+            f"enough.\ninfo={info}",
+        )
+        self.assertGreater(
+            info["reload_correct_count"], 1,
+            f"Clearing a {SimulatedGame.ENEMIES_TOTAL}-enemy, multi-wave "
+            f"screen should take more than one duck-to-reload cycle.\n"
+            f"info={info}",
+        )
+
+    def test_static_single_spot_aim_is_less_efficient_than_spreading_hits(self):
+        """A theta that ducks/reloads correctly but keeps its aim pinned on
+        just ONE of the three target spots forever should need at least as
+        many shots to clear as one aimed where it has a moderate chance
+        against all three simultaneously -- camping a single spot leaves 2
+        of every 3 alive enemies (almost) untouchable."""
+        pinned_theta   = _theta_reactive_ammo_duck_xy(*SimulatedGame.TARGET_POSITIONS[0])
+        balanced_theta = _theta_reactive_ammo_duck()  # aim centered near all 3
+
+        env_pinned = SimulatedTimeCrisisEnv(seed=self.SEED)
+        _, info_pinned = env_pinned.episode_fitness(pinned_theta)
+        env_balanced = SimulatedTimeCrisisEnv(seed=self.SEED)
+        _, info_balanced = env_balanced.episode_fitness(balanced_theta)
+
+        print(f"\n[pinned-on-one-spot]  shots_fired={info_pinned['shots_fired']}  "
+              f"cleared={info_pinned['cleared']}")
+        print(f"[centered-near-all-3] shots_fired={info_balanced['shots_fired']}  "
+              f"cleared={info_balanced['cleared']}")
+
+        self.assertGreaterEqual(
+            info_pinned["shots_fired"], info_balanced["shots_fired"],
+            "Camping aim on a single target spot should need at least as "
+            "many shots as splitting attention across all three.",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Aim trajectory diagnostics
 # ---------------------------------------------------------------------------
@@ -651,6 +826,11 @@ class ExtendedMiniESTrendSuite(unittest.TestCase):
     MiniESTrainingSuite) tracking dry-fire/reload/aim metrics across
     generations.
 
+    Mirrors es_train.py's ACTUAL hyperparameters (SIGMA, ALPHA, and the
+    stagnation-kick escape mechanism) rather than a separate hardcoded set --
+    otherwise this test silently drifts from what the live project really
+    does and stops being a faithful predictor of real training behavior.
+
     Not a strict behavioral gate -- it's exploratory, meant to show whether
     the current reward shaping resolves the two reported behaviors given
     enough training, or whether they persist even after far more generations
@@ -659,14 +839,14 @@ class ExtendedMiniESTrendSuite(unittest.TestCase):
 
     POP   = 12
     GENS  = 80
-    SIGMA = 0.05
+    SIGMA = CFG_SIGMA
     ALPHA = 0.02
 
-    def _run_generation(self, theta, rng, gen_offset=0):
+    def _run_generation(self, theta, rng, sigma_this_gen, gen_offset=0):
         half = self.POP // 2
         eps_half = rng.normal(0.0, 1.0, (half, PARAM_COUNT))
         eps      = np.concatenate([eps_half, -eps_half])
-        candidates = theta + self.SIGMA * eps
+        candidates = theta + sigma_this_gen * eps
 
         fitnesses, infos = [], []
         for i, c in enumerate(candidates):
@@ -679,14 +859,18 @@ class ExtendedMiniESTrendSuite(unittest.TestCase):
     def test_long_run_prints_trend_diagnostics(self):
         rng   = np.random.default_rng(42)
         theta = _theta_warm_start()
+        stagnant_gens = 0
 
         print(f"\n{'gen':>4}  {'mean':>8}  {'std':>7}  {'best':>8}  "
-              f"{'clear%':>7}  {'dryfire':>8}  {'reload':>7}  {'aimstd':>7}")
-        print("-" * 68)
+              f"{'clear%':>7}  {'dryfire':>8}  {'reload':>7}  {'aimstd':>7}  {'kick':>4}")
+        print("-" * 76)
 
         for gen in range(self.GENS):
+            kicking = stagnant_gens >= STAGNATION_PATIENCE
+            sigma_this_gen = self.SIGMA * STAGNATION_SIGMA_MULT if kicking else self.SIGMA
+
             fitnesses, infos, eps = self._run_generation(
-                theta, rng, gen_offset=gen * self.POP
+                theta, rng, sigma_this_gen, gen_offset=gen * self.POP
             )
             clear_rate = float(np.mean([1.0 if x["cleared"] else 0.0 for x in infos]))
             avg_dry    = float(np.mean([x["dry_fire_ticks"] for x in infos]))
@@ -698,11 +882,17 @@ class ExtendedMiniESTrendSuite(unittest.TestCase):
             if gen % 5 == 0 or gen == self.GENS - 1:
                 print(f"{gen:>4}  {fitnesses.mean():>8.1f}  {fitnesses.std():>7.2f}  "
                       f"{fitnesses.max():>8.1f}  {clear_rate:>6.0%}  "
-                      f"{avg_dry:>8.2f}  {avg_reload:>7.2f}  {aim_std:>7.3f}")
+                      f"{avg_dry:>8.2f}  {avg_reload:>7.2f}  {aim_std:>7.3f}  "
+                      f"{'Y' if kicking else '.':>4}")
 
             shaped   = rank_transform(fitnesses)
-            gradient = (eps.T @ shaped) / (self.POP * self.SIGMA)
+            gradient = (eps.T @ shaped) / (self.POP * sigma_this_gen)
             theta    = theta + self.ALPHA * gradient
+
+            if float(fitnesses.std()) < STD_STAGNATION_THRESHOLD:
+                stagnant_gens += 1
+            else:
+                stagnant_gens = 0
 
         # Exploratory run: no strict pass/fail on the trend direction itself,
         # just confirm it completed cleanly with finite numbers throughout.

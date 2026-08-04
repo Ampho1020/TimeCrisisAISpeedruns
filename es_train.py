@@ -30,19 +30,35 @@ def train():
     rng = np.random.default_rng(SEED)
     # Small init -- large weights saturate tanh and kill the signal.
     theta = rng.normal(0.0, 0.1, size=(PARAM_COUNT,)).astype(np.float64)
-    # Warm-start the peek and shoot output logits to +2. Without this, ~50% of
-    # random seeds produce a theta whose peek output is negative for the fixed
-    # initial observation (all agents start in the same state), so every
-    # perturbed candidate stays in cover, fitness std = 0, and ES is stuck on
-    # generation 0. The bias ensures agents explore peeking immediately; the
-    # ES gradient then refines timing and aim from there. Raised from +1 to +2
-    # (2026-08-04) for a larger safety margin against the same collapse
-    # happening later in training (see SIGMA note in config.py) -- +2 needs a
-    # larger adverse gradient step before the peek logit can cross back to
-    # negative for every mirrored candidate at once.
+    # Warm-start the shoot logit to +2 and the peek logit to +1 (asymmetric,
+    # 2026-08-04). Without some positive bias, ~50% of random seeds produce a
+    # theta whose peek output is negative for the fixed initial observation,
+    # so every perturbed candidate stays in cover and ES is stuck at std = 0
+    # on generation 0.
+    #
+    # An earlier version of this fix raised BOTH logits to +2 to guard against
+    # that "always in cover" collapse. Live training logs then showed the
+    # opposite failure mode instead: mean_peek_flips pinned at exactly 0.0 and
+    # mean_cover_time at exactly 0.0 across the *entire* population for many
+    # generations straight -- every candidate stayed exposed 100% of the time
+    # and never ducked to reload (the "mag dump" behaviour). The cause is
+    # that +2 sits far outside SIGMA's (0.1) reach: as long as the perturbed
+    # bias stays positive (which it does for all but the most extreme
+    # samples), peek is always True and behaviour never changes with it, so
+    # there is *zero* local fitness gradient telling ES to move the bias down
+    # -- it's a flat plateau, not just a slow climb. Learning to duck is then
+    # entirely dependent on the (initially near-zero) hidden-layer weights on
+    # the ammo_norm input overcoming that +2 bias, which is a much harder
+    # thing for random perturbations to stumble into than simply crossing 0
+    # from a smaller starting bias. Dropping the peek bias back to +1 keeps
+    # the original anti-"stuck in cover" guarantee while leaving duck
+    # behaviour reachable on a normal training timescale; the stagnation-kick
+    # in the loop below (not a large static bias) is what should catch a
+    # renewed collapse toward "always in cover" if SIGMA=0.1 isn't already
+    # enough on its own.
     _b2_start = OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM
     theta[_b2_start + 0] += 2.0  # shoot logit
-    theta[_b2_start + 1] += 2.0  # peek  logit
+    theta[_b2_start + 1] += 1.0  # peek  logit
 
     pool = WorkerPool()
     pool.start()
