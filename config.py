@@ -44,11 +44,29 @@ TIMEOUT_TIMER_THRESHOLD = 60
 # ES hyperparameters
 # -----------------------------
 POP_SIZE    = 30      # MUST be even (mirrored sampling)
-SIGMA       = 0.05    # perturbation scale
+# SIGMA raised 0.05 -> 0.1 (2026-08-04): in-sim trend testing
+# (tests/test_simulation.py ExtendedMiniESTrendSuite) showed the population
+# can collapse into a "never expose" local optimum -- staying in cover is a
+# free, zero-risk -FAIL_PENALTY baseline, while a botched exposure risks the
+# much harsher DAMAGE_PENALTY. Once every mirrored candidate's peek-logit
+# lands on the same side of 0, fitness std hits exactly 0.00 and the ES
+# gradient carries no signal, so theta can no longer move on its own. A
+# larger SIGMA makes it more likely at least some candidates flip sign again.
+SIGMA       = 0.1     # perturbation scale
 ALPHA       = 0.02    # learning rate
 GENERATIONS = 100
 SEED        = 42
 CHECKPOINT_EVERY = 10
+
+# Stagnation kick (see SIGMA note above): if fitness std stays below
+# STD_STAGNATION_THRESHOLD for STAGNATION_PATIENCE consecutive generations,
+# es_train.py temporarily samples that generation's population with
+# SIGMA * STAGNATION_SIGMA_MULT instead of SIGMA, to try to reintroduce
+# variance and escape the flat/no-gradient trap. Reverts to normal SIGMA as
+# soon as std recovers above the threshold for one generation.
+STD_STAGNATION_THRESHOLD = 1e-3
+STAGNATION_PATIENCE      = 3     # consecutive flat generations before kicking
+STAGNATION_SIGMA_MULT    = 3.0   # SIGMA multiplier while kicking
 
 # -----------------------------
 # Parallel training

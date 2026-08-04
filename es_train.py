@@ -4,7 +4,8 @@ import numpy as np
 
 from config import (
     ACT_DIM, ALPHA, CHECKPOINT_EVERY, GENERATIONS, HIDDEN, HUD_ENABLED,
-    LOG_CSV, OBS_DIM, POP_SIZE, SEED, SIGMA, VERBOSE_EPISODES,
+    LOG_CSV, OBS_DIM, POP_SIZE, SEED, SIGMA, STAGNATION_PATIENCE,
+    STAGNATION_SIGMA_MULT, STD_STAGNATION_THRESHOLD, VERBOSE_EPISODES,
 )
 from logger import TrainingLogger
 from policy import PARAM_COUNT
@@ -29,27 +30,48 @@ def train():
     rng = np.random.default_rng(SEED)
     # Small init -- large weights saturate tanh and kill the signal.
     theta = rng.normal(0.0, 0.1, size=(PARAM_COUNT,)).astype(np.float64)
-    # Warm-start the peek and shoot output logits to +1. Without this, ~50% of
+    # Warm-start the peek and shoot output logits to +2. Without this, ~50% of
     # random seeds produce a theta whose peek output is negative for the fixed
     # initial observation (all agents start in the same state), so every
     # perturbed candidate stays in cover, fitness std = 0, and ES is stuck on
-    # generation 0. The +1 bias ensures agents explore peeking immediately;
-    # the ES gradient then refines timing and aim from there.
+    # generation 0. The bias ensures agents explore peeking immediately; the
+    # ES gradient then refines timing and aim from there. Raised from +1 to +2
+    # (2026-08-04) for a larger safety margin against the same collapse
+    # happening later in training (see SIGMA note in config.py) -- +2 needs a
+    # larger adverse gradient step before the peek logit can cross back to
+    # negative for every mirrored candidate at once.
     _b2_start = OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM
-    theta[_b2_start + 0] += 1.0  # shoot logit
-    theta[_b2_start + 1] += 1.0  # peek  logit
+    theta[_b2_start + 0] += 2.0  # shoot logit
+    theta[_b2_start + 1] += 2.0  # peek  logit
 
     pool = WorkerPool()
     pool.start()
     logger = TrainingLogger(LOG_CSV)
+    # Consecutive generations with fitness std below STD_STAGNATION_THRESHOLD.
+    # When this reaches STAGNATION_PATIENCE, every mirrored candidate is
+    # landing on the same behavior (e.g. the "never expose" collapse -- see
+    # SIGMA note in config.py) and the ES gradient carries no real signal.
+    # Temporarily sampling with a larger SIGMA gives perturbations a better
+    # chance of flipping a candidate's behavior again.
+    stagnant_gens = 0
     try:
         for gen in range(GENERATIONS):
+            kicking = stagnant_gens >= STAGNATION_PATIENCE
+            sigma_this_gen = SIGMA * STAGNATION_SIGMA_MULT if kicking else SIGMA
+            if kicking:
+                print(
+                    f"  !! stagnation kick: std < {STD_STAGNATION_THRESHOLD} for "
+                    f"{stagnant_gens} gens -- sampling with SIGMA x"
+                    f"{STAGNATION_SIGMA_MULT} this generation",
+                    flush=True,
+                )
+
             # --- mirrored sampling: test both +eps and -eps ---
             # Halves estimator variance for free.
             half = POP_SIZE // 2
             eps_half = rng.normal(0.0, 1.0, size=(half, PARAM_COUNT))
             eps = np.concatenate([eps_half, -eps_half], axis=0)
-            candidates = theta[None, :] + SIGMA * eps
+            candidates = theta[None, :] + sigma_this_gen * eps
 
             # Evaluate the whole population across all workers in parallel.
             results = pool.evaluate(candidates)
@@ -70,7 +92,7 @@ def train():
 
             # --- the ES update ---
             shaped = rank_transform(fitnesses)
-            gradient = (eps.T @ shaped) / (POP_SIZE * SIGMA)
+            gradient = (eps.T @ shaped) / (POP_SIZE * sigma_this_gen)
             theta = theta + ALPHA * gradient
 
             # --- diagnostics ---
@@ -94,8 +116,11 @@ def train():
                 flush=True,
             )
 
-            if std < 1e-3:
-                print("  !! WARNING: fitness spread ~0 -- perturbations do nothing. RAISE SIGMA.", flush=True)
+            if std < STD_STAGNATION_THRESHOLD:
+                stagnant_gens += 1
+                print("  !! WARNING: fitness spread ~0 -- perturbations do nothing.", flush=True)
+            else:
+                stagnant_gens = 0
             if gen > 5 and clear_rate == 0.0:
                 print("  !! note: no clears yet -- running on partial credit only.", flush=True)
 
@@ -120,6 +145,7 @@ def train():
                 "mean_peek_flips": mean_flips,
                 "mean_peek_hold": mean_hold,
                 "mean_cover_time": mean_cover_time,
+                "sigma_used": sigma_this_gen,
             })
 
             if gen % CHECKPOINT_EVERY == 0:
