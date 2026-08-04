@@ -3,8 +3,8 @@
 import numpy as np
 
 from config import (
-    ALPHA, CHECKPOINT_EVERY, GENERATIONS, HUD_ENABLED, LOG_CSV,
-    POP_SIZE, SEED, SIGMA, VERBOSE_EPISODES,
+    ACT_DIM, ALPHA, CHECKPOINT_EVERY, GENERATIONS, HIDDEN, HUD_ENABLED,
+    LOG_CSV, OBS_DIM, POP_SIZE, SEED, SIGMA, VERBOSE_EPISODES,
 )
 from logger import TrainingLogger
 from policy import PARAM_COUNT
@@ -29,6 +29,15 @@ def train():
     rng = np.random.default_rng(SEED)
     # Small init -- large weights saturate tanh and kill the signal.
     theta = rng.normal(0.0, 0.1, size=(PARAM_COUNT,)).astype(np.float64)
+    # Warm-start the peek and shoot output logits to +1. Without this, ~50% of
+    # random seeds produce a theta whose peek output is negative for the fixed
+    # initial observation (all agents start in the same state), so every
+    # perturbed candidate stays in cover, fitness std = 0, and ES is stuck on
+    # generation 0. The +1 bias ensures agents explore peeking immediately;
+    # the ES gradient then refines timing and aim from there.
+    _b2_start = OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM
+    theta[_b2_start + 0] += 1.0  # shoot logit
+    theta[_b2_start + 1] += 1.0  # peek  logit
 
     pool = WorkerPool()
     pool.start()
