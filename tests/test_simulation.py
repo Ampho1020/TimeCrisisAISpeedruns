@@ -193,6 +193,23 @@ def _theta_always(peek: bool, shoot: bool) -> np.ndarray:
     return theta
 
 
+def _theta_warm_start(seed: int = 42) -> np.ndarray:
+    """Random theta with a small positive peek+shoot bias.
+
+    Without a bias, ~50% of random seeds produce a theta whose peek output
+    is negative for the fixed initial observation (timer=0.5, life=1, ammo=1,
+    everything else 0), so every perturbed candidate stays in cover, all
+    get fitness=-FAIL_PENALTY, and fitness std=0. The bias ensures agents
+    explore shooting from generation 0 so training tests have non-trivial
+    variance -- which is also the recommended real-world initialization.
+    """
+    rng = np.random.default_rng(seed)
+    theta = rng.normal(0.0, 0.1, PARAM_COUNT)
+    theta[_B2_OFFSET + 0] += 1.0  # shoot logit: P(shoot=True) >> 50 %
+    theta[_B2_OFFSET + 1] += 1.0  # peek  logit: P(peek=True)  >> 50 %
+    return theta
+
+
 def rank_transform(fitnesses: np.ndarray) -> np.ndarray:
     ranks = np.empty_like(fitnesses, dtype=np.float64)
     ranks[np.argsort(fitnesses)] = np.arange(len(fitnesses))
@@ -265,16 +282,17 @@ class PeekGatingSuite(unittest.TestCase):
     def test_shooting_starts_only_after_traverse(self):
         """shoot_allowed must be False for the first PEEK_TRAVERSE_TICKS ticks.
 
-        We verify this indirectly: the always-peek+shoot theta fires 0 shots
-        if we artificially cap the episode at PEEK_TRAVERSE_TICKS - 1 ticks.
+        shoot_allowed = peek AND prev_peek AND peek_ticks >= PEEK_TRAVERSE_TICKS.
+        peek_ticks is updated at the END of each tick, so the gate opens at the
+        START of tick PEEK_TRAVERSE_TICKS (0-indexed) -- i.e. after exactly
+        PEEK_TRAVERSE_TICKS ticks have passed with peek=True.
         """
-        from config import MAX_TICKS
         theta = _theta_always(peek=True, shoot=True)
 
         env = SimulatedTimeCrisisEnv(seed=0)
         env.reset()
         shots_before_gate = 0
-        for _ in range(PEEK_TRAVERSE_TICKS - 1):
+        for _ in range(PEEK_TRAVERSE_TICKS):   # ticks 0 .. PEEK_TRAVERSE_TICKS-1
             _, _, info = env.step(theta)
             shots_before_gate += info["shots_fired_delta"]
         self.assertEqual(
@@ -282,7 +300,8 @@ class PeekGatingSuite(unittest.TestCase):
             f"Agent fired before PEEK_TRAVERSE_TICKS={PEEK_TRAVERSE_TICKS} "
             f"ticks had elapsed -- gating window is too short",
         )
-        # On tick PEEK_TRAVERSE_TICKS the gate must be open.
+        # Tick PEEK_TRAVERSE_TICKS: peek_ticks now == PEEK_TRAVERSE_TICKS at
+        # the start of this tick, so shoot_allowed must be True.
         _, _, info = env.step(theta)
         self.assertGreater(
             info["shots_fired_delta"], 0,
@@ -320,7 +339,7 @@ class MiniESTrainingSuite(unittest.TestCase):
     def test_fitness_variance_nonzero(self):
         """Perturbations must change fitness; otherwise ES gradient is zero."""
         rng   = np.random.default_rng(42)
-        theta = rng.normal(0.0, 0.1, PARAM_COUNT)
+        theta = _theta_warm_start()
         fitnesses, _, _ = self._run_generation(theta, rng)
         std = float(fitnesses.std())
         self.assertGreater(
@@ -332,7 +351,7 @@ class MiniESTrainingSuite(unittest.TestCase):
     def test_some_candidates_fire(self):
         """At least one candidate per generation must fire shots."""
         rng   = np.random.default_rng(42)
-        theta = rng.normal(0.0, 0.1, PARAM_COUNT)
+        theta = _theta_warm_start()
         _, infos, _ = self._run_generation(theta, rng)
         total_fired = sum(info["shots_fired"] for info in infos)
         self.assertGreater(
@@ -344,7 +363,7 @@ class MiniESTrainingSuite(unittest.TestCase):
     def test_full_mini_run_prints_diagnostics(self):
         """Run GENS generations; print a table so the user can visually inspect."""
         rng   = np.random.default_rng(42)
-        theta = rng.normal(0.0, 0.1, PARAM_COUNT)
+        theta = _theta_warm_start()
 
         print(f"\n{'gen':>4}  {'mean':>8}  {'std':>7}  "
               f"{'best':>8}  {'clear%':>7}  {'shots':>6}")
@@ -367,7 +386,7 @@ class MiniESTrainingSuite(unittest.TestCase):
         # Weak sanity: the final mean shouldn't be wildly worse than the first.
         # (Checked after the loop so it doesn't affect diagnostic output.)
         rng2   = np.random.default_rng(42)
-        theta2 = rng2.normal(0.0, 0.1, PARAM_COUNT)
+        theta2 = _theta_warm_start()
         f0, _, _ = self._run_generation(theta2, rng2, gen_offset=0)
         self.assertGreater(
             fitnesses.mean(), f0.mean() - 200.0,
