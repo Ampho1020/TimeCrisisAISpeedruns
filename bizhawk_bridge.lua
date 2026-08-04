@@ -56,9 +56,9 @@
 --     arrive normalized 0..1 (0 = left/top) and are mapped to the axis ranges
 --     below. Vertical is currently held centered by the caller until vision
 --     lands; horizontal is driven by the policy.
---   * Trigger (shoot) and the cover/peek button are driven INDEPENDENTLY. We do
---     NOT couple them (no "shoot and not cover"): the game itself only registers
---     a shot when fully out of cover, so we just forward both button states and
+--   * Trigger (shoot) and the peek button are driven INDEPENDENTLY. We do
+--     NOT couple them (no "shoot and not peek"): the game itself only registers
+--     a shot when fully peeked out, so we just forward both button states and
 --     let the AI learn the hold-to-shoot timing.
 --   * Confirmed Guncon key names on this build:
 --       trigger = "P1 Trigger" (left mouse / shoot)
@@ -72,7 +72,7 @@ local DOMAIN = "MainRAM"
 local DEBUG_INPUT_LOG = false   -- set false for normal training
 local debug_frame_count = 0
 
-local shoot, cover = false, false
+local shoot, peek = false, false
 local aim_x_norm, aim_y_norm = 0.5, 0.5   -- stored only; not written yet
 local hud_lines = {}
 
@@ -84,7 +84,7 @@ local pending_steps = 0
 -- joypad.set/setanalog use the same bare keys -- confirmed correct after
 -- controller dump showed no "P1 " prefix on this core/build.
 local GUNCON_TRIGGER_KEY = "Trigger"
-local GUNCON_COVER_KEY   = "A"
+local GUNCON_PEEK_KEY     = "A"
 local GUNCON_AIM_X_KEY   = "X Axis"
 local GUNCON_AIM_Y_KEY   = "Y Axis"
 -- Axis ranges the Guncon expects (from RAM/input probing on this build).
@@ -120,20 +120,19 @@ end
 local GUNCON_CONTROLLER = 1
 
 local function apply_input()
-  -- Buttons: forward trigger and cover/peek INDEPENDENTLY. The game only lets a
-  -- shot register when fully out of cover, so we don't couple them here -- the
-  -- AI learns the timing (and the ~0.2s cover transition) on its own.
+  -- Buttons: forward trigger and peek INDEPENDENTLY. The game only lets a
+  -- shot register when fully peeked out, so we don't couple them here --
+  -- the AI learns the timing (and the ~0.2s peek transition) on its own.
   --
-  -- IMPORTANT: cover=true means the A button IS PRESSED, which causes the
-  -- character to LEAVE cover (exposed). cover=false = A released = IN cover.
-  -- The Python variable name is the inverse of the in-game cover state.
+  -- peek=true means the A button IS PRESSED, causing the character to LEAVE
+  -- cover (exposed). peek=false = A released = character IN cover.
   --
   -- CRITICAL: the 2nd arg (controller index) is REQUIRED because our keys are
   -- bare ("A", "Trigger"). Without it, joypad.set silently drops the override
   -- table -- which was the root cause of SET != READ_BACK during training.
   joypad.set({
     [GUNCON_TRIGGER_KEY] = shoot,
-    [GUNCON_COVER_KEY]   = cover,
+    [GUNCON_PEEK_KEY]    = peek,
   }, GUNCON_CONTROLLER)
   -- Aim: drive the Guncon axes ourselves so the AI, not the host mouse, aims.
   -- Map normalized 0..1 (0 = left/top) onto the axis ranges and round to int.
@@ -153,11 +152,11 @@ local function apply_input()
   -- joypad.set was called without a controller index for bare key names.
   if DEBUG_INPUT_LOG and emu.framecount() % 30 == 0 then
     local ok2, actual = pcall(joypad.get, GUNCON_CONTROLLER)
-    local a_actual = ok2 and actual and tostring(actual[GUNCON_COVER_KEY])   or "?"
+    local a_actual = ok2 and actual and tostring(actual[GUNCON_PEEK_KEY])    or "?"
     local t_actual = ok2 and actual and tostring(actual[GUNCON_TRIGGER_KEY]) or "?"
     print(string.format(
-      "[apply fc=%d] SET cover=%s shoot=%s | READ_BACK A=%s trigger=%s | aim=(%.3f,%.3f)",
-      emu.framecount(), tostring(cover), tostring(shoot),
+      "[apply fc=%d] SET peek=%s shoot=%s | READ_BACK A=%s trigger=%s | aim=(%.3f,%.3f)",
+      emu.framecount(), tostring(peek), tostring(shoot),
       a_actual, t_actual, aim_x_norm, aim_y_norm))
   end
 end
@@ -175,7 +174,7 @@ local function handle(line)
 
   elseif cmd == "set_input" then
     shoot = (parts[2] == "1")
-    cover = (parts[3] == "1")
+    peek  = (parts[3] == "1")
     if parts[4] ~= nil then aim_x_norm = clamp01(tonumber(parts[4]) or 0.5) end
     if parts[5] ~= nil then aim_y_norm = clamp01(tonumber(parts[5]) or 0.5) end
     return "OK\n"

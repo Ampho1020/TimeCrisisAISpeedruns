@@ -21,7 +21,7 @@ def act(theta: np.ndarray, obs: np.ndarray):
     Deterministic action selection -- ES explores via weight noise,
     not action noise, so argmax/threshold is correct here.
 
-    Returns (shoot: bool, cover: bool, aim_x_bias: float in [-1, 1], aim_y_bias: float in [-1, 1])
+    Returns (shoot: bool, peek: bool, aim_x_bias: float in [-1, 1], aim_y_bias: float in [-1, 1])
     """
     w1, b1, w2, b2 = _unpack(theta)
     h = np.tanh(obs @ w1 + b1)

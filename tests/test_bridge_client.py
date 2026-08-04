@@ -111,27 +111,27 @@ class BridgeClientTests(unittest.TestCase):
         self.assertEqual(fake.commands[2], "frame")
 
 
-class CoverHoldRewardTest(unittest.TestCase):
-    """Lock in that holding cover is rewarded and spamming never is."""
+class PeekHoldRewardTest(unittest.TestCase):
+    """Lock in that holding peek is rewarded and spamming never is."""
 
     def test_spamming_earns_nothing(self):
-        from env_timecrisis import cover_hold_reward
+        from env_timecrisis import peek_hold_reward
 
         # Toggle every tick: every run is length 1, so nothing accrues.
         spam = [i % 2 == 0 for i in range(30)]
-        self.assertEqual(cover_hold_reward(spam, traverse_ticks=3, reward=4.0), 0.0)
+        self.assertEqual(peek_hold_reward(spam, traverse_ticks=3, reward=4.0), 0.0)
 
     def test_partial_hold_earns_dense_gradient(self):
-        from env_timecrisis import cover_hold_reward
+        from env_timecrisis import peek_hold_reward
 
         # A single length-2 hold earns one step of reward -- more than a tap,
         # less than a full commit. This slope is what lets ES climb.
         tap = [True, False]
         hold2 = [True, True, False]
         hold3 = [True, True, True, False]
-        r_tap = cover_hold_reward(tap, traverse_ticks=3, reward=4.0)
-        r_hold2 = cover_hold_reward(hold2, traverse_ticks=3, reward=4.0)
-        r_hold3 = cover_hold_reward(hold3, traverse_ticks=3, reward=4.0)
+        r_tap = peek_hold_reward(tap, traverse_ticks=3, reward=4.0)
+        r_hold2 = peek_hold_reward(hold2, traverse_ticks=3, reward=4.0)
+        r_hold3 = peek_hold_reward(hold3, traverse_ticks=3, reward=4.0)
         self.assertEqual(r_tap, 0.0)
         self.assertEqual(r_hold2, 4.0)
         self.assertEqual(r_hold3, 8.0)
@@ -139,21 +139,21 @@ class CoverHoldRewardTest(unittest.TestCase):
         self.assertLess(r_hold2, r_hold3)
 
     def test_holding_past_traverse_is_capped(self):
-        from env_timecrisis import cover_hold_reward
+        from env_timecrisis import peek_hold_reward
 
         # Holding forever is capped at (traverse - 1) * reward: no camping bonus.
         self.assertEqual(
-            cover_hold_reward([True] * 30, traverse_ticks=3, reward=4.0), 8.0
+            peek_hold_reward([True] * 30, traverse_ticks=3, reward=4.0), 8.0
         )
 
     def test_holding_strictly_beats_spamming(self):
-        from env_timecrisis import cover_hold_reward
+        from env_timecrisis import peek_hold_reward
 
         spam = [i % 2 == 0 for i in range(30)]
         cycles = ([True] * 3 + [False]) * 7  # deliberate hold/release cycles
         self.assertGreater(
-            cover_hold_reward(cycles, traverse_ticks=3, reward=4.0),
-            cover_hold_reward(spam, traverse_ticks=3, reward=4.0),
+            peek_hold_reward(cycles, traverse_ticks=3, reward=4.0),
+            peek_hold_reward(spam, traverse_ticks=3, reward=4.0),
         )
 
 

@@ -81,8 +81,8 @@ DAMAGE_PENALTY     = 300.0   # deliberately harsh: a hit is never worth it
 HIT_REWARD         = 5.0     # per confirmed hit, all episodes; teaches aim
 FAIL_PENALTY       = 200.0
 
-# Cover is a HOLD, not a tap: the ~0.2s (~12-frame) in/out traverse only
-# completes if the button is held through it. COVER_TRAVERSE_TICKS is a game-
+# Peeking out is a HOLD, not a tap: the ~0.2s (~12-frame) in/out traverse only
+# completes if the button is held through it. PEEK_TRAVERSE_TICKS is a game-
 # mechanics constant (minimum hold lock so a transition can't be reversed
 # mid-animation; also gates when shots are allowed to register) -- it is NOT
 # a reward shaping knob. We used to also reward holding densely
@@ -90,10 +90,10 @@ FAIL_PENALTY       = 200.0
 # (COVER_TIME_PENALTY), and give extra hit credit only on failed episodes
 # (PARTIAL_HIT_REWARD). All four were removed: they just layered noisy shaping
 # on top of the raw ES signal instead of letting evolution optimize the actual
-# outcome (clear/fail, elapsed time, damage, hits). cover_flips/cover_hold/
+# outcome (clear/fail, elapsed time, damage, hits). peek_flips/peek_hold/
 # cover_time are still tracked and logged for diagnostics, just no longer fed
 # into fitness.
-COVER_TRAVERSE_TICKS = 3     # ticks (x FRAME_SKIP frames) to clear the traverse
+PEEK_TRAVERSE_TICKS = 3     # ticks (x FRAME_SKIP frames) to clear the traverse
 
 # NOTE: we deliberately do NOT reward raw shots fired (nor per-shot reload/
 # active-fire bonuses). Any reward that scales with shot COUNT is a magdump
@@ -123,7 +123,7 @@ RELOAD_BONUS = 15.0
 # Policy dims
 # obs = [timer_norm, life_norm, fired_norm, hit_norm, acc, last_hit, last_miss,
 #        cover_phase, ammo_norm, prev_aim_x_bias, prev_aim_y_bias]
-# cover_phase in [-1, +1]: sign = current cover state, magnitude = ticks_held / COVER_TRAVERSE_TICKS
+# peek_phase in [-1, +1]: sign = current peek state, magnitude = ticks_held / PEEK_TRAVERSE_TICKS
 # ammo_norm = ammo_left / AMMO_MAX_ROUNDS, in [0, 1]
 # prev_aim_x_bias / prev_aim_y_bias in [-1, 1]: the aim_x_bias/aim_y_bias the
 # policy itself output on the PREVIOUS tick, fed back in as the next tick's

@@ -72,8 +72,8 @@ def train():
             clear_rate = float(np.mean([1.0 if x["cleared"] else 0.0 for x in infos]))
             timeout_rate = float(np.mean([1.0 if x["timed_out"] else 0.0 for x in infos]))
             mean_acc = float(np.mean([x["accuracy"] for x in infos]))
-            mean_flips      = float(np.mean([x["cover_flips"]      for x in infos]))
-            mean_hold       = float(np.mean([x["cover_hold_score"] for x in infos]))
+            mean_flips      = float(np.mean([x["peek_flips"]      for x in infos]))
+            mean_hold       = float(np.mean([x["peek_hold_score"] for x in infos]))
             mean_cover_time = float(np.mean([x["cover_time"]       for x in infos]))
 
             print(
@@ -108,8 +108,8 @@ def train():
                 "best_damage": best["damage"],
                 "best_acc": best["accuracy"],
                 "mean_acc": mean_acc,
-                "mean_cover_flips": mean_flips,
-                "mean_cover_hold": mean_hold,
+                "mean_peek_flips": mean_flips,
+                "mean_peek_hold": mean_hold,
                 "mean_cover_time": mean_cover_time,
             })
 

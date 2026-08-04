@@ -276,11 +276,11 @@ class BridgeClient:
             raise RuntimeError(f"Bridge returned no value for 'read_u16 0x{addr:X}'")
         return int(resp)
 
-    def set_input(self, shoot: bool, cover: bool, aim_x: float = 0.5, aim_y: float = 0.5):
+    def set_input(self, shoot: bool, peek: bool, aim_x: float = 0.5, aim_y: float = 0.5):
         # Apply the Guncon calibration exactly once, right before sending.
         cx, cy = apply_guncon_calibration(aim_x, aim_y)
         self._cmd(
-            f"set_input {1 if shoot else 0} {1 if cover else 0} {cx:.4f} {cy:.4f}"
+            f"set_input {1 if shoot else 0} {1 if peek else 0} {cx:.4f} {cy:.4f}"
         )
 
     def step_frames(self, n: int = 1):

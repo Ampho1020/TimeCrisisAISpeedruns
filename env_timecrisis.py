@@ -4,7 +4,7 @@ import numpy as np
 
 from bridge_client import BridgeClient
 from config import (
-    AMMO_MAX_ROUNDS, CLEAR_BONUS, COVER_TRAVERSE_TICKS, DAMAGE_PENALTY,
+    AMMO_MAX_ROUNDS, CLEAR_BONUS, PEEK_TRAVERSE_TICKS, DAMAGE_PENALTY,
     DRY_FIRE_PENALTY, FAIL_PENALTY, FRAME_SKIP, HOST, HIT_REWARD, MAX_TICKS,
     PORT, RAM, RELOAD_BONUS, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
 )
@@ -22,20 +22,19 @@ def u16_delta(new_v: int, old_v: int) -> int:
     return d
 
 
-def cover_hold_reward(
-    cover_flags,
-    traverse_ticks: int = COVER_TRAVERSE_TICKS,
+def peek_hold_reward(
+    peek_flags,
+    traverse_ticks: int = PEEK_TRAVERSE_TICKS,
     reward: float = 1.0,
 ) -> float:
-    """Reward for holding the EXPOSE button (A) long enough for the exit
+    """Reward for holding the PEEK button (A) long enough for the exit
     animation to complete.
 
-    NOTE ON NAMING: ``cover=True`` in code means the A button IS PRESSED,
-    which makes the character EXIT cover (exposed, can shoot, can be hit).
-    ``cover=False`` means A is NOT pressed = character stays IN cover.
-    This is the opposite of what the variable name suggests.
+    ``peek=True`` means the A button IS PRESSED: the character is stepping
+    out of cover (exposed, can shoot, can be hit).
+    ``peek=False`` means A is NOT pressed: the character stays in cover.
 
-    Only True (A-pressed = exposed) runs are counted:
+    Only True (A-pressed = peeking out) runs are counted:
       * a single-tick tap earns nothing,
       * each additional tick exposed, up to traverse_ticks, adds ``reward``,
       * runs longer than traverse_ticks are capped.
@@ -45,10 +44,10 @@ def cover_hold_reward(
 
     total = 0.0
     run = 0
-    for held in cover_flags:
-        if held:              # A pressed = character exiting/out of cover
+    for held in peek_flags:
+        if held:              # A pressed = character peeking out (exposed)
             run += 1
-        else:                 # A released = back to cover: finalise the exposed run
+        else:                 # A released = back to cover: finalise the peek run
             total += run_value(run)
             run = 0
     total += run_value(run)   # finalise last run
@@ -63,10 +62,10 @@ class TimeCrisisEnv:
         self.prev: dict[str, int] = {}
         self.start_timer = 0
         self.ticks = 0
-        self.prev_cover: bool = False
-        self.cover_ticks: int = 0
-        self.cover_lock: int = 0   # minimum hold: any transition holds for COVER_TRAVERSE_TICKS
-        self.cover_locked_value: bool = False   # what state the lock is holding
+        self.prev_peek: bool = False
+        self.peek_ticks: int = 0
+        self.peek_lock: int = 0   # minimum hold: any transition holds for PEEK_TRAVERSE_TICKS
+        self.peek_locked_value: bool = False   # what state the lock is holding
         self.ammo_left: int = AMMO_MAX_ROUNDS
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
         self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
@@ -96,7 +95,7 @@ class TimeCrisisEnv:
         }
 
     @staticmethod
-    def _build_obs(cur, last_hit: int, last_miss: int, cover_phase: float = 0.0,
+    def _build_obs(cur, last_hit: int, last_miss: int, peek_phase: float = 0.0,
                    ammo_left: int = AMMO_MAX_ROUNDS,
                    prev_aim_x_bias: float = 0.0, prev_aim_y_bias: float = 0.0) -> np.ndarray:
         fired = max(cur["shots_fired"], 1)
@@ -108,7 +107,7 @@ class TimeCrisisEnv:
             cur["shots_hit"] / fired,
             float(last_hit),
             float(last_miss),
-            cover_phase,
+            peek_phase,
             ammo_left / AMMO_MAX_ROUNDS,
             prev_aim_x_bias,
             prev_aim_y_bias,
@@ -122,10 +121,12 @@ class TimeCrisisEnv:
         self.prev = self._read_core()
         self.start_timer = self.prev["timer"]
         self.ticks = 0
-        self.prev_cover = False
-        self.cover_ticks = 0
-        self.cover_lock = 0
-        self.cover_locked_value = False
+        # Character always starts in cover at the top of each screen; the peek
+        # button (A) is released and the traverse animation hasn't begun yet.
+        self.prev_peek = False
+        self.peek_ticks = 0
+        self.peek_lock = 0
+        self.peek_locked_value = False
         self.ammo_left = AMMO_MAX_ROUNDS
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
@@ -133,10 +134,10 @@ class TimeCrisisEnv:
         return self._build_obs(self.prev, 0, 0, 0.0, self.ammo_left, self.prev_aim_x_bias, self.prev_aim_y_bias)
 
     def step(self, theta: np.ndarray):
-        cover_phase = (self.cover_ticks / COVER_TRAVERSE_TICKS) * (1.0 if self.prev_cover else -1.0)
-        shoot, cover, aim_x_bias, aim_y_bias = act(
+        peek_phase = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if self.prev_peek else -1.0)
+        shoot, peek, aim_x_bias, aim_y_bias = act(
             theta, self._build_obs(
-                self.prev, 0, 0, cover_phase, self.ammo_left,
+                self.prev, 0, 0, peek_phase, self.ammo_left,
                 self.prev_aim_x_bias, self.prev_aim_y_bias,
             )
         )
@@ -148,29 +149,28 @@ class TimeCrisisEnv:
         # scale the network already outputs/consumes.
         self.prev_aim_x_bias = float(aim_x_bias)
         self.prev_aim_y_bias = float(aim_y_bias)
-        # cover=True  -> A button PRESSED  -> character EXITS cover (exposed, can shoot)
-        # cover=False -> A button RELEASED -> character STAYS in cover (protected)
-        # The name is inverted vs. the game state; see cover_hold_reward docstring.
+        # peek=True  -> A button PRESSED  -> character EXITS cover (exposed, can shoot)
+        # peek=False -> A button RELEASED -> character STAYS in cover (protected)
 
         # Minimum hold lock: BOTH transitions (into cover and out of cover) have
-        # to be held for COVER_TRAVERSE_TICKS ticks so the traverse animation can
+        # to be held for PEEK_TRAVERSE_TICKS ticks so the traverse animation can
         # complete. Previously only the False→True transition (leaving cover) was
         # locked, which let the policy re-enter cover for just a single tick
         # before being forced back out -- the "1 tick cover in-out" flicker
         # observed during training. Locking symmetrically kills that oscillation.
-        if self.cover_lock > 0:
-            cover = self.cover_locked_value
-            self.cover_lock -= 1
-        elif cover != self.prev_cover:
+        if self.peek_lock > 0:
+            peek = self.peek_locked_value
+            self.peek_lock -= 1
+        elif peek != self.prev_peek:
             # Any transition: lock the new state
-            self.cover_lock = COVER_TRAVERSE_TICKS - 1  # -1 because this tick counts
-            self.cover_locked_value = cover
+            self.peek_lock = PEEK_TRAVERSE_TICKS - 1  # -1 because this tick counts
+            self.peek_locked_value = peek
 
         # Gate the trigger: shots only register when the character is FULLY out of
-        # cover (A held for at least COVER_TRAVERSE_TICKS consecutive ticks).  Firing
+        # cover (A held for at least PEEK_TRAVERSE_TICKS consecutive ticks).  Firing
         # during the transition animation silently fails in-game, so we block it here
         # to avoid wasting the edge-trigger on a guaranteed miss.
-        shoot_allowed = cover and self.prev_cover and self.cover_ticks >= COVER_TRAVERSE_TICKS
+        shoot_allowed = peek and self.prev_peek and self.peek_ticks >= PEEK_TRAVERSE_TICKS
         # Full-range mapping: tanh bias [-1, 1] spans the full screen [0, 1].
         # Using 0.5× previously kept the cursor in [0.17, 0.83] with typical
         # small initial weights; 1.0× lets early exploration reach the edges.
@@ -187,7 +187,7 @@ class TimeCrisisEnv:
             # shoot_allowed ensures the trigger only fires when fully exposed.
             self.client.set_input(
                 shoot=bool(shoot and shoot_allowed and f < 2),
-                cover=cover,
+                peek=peek,
                 aim_x=aim_x,
                 aim_y=aim_y,
             )
@@ -237,9 +237,9 @@ class TimeCrisisEnv:
         # full clip. Using a flat bonus (not scaled by shots fired) avoids
         # incentivising magdumping just to inflate the reload reward.
         self.ammo_left = max(0, self.ammo_left - total_fired)
-        entering_cover = (cover != self.prev_cover) and not cover
+        ending_peek = (peek != self.prev_peek) and not peek
         reload_correct = False
-        if entering_cover:
+        if ending_peek:
             reload_correct = self.ammo_left == 0
             self.ammo_left = AMMO_MAX_ROUNDS
 
@@ -257,14 +257,14 @@ class TimeCrisisEnv:
 
         last_hit  = 1 if total_hit > 0 else 0
         last_miss = 1 if (total_fired > 0 and total_hit == 0) else 0
-        if cover == self.prev_cover:
-            self.cover_ticks = min(self.cover_ticks + 1, COVER_TRAVERSE_TICKS)
+        if peek == self.prev_peek:
+            self.peek_ticks = min(self.peek_ticks + 1, PEEK_TRAVERSE_TICKS)
         else:
-            self.cover_ticks = 1
-        self.prev_cover = cover
-        cover_phase_next = (self.cover_ticks / COVER_TRAVERSE_TICKS) * (1.0 if cover else -1.0)
+            self.peek_ticks = 1
+        self.prev_peek = peek
+        peek_phase_next = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if peek else -1.0)
         obs = self._build_obs(
-            self.prev, last_hit, last_miss, cover_phase_next, self.ammo_left,
+            self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left,
             self.prev_aim_x_bias, self.prev_aim_y_bias,
         )
 
@@ -276,7 +276,7 @@ class TimeCrisisEnv:
             "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
             "dead": dead_guess,
             "timed_out": timed_out_guess,
-            "cover": bool(cover),
+            "peek": bool(peek),
             "phase": phase.name,
             "dry_fire": dry_fire,
             "reload_correct": reload_correct,
@@ -292,8 +292,8 @@ class TimeCrisisEnv:
         reload_correct_count = 0
         cleared = False
         timed_out = dead = False
-        # Record (cover, shots_fired) per tick for post-episode reward shaping.
-        cover_flags = []
+        # Record (peek, shots_fired) per tick for post-episode diagnostics.
+        peek_flags = []
         shots_per_tick = []
 
         while True:
@@ -304,7 +304,7 @@ class TimeCrisisEnv:
             cleared = cleared or info["cleared"]
             timed_out = timed_out or info["timed_out"]
             dead = dead or info["dead"]
-            cover_flags.append(info["cover"])
+            peek_flags.append(info["peek"])
             shots_per_tick.append(info["shots_fired_delta"])
             dry_fire_ticks += int(info["dry_fire"])
             reload_correct_count += int(info["reload_correct"])
@@ -317,7 +317,7 @@ class TimeCrisisEnv:
             fitness = CLEAR_BONUS - elapsed - DAMAGE_PENALTY * total_life_loss
         else:
             fitness = -FAIL_PENALTY
-        # Diagnostics only (NOT added to fitness): cover_hold_score, cover_flips
+        # Diagnostics only (NOT added to fitness): peek_hold_score, peek_flips
         # and ticks_in_cover used to feed reward shaping (COVER_HOLD_REWARD,
         # COVER_FLIP_PENALTY, COVER_TIME_PENALTY); that noisy shaping was
         # removed so raw ES only optimizes the actual outcome. Kept here purely
@@ -325,27 +325,27 @@ class TimeCrisisEnv:
         hold_score = 0.0
         _run_ticks = 0
         _run_shot = False
-        for _cv, _sf in zip(cover_flags, shots_per_tick):
-            if _cv:                        # exposed
+        for _pk, _sf in zip(peek_flags, shots_per_tick):
+            if _pk:                        # peeking out (exposed)
                 _run_ticks += 1
                 if _sf > 0:
                     _run_shot = True
-            else:                          # ducked back into cover
+            else:                          # returned to cover
                 if _run_shot:
                     hold_score += min(
-                        max(_run_ticks - 1, 0), COVER_TRAVERSE_TICKS - 1
+                        max(_run_ticks - 1, 0), PEEK_TRAVERSE_TICKS - 1
                     )
                 _run_ticks = 0
                 _run_shot = False
-        if _run_shot:                      # episode ended while still exposed
+        if _run_shot:                      # episode ended while still peeking
             hold_score += min(
-                max(_run_ticks - 1, 0), COVER_TRAVERSE_TICKS - 1
+                max(_run_ticks - 1, 0), PEEK_TRAVERSE_TICKS - 1
             )
-        cover_flips = sum(
-            1 for i in range(1, len(cover_flags))
-            if cover_flags[i] != cover_flags[i - 1]
+        peek_flips = sum(
+            1 for i in range(1, len(peek_flags))
+            if peek_flags[i] != peek_flags[i - 1]
         )
-        ticks_in_cover = sum(1 for f in cover_flags if not f)  # A NOT pressed = protected
+        ticks_in_cover = sum(1 for f in peek_flags if not f)  # A NOT pressed = protected
 
         fitness += HIT_REWARD * total_hits
         fitness -= DRY_FIRE_PENALTY * dry_fire_ticks
@@ -360,8 +360,8 @@ class TimeCrisisEnv:
             "accuracy": float(total_hits / max(total_fired, 1)),
             "shots_fired": int(total_fired),
             "shots_hit": int(total_hits),
-            "cover_flips": int(cover_flips),
-            "cover_hold_score": float(hold_score),
+            "peek_flips": int(peek_flips),
+            "peek_hold_score": float(hold_score),
             "cover_time": int(ticks_in_cover),
             "dry_fire_ticks": int(dry_fire_ticks),
             "reload_correct_count": int(reload_correct_count),
