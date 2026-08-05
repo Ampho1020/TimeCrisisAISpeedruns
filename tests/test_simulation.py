@@ -24,12 +24,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from config import (
     ACT_DIM, AMMO_MAX_ROUNDS, CONTINUE_SCREEN_STALE_TICKS,
     CURSOR_X_MAX, CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN, HIDDEN, OBS_DIM,
-    PEEK_TRAVERSE_TICKS, RAM,
+    FRAME_SKIP, MAX_TICKS, PEEK_TRAVERSE_TICKS, RAM, TIMEOUT_TIMER_THRESHOLD,
     SIGMA as CFG_SIGMA, STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT,
     STD_STAGNATION_THRESHOLD,
 )
-from env_timecrisis import TimeCrisisEnv, normalize_cursor
-from phase_inference import PhaseInferer
+from env_timecrisis import TimeCrisisEnv, core_watchdog_snapshot, normalize_cursor, u16_delta
+from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import PARAM_COUNT
 
 
@@ -278,6 +278,758 @@ class FrozenStateEnv(SimulatedTimeCrisisEnv):
         self.ammo_left          = AMMO_MAX_ROUNDS
         self.prev_aim_x_bias    = 0.0
         self.prev_aim_y_bias    = 0.0
+
+
+class TimedSpotGame:
+    """Simulation variant with 5 random screen spots that become "good"
+    one-at-a-time on a fixed time schedule.
+
+    This is a better proxy for moving/running enemies than the static 3-spot
+    model: the best aim point depends on *when* the shot is taken, not just
+    where. The 5 spots are sampled once per env seed and then revisited on a
+    repeating frame schedule.
+    """
+
+    TIMER_START = 5000
+    TIMED_SPOT_COUNT = 5
+    SPOT_HOLD_FRAMES = 30
+    ENEMIES_TOTAL = 15
+    HIT_PROB_PEAK = 1.0
+    HIT_PROB_FLOOR = 0.02
+    HIT_FALLOFF_RADIUS = 0.18
+    DAMAGE_PER_HIT = 20
+    DAMAGE_PROB_PER_FRAME = 0.0025
+    _X_BOUNDS = (0.18, 0.82)
+    _Y_BOUNDS = (0.18, 0.78)
+    _MIN_SPOT_DIST = 0.14
+
+    def __init__(self, seed: int = 0):
+        self._rng = np.random.default_rng(seed)
+        self.spots = self._sample_spots()
+        self.frame_count = 0
+        self._reset_state()
+
+    def _sample_spots(self):
+        spots = []
+        while len(spots) < self.TIMED_SPOT_COUNT:
+            x = float(self._rng.uniform(*self._X_BOUNDS))
+            y = float(self._rng.uniform(*self._Y_BOUNDS))
+            if all(((x - px) ** 2 + (y - py) ** 2) ** 0.5 >= self._MIN_SPOT_DIST for px, py in spots):
+                spots.append((x, y))
+        return spots
+
+    def _reset_state(self):
+        self.shots_fired = 0
+        self.shots_hit = 0
+        self.timer = self.TIMER_START
+        self.life = 100
+        self.enemies_left = self.ENEMIES_TOTAL
+        self.cleared = False
+        self._shoot = False
+        self._peek = False
+        self._aim_x = 0.5
+        self._aim_y = 0.5
+        self.ammo = AMMO_MAX_ROUNDS
+        self.last_success_frame = -1
+        self.last_success_aim_x = 0.5
+        self.last_success_aim_y = 0.5
+        self.last_success_spot_index = -1
+
+    def reset(self):
+        self._reset_state()
+
+    def set_input(self, shoot: bool, peek: bool,
+                  aim_x: float = 0.5, aim_y: float = 0.5):
+        peek = bool(peek)
+        if self._peek and not peek:
+            self.ammo = AMMO_MAX_ROUNDS
+        self._shoot = bool(shoot)
+        self._peek = peek
+        self._aim_x = float(aim_x)
+        self._aim_y = float(aim_y)
+
+    def active_spot_index(self) -> int:
+        return int((self.frame_count // self.SPOT_HOLD_FRAMES) % len(self.spots))
+
+    def active_spot(self):
+        return self.spots[self.active_spot_index()]
+
+    def step_frame(self):
+        self.frame_count += 1
+
+        if not self.cleared:
+            self.timer = max(0, self.timer - 1)
+
+        if not self._peek or self.cleared or self.life <= 0:
+            return
+
+        if self._shoot and self.enemies_left > 0 and self.ammo > 0:
+            self.ammo -= 1
+            self.shots_fired = (self.shots_fired + 1) & 0xFFFF
+
+            spot_i = self.active_spot_index()
+            tx, ty = self.spots[spot_i]
+            dist = ((self._aim_x - tx) ** 2 + (self._aim_y - ty) ** 2) ** 0.5
+            hit_prob = max(
+                self.HIT_PROB_FLOOR,
+                self.HIT_PROB_PEAK - (self.HIT_PROB_PEAK - self.HIT_PROB_FLOOR)
+                * dist / self.HIT_FALLOFF_RADIUS,
+            )
+            if self._rng.random() < hit_prob:
+                self.shots_hit = (self.shots_hit + 1) & 0xFFFF
+                self.enemies_left -= 1
+                self.last_success_frame = self.frame_count
+                self.last_success_aim_x = self._aim_x
+                self.last_success_aim_y = self._aim_y
+                self.last_success_spot_index = spot_i
+                if self.enemies_left == 0:
+                    self.cleared = True
+                    self.timer = (self.timer + 10_000) & 0xFFFF
+
+        if self._rng.random() < self.DAMAGE_PROB_PER_FRAME and self.enemies_left > 0:
+            self.life = max(0, self.life - self.DAMAGE_PER_HIT)
+
+    def read_u16(self, addr: int) -> int:
+        if addr == RAM.shots_fired: return self.shots_fired
+        if addr == RAM.shots_hit:   return self.shots_hit
+        if addr == RAM.timer:       return self.timer
+        if addr == RAM.life:        return self.life
+        if addr == RAM.cursor_x:
+            return int(round(CURSOR_X_MIN + self._aim_x * (CURSOR_X_MAX - CURSOR_X_MIN)))
+        if addr == RAM.cursor_y:
+            return int(round(CURSOR_Y_MIN + self._aim_y * (CURSOR_Y_MAX - CURSOR_Y_MIN)))
+        return 0
+
+
+class TimedSpotBaselineEnv(SimulatedTimeCrisisEnv):
+    """Baseline observation stack on the timed 5-random-spot game."""
+
+    def __init__(self, seed: int = 0):
+        game = TimedSpotGame(seed=seed)
+        self.client             = MockBridgeClient(game)
+        self.state_slot         = 1
+        self.phase_infer        = PhaseInferer(vote_window=3)
+        self.prev: dict         = {}
+        self.start_timer        = 0
+        self.ticks              = 0
+        self.prev_peek          = False
+        self.peek_ticks         = 0
+        self.peek_lock          = 0
+        self.peek_locked_value  = False
+        self.stale_core_ticks   = 0
+        self.ammo_left          = AMMO_MAX_ROUNDS
+        self.prev_aim_x_bias    = 0.0
+        self.prev_aim_y_bias    = 0.0
+
+
+_SIM_MEMORY_EXTRA_DIMS = 3
+_SIM_MEMORY_OBS_DIM = OBS_DIM + _SIM_MEMORY_EXTRA_DIMS
+_SIM_MEMORY_PARAM_COUNT = _SIM_MEMORY_OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM + ACT_DIM
+_SIM_MEMORY_B2_OFFSET = _SIM_MEMORY_OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM
+
+
+def _act_with_obs_dim(theta: np.ndarray, obs: np.ndarray, obs_dim: int):
+    i = 0
+    w1 = theta[i:i + obs_dim * HIDDEN].reshape(obs_dim, HIDDEN); i += obs_dim * HIDDEN
+    b1 = theta[i:i + HIDDEN];                                     i += HIDDEN
+    w2 = theta[i:i + HIDDEN * ACT_DIM].reshape(HIDDEN, ACT_DIM);  i += HIDDEN * ACT_DIM
+    b2 = theta[i:i + ACT_DIM]
+    h = np.tanh(obs @ w1 + b1)
+    out = h @ w2 + b2
+    return bool(out[0] > 0.0), bool(out[1] > 0.0), float(np.tanh(out[2])), float(np.tanh(out[3]))
+
+
+def _theta_memory_warm_start(seed: int = 42) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    theta = rng.normal(0.0, 0.1, _SIM_MEMORY_PARAM_COUNT)
+    theta[_SIM_MEMORY_B2_OFFSET + 0] += 2.0
+    theta[_SIM_MEMORY_B2_OFFSET + 1] += 1.0
+    return theta
+
+
+def _theta_memory_always_aim(aim_x: float, aim_y: float) -> np.ndarray:
+    theta = np.zeros(_SIM_MEMORY_PARAM_COUNT)
+    theta[_SIM_MEMORY_B2_OFFSET + 0] = 50.0
+    theta[_SIM_MEMORY_B2_OFFSET + 1] = 50.0
+    theta[_SIM_MEMORY_B2_OFFSET + 2] = _aim_bias_for(aim_x)
+    theta[_SIM_MEMORY_B2_OFFSET + 3] = _aim_bias_for(aim_y)
+    return theta
+
+
+class TimedSpotMemoryEnv(TimedSpotBaselineEnv):
+    """Simulation-only v2 env: timed 5-spot game + memory of the last
+    successful firing position and how long ago it worked."""
+
+    MEMORY_HORIZON_TICKS = TimedSpotGame.TIMED_SPOT_COUNT * TimedSpotGame.SPOT_HOLD_FRAMES
+
+    def reset(self) -> np.ndarray:
+        self.client.load_state(self.state_slot)
+        self.client.step_frames(2)
+        self.prev = self._read_core()
+        self.start_timer = self.prev["timer"]
+        self.ticks = 0
+        self.prev_peek = False
+        self.peek_ticks = 0
+        self.peek_lock = 0
+        self.peek_locked_value = False
+        self.stale_core_ticks = 0
+        self.ammo_left = AMMO_MAX_ROUNDS
+        self.prev_aim_x_bias = 0.0
+        self.prev_aim_y_bias = 0.0
+        self.last_success_aim_x = 0.5
+        self.last_success_aim_y = 0.5
+        self.ticks_since_success = self.MEMORY_HORIZON_TICKS
+        self.phase_infer.reset()
+        return self._build_obs_v2(self.prev, 0, 0, 0.0, self.ammo_left)
+
+    def _build_obs_v2(self, cur, last_hit: int, last_miss: int,
+                      peek_phase: float = 0.0,
+                      ammo_left: int = AMMO_MAX_ROUNDS) -> np.ndarray:
+        base = self._build_obs(
+            cur,
+            last_hit,
+            last_miss,
+            peek_phase,
+            ammo_left,
+            self.prev_aim_x_bias,
+            self.prev_aim_y_bias,
+        )
+        since_norm = min(self.ticks_since_success / self.MEMORY_HORIZON_TICKS, 1.0)
+        memory = np.array([
+            self.last_success_aim_x,
+            self.last_success_aim_y,
+            since_norm,
+        ], dtype=np.float32)
+        return np.concatenate([base, memory], dtype=np.float32)
+
+    def step(self, theta: np.ndarray):
+        peek_phase = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if self.prev_peek else -1.0)
+        shoot, peek, aim_x_bias, aim_y_bias = _act_with_obs_dim(
+            theta,
+            self._build_obs_v2(self.prev, 0, 0, peek_phase, self.ammo_left),
+            _SIM_MEMORY_OBS_DIM,
+        )
+        self.prev_aim_x_bias = float(aim_x_bias)
+        self.prev_aim_y_bias = float(aim_y_bias)
+
+        if self.ammo_left == 0:
+            peek = False
+
+        if self.peek_lock > 0:
+            peek = self.peek_locked_value
+            self.peek_lock -= 1
+        elif peek != self.prev_peek:
+            self.peek_lock = PEEK_TRAVERSE_TICKS - 1
+            self.peek_locked_value = peek
+
+        shoot_allowed = peek and self.prev_peek and self.peek_ticks >= PEEK_TRAVERSE_TICKS
+        aim_x = min(1.0, max(0.0, 0.5 + float(aim_x_bias)))
+        aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
+
+        total_fired = total_hit = total_life_loss = 0
+        cleared_guess = dead_guess = timed_out_guess = False
+        continue_screen_guess = False
+        tick_start_core = core_watchdog_snapshot(self.prev)
+        timer_at_tick_start = self.prev["timer"]
+
+        for f in range(FRAME_SKIP):
+            self.client.set_input(
+                shoot=bool(shoot and shoot_allowed and f < 2),
+                peek=peek,
+                aim_x=aim_x,
+                aim_y=aim_y,
+            )
+
+            pre = self.prev
+            self.client.step_frames(1)
+            post = self._read_core()
+
+            total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
+            total_hit   += max(0, u16_delta(post["shots_hit"],   pre["shots_hit"]))
+            life_d       = u16_delta(post["life"], pre["life"])
+            if life_d < 0:
+                total_life_loss += -life_d
+
+            lethal_wrap = (
+                pre["life"] > 0
+                and life_d < 0
+                and post["life"] > pre["life"]
+                and post["life"] >= 65000
+            )
+            if post["life"] == 0 or lethal_wrap:
+                dead_guess = True
+            if u16_delta(post["timer"], self.start_timer) > 100:
+                cleared_guess = True
+            timer_step = u16_delta(post["timer"], pre["timer"])
+            if post["timer"] <= TIMEOUT_TIMER_THRESHOLD or (
+                timer_step < 0 and pre["timer"] + timer_step <= TIMEOUT_TIMER_THRESHOLD
+            ):
+                timed_out_guess = True
+
+            self.prev = post
+            if dead_guess or cleared_guess or timed_out_guess:
+                break
+
+        if (
+            not dead_guess
+            and not cleared_guess
+            and not timed_out_guess
+            and core_watchdog_snapshot(self.prev) == tick_start_core
+        ):
+            self.stale_core_ticks += 1
+        else:
+            self.stale_core_ticks = 0
+        if self.stale_core_ticks >= CONTINUE_SCREEN_STALE_TICKS:
+            timed_out_guess = True
+            continue_screen_guess = True
+
+        ammo_before_tick = self.ammo_left
+        dry_fire = bool(shoot_allowed and ammo_before_tick == 0)
+        self.ammo_left = max(0, self.ammo_left - total_fired)
+        ending_peek = (peek != self.prev_peek) and not peek
+        reload_correct = False
+        if ending_peek:
+            reload_correct = self.ammo_left == 0
+            self.ammo_left = AMMO_MAX_ROUNDS
+
+        self.ticks += 1
+
+        if total_hit > 0:
+            self.last_success_aim_x = float(aim_x)
+            self.last_success_aim_y = float(aim_y)
+            self.ticks_since_success = 0
+        else:
+            self.ticks_since_success = min(self.ticks_since_success + 1, self.MEMORY_HORIZON_TICKS)
+
+        phase = self.phase_infer.infer(TickSignals(
+            shots_fired_delta=total_fired,
+            shots_hit_delta=total_hit,
+            life_delta=-total_life_loss,
+            timer_delta=u16_delta(self.prev["timer"], timer_at_tick_start),
+            cleared_guess=cleared_guess,
+            dead_guess=dead_guess or timed_out_guess,
+            can_fire_probe=(total_fired > 0),
+        ))
+
+        last_hit = 1 if total_hit > 0 else 0
+        last_miss = 1 if (total_fired > 0 and total_hit == 0) else 0
+        if peek == self.prev_peek:
+            self.peek_ticks = min(self.peek_ticks + 1, PEEK_TRAVERSE_TICKS)
+        else:
+            self.peek_ticks = 1
+        self.prev_peek = peek
+        peek_phase_next = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if peek else -1.0)
+        obs = self._build_obs_v2(self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left)
+
+        game = self.client._game
+        active_x, active_y = game.active_spot()
+
+        done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
+        info = {
+            "shots_fired_delta": total_fired,
+            "shots_hit_delta": total_hit,
+            "life_loss": total_life_loss,
+            "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
+            "dead": dead_guess,
+            "timed_out": timed_out_guess,
+            "continue_screen": continue_screen_guess,
+            "peek": bool(peek),
+            "phase": phase.name,
+            "dry_fire": dry_fire,
+            "reload_correct": reload_correct,
+            "ammo_left": self.ammo_left,
+            "aim_x": float(aim_x),
+            "aim_y": float(aim_y),
+            "last_success_aim_x": float(self.last_success_aim_x),
+            "last_success_aim_y": float(self.last_success_aim_y),
+            "ticks_since_success": int(self.ticks_since_success),
+            "active_spot_index": int(game.active_spot_index()),
+            "active_spot_x": float(active_x),
+            "active_spot_y": float(active_y),
+        }
+        return obs, done, info
+
+
+# ---------------------------------------------------------------------------
+# Hotspot-bank memory (v3): remember several recent hits, not just the last
+# ---------------------------------------------------------------------------
+
+HOTSPOT_BANK_CAPACITY = 5
+HOTSPOT_MERGE_RADIUS = 0.12
+
+
+class HotspotBank:
+    """Fixed-capacity memory of recently-confirmed successful aim spots.
+
+    Purely feedback-driven: only ever updated from the policy's own confirmed
+    hits, never from the game's true target schedule, so it can't leak ground
+    truth into the observation. Each slot tracks (x, y, ticks_since_hit,
+    hit_count); a hit near an existing slot merges into it (EMA position
+    update, ``hit_count += 1``, recency reset) instead of spawning a
+    duplicate. Once the bank is full, a new, sufficiently distinct hit evicts
+    whichever slot currently has the weakest recency+confidence score.
+    """
+
+    def __init__(self, capacity: int = HOTSPOT_BANK_CAPACITY,
+                 merge_radius: float = HOTSPOT_MERGE_RADIUS,
+                 recency_horizon: int = 150, ema_alpha: float = 0.3):
+        self.capacity = capacity
+        self.merge_radius = merge_radius
+        self.recency_horizon = recency_horizon
+        self.ema_alpha = ema_alpha
+        self.slots: list[dict] = []
+
+    def reset(self) -> None:
+        self.slots = []
+
+    def tick(self) -> None:
+        """Age every remembered slot by one decision tick."""
+        for slot in self.slots:
+            slot["ticks_since_hit"] = min(slot["ticks_since_hit"] + 1, self.recency_horizon)
+
+    def _slot_score(self, slot: dict) -> float:
+        """Higher = fresher and/or more confirmed -- worth aiming at again."""
+        recency = 1.0 - min(slot["ticks_since_hit"] / self.recency_horizon, 1.0)
+        confidence = min(slot["hit_count"], 5) / 5.0
+        return 0.5 * recency + 0.5 * confidence
+
+    def record_hit(self, x: float, y: float) -> None:
+        nearest, nearest_dist = None, None
+        for slot in self.slots:
+            d = ((slot["x"] - x) ** 2 + (slot["y"] - y) ** 2) ** 0.5
+            if nearest_dist is None or d < nearest_dist:
+                nearest, nearest_dist = slot, d
+
+        if nearest is not None and nearest_dist <= self.merge_radius:
+            nearest["x"] += self.ema_alpha * (x - nearest["x"])
+            nearest["y"] += self.ema_alpha * (y - nearest["y"])
+            nearest["ticks_since_hit"] = 0
+            nearest["hit_count"] += 1
+            return
+
+        new_slot = {"x": float(x), "y": float(y), "ticks_since_hit": 0, "hit_count": 1}
+        if len(self.slots) < self.capacity:
+            self.slots.append(new_slot)
+            return
+
+        worst_i = min(range(len(self.slots)), key=lambda i: self._slot_score(self.slots[i]))
+        self.slots[worst_i] = new_slot
+
+    def best_candidate(self):
+        """Return (x, y, confidence_norm, recency_norm) for the top-scoring
+        slot (recency_norm: 0 = just hit, 1 = stale/at-or-past the horizon),
+        or a neutral, maximally-stale default when the bank is empty."""
+        if not self.slots:
+            return 0.5, 0.5, 0.0, 1.0
+        best = max(self.slots, key=self._slot_score)
+        confidence_norm = min(best["hit_count"], 5) / 5.0
+        recency_norm = min(best["ticks_since_hit"] / self.recency_horizon, 1.0)
+        return best["x"], best["y"], confidence_norm, recency_norm
+
+
+_SIM_HOTSPOT_EXTRA_DIMS = 4
+_SIM_HOTSPOT_OBS_DIM = OBS_DIM + _SIM_HOTSPOT_EXTRA_DIMS
+_SIM_HOTSPOT_PARAM_COUNT = _SIM_HOTSPOT_OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM + ACT_DIM
+_SIM_HOTSPOT_B2_OFFSET = _SIM_HOTSPOT_OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM
+
+
+def _theta_hotspot_warm_start(seed: int = 42) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    theta = rng.normal(0.0, 0.1, _SIM_HOTSPOT_PARAM_COUNT)
+    theta[_SIM_HOTSPOT_B2_OFFSET + 0] += 2.0  # shoot logit
+    theta[_SIM_HOTSPOT_B2_OFFSET + 1] += 1.0  # peek  logit
+    return theta
+
+
+def _theta_hotspot_always_aim(aim_x: float, aim_y: float) -> np.ndarray:
+    theta = np.zeros(_SIM_HOTSPOT_PARAM_COUNT)
+    theta[_SIM_HOTSPOT_B2_OFFSET + 0] = 50.0  # shoot logit: always shoot
+    theta[_SIM_HOTSPOT_B2_OFFSET + 1] = 50.0  # peek  logit: always exposed
+    theta[_SIM_HOTSPOT_B2_OFFSET + 2] = _aim_bias_for(aim_x)
+    theta[_SIM_HOTSPOT_B2_OFFSET + 3] = _aim_bias_for(aim_y)
+    return theta
+
+
+class TimedSpotHotspotMemoryEnv(TimedSpotBaselineEnv):
+    """Simulation-only v3 env: timed 5-spot game + a small bank of recently
+    confirmed hotspots (position, recency, confidence) instead of
+    remembering only the single last successful shot (see
+    ``TimedSpotMemoryEnv``). Feedback-driven only: the bank is built purely
+    from the policy's own confirmed hits and never reads the game's true
+    active-spot schedule, so it can't leak ground truth into the
+    observation.
+    """
+
+    def __init__(self, seed: int = 0):
+        game = TimedSpotGame(seed=seed)
+        self.client             = MockBridgeClient(game)
+        self.state_slot         = 1
+        self.phase_infer        = PhaseInferer(vote_window=3)
+        self.prev: dict         = {}
+        self.start_timer        = 0
+        self.ticks              = 0
+        self.prev_peek          = False
+        self.peek_ticks         = 0
+        self.peek_lock          = 0
+        self.peek_locked_value  = False
+        self.stale_core_ticks   = 0
+        self.ammo_left          = AMMO_MAX_ROUNDS
+        self.prev_aim_x_bias    = 0.0
+        self.prev_aim_y_bias    = 0.0
+        self.hotspots           = HotspotBank()
+
+    def reset(self) -> np.ndarray:
+        self.client.load_state(self.state_slot)
+        self.client.step_frames(2)
+        self.prev = self._read_core()
+        self.start_timer = self.prev["timer"]
+        self.ticks = 0
+        self.prev_peek = False
+        self.peek_ticks = 0
+        self.peek_lock = 0
+        self.peek_locked_value = False
+        self.stale_core_ticks = 0
+        self.ammo_left = AMMO_MAX_ROUNDS
+        self.prev_aim_x_bias = 0.0
+        self.prev_aim_y_bias = 0.0
+        self.hotspots.reset()
+        self.phase_infer.reset()
+        return self._build_obs_v3(self.prev, 0, 0, 0.0, self.ammo_left)
+
+    def _build_obs_v3(self, cur, last_hit: int, last_miss: int,
+                      peek_phase: float = 0.0,
+                      ammo_left: int = AMMO_MAX_ROUNDS) -> np.ndarray:
+        base = self._build_obs(
+            cur, last_hit, last_miss, peek_phase, ammo_left,
+            self.prev_aim_x_bias, self.prev_aim_y_bias,
+        )
+        best_x, best_y, confidence_norm, recency_norm = self.hotspots.best_candidate()
+        memory = np.array([best_x, best_y, confidence_norm, recency_norm], dtype=np.float32)
+        return np.concatenate([base, memory], dtype=np.float32)
+
+    def step(self, theta: np.ndarray):
+        peek_phase = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if self.prev_peek else -1.0)
+        shoot, peek, aim_x_bias, aim_y_bias = _act_with_obs_dim(
+            theta,
+            self._build_obs_v3(self.prev, 0, 0, peek_phase, self.ammo_left),
+            _SIM_HOTSPOT_OBS_DIM,
+        )
+        self.prev_aim_x_bias = float(aim_x_bias)
+        self.prev_aim_y_bias = float(aim_y_bias)
+
+        if self.ammo_left == 0:
+            peek = False
+
+        if self.peek_lock > 0:
+            peek = self.peek_locked_value
+            self.peek_lock -= 1
+        elif peek != self.prev_peek:
+            self.peek_lock = PEEK_TRAVERSE_TICKS - 1
+            self.peek_locked_value = peek
+
+        shoot_allowed = peek and self.prev_peek and self.peek_ticks >= PEEK_TRAVERSE_TICKS
+        aim_x = min(1.0, max(0.0, 0.5 + float(aim_x_bias)))
+        aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
+
+        total_fired = total_hit = total_life_loss = 0
+        cleared_guess = dead_guess = timed_out_guess = False
+        continue_screen_guess = False
+        tick_start_core = core_watchdog_snapshot(self.prev)
+        timer_at_tick_start = self.prev["timer"]
+
+        for f in range(FRAME_SKIP):
+            self.client.set_input(
+                shoot=bool(shoot and shoot_allowed and f < 2),
+                peek=peek,
+                aim_x=aim_x,
+                aim_y=aim_y,
+            )
+
+            pre = self.prev
+            self.client.step_frames(1)
+            post = self._read_core()
+
+            total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
+            total_hit   += max(0, u16_delta(post["shots_hit"],   pre["shots_hit"]))
+            life_d       = u16_delta(post["life"], pre["life"])
+            if life_d < 0:
+                total_life_loss += -life_d
+
+            lethal_wrap = (
+                pre["life"] > 0
+                and life_d < 0
+                and post["life"] > pre["life"]
+                and post["life"] >= 65000
+            )
+            if post["life"] == 0 or lethal_wrap:
+                dead_guess = True
+            if u16_delta(post["timer"], self.start_timer) > 100:
+                cleared_guess = True
+            timer_step = u16_delta(post["timer"], pre["timer"])
+            if post["timer"] <= TIMEOUT_TIMER_THRESHOLD or (
+                timer_step < 0 and pre["timer"] + timer_step <= TIMEOUT_TIMER_THRESHOLD
+            ):
+                timed_out_guess = True
+
+            self.prev = post
+            if dead_guess or cleared_guess or timed_out_guess:
+                break
+
+        if (
+            not dead_guess
+            and not cleared_guess
+            and not timed_out_guess
+            and core_watchdog_snapshot(self.prev) == tick_start_core
+        ):
+            self.stale_core_ticks += 1
+        else:
+            self.stale_core_ticks = 0
+        if self.stale_core_ticks >= CONTINUE_SCREEN_STALE_TICKS:
+            timed_out_guess = True
+            continue_screen_guess = True
+
+        ammo_before_tick = self.ammo_left
+        dry_fire = bool(shoot_allowed and ammo_before_tick == 0)
+        self.ammo_left = max(0, self.ammo_left - total_fired)
+        ending_peek = (peek != self.prev_peek) and not peek
+        reload_correct = False
+        if ending_peek:
+            reload_correct = self.ammo_left == 0
+            self.ammo_left = AMMO_MAX_ROUNDS
+
+        self.ticks += 1
+
+        # Age the bank once per decision tick, then record this tick's hit
+        # (if any) at the aim position actually used -- never at the game's
+        # true active-spot position, which the policy has no access to.
+        self.hotspots.tick()
+        if total_hit > 0:
+            self.hotspots.record_hit(aim_x, aim_y)
+
+        phase = self.phase_infer.infer(TickSignals(
+            shots_fired_delta=total_fired,
+            shots_hit_delta=total_hit,
+            life_delta=-total_life_loss,
+            timer_delta=u16_delta(self.prev["timer"], timer_at_tick_start),
+            cleared_guess=cleared_guess,
+            dead_guess=dead_guess or timed_out_guess,
+            can_fire_probe=(total_fired > 0),
+        ))
+
+        last_hit = 1 if total_hit > 0 else 0
+        last_miss = 1 if (total_fired > 0 and total_hit == 0) else 0
+        if peek == self.prev_peek:
+            self.peek_ticks = min(self.peek_ticks + 1, PEEK_TRAVERSE_TICKS)
+        else:
+            self.peek_ticks = 1
+        self.prev_peek = peek
+        peek_phase_next = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if peek else -1.0)
+        obs = self._build_obs_v3(self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left)
+
+        game = self.client._game
+        active_x, active_y = game.active_spot()
+        best_x, best_y, confidence_norm, recency_norm = self.hotspots.best_candidate()
+
+        done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
+        info = {
+            "shots_fired_delta": total_fired,
+            "shots_hit_delta": total_hit,
+            "life_loss": total_life_loss,
+            "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
+            "dead": dead_guess,
+            "timed_out": timed_out_guess,
+            "continue_screen": continue_screen_guess,
+            "peek": bool(peek),
+            "phase": phase.name,
+            "dry_fire": dry_fire,
+            "reload_correct": reload_correct,
+            "ammo_left": self.ammo_left,
+            "aim_x": float(aim_x),
+            "aim_y": float(aim_y),
+            "hotspot_best_x": float(best_x),
+            "hotspot_best_y": float(best_y),
+            "hotspot_confidence": float(confidence_norm),
+            "hotspot_recency": float(recency_norm),
+            "hotspot_count": len(self.hotspots.slots),
+            "active_spot_index": int(game.active_spot_index()),
+            "active_spot_x": float(active_x),
+            "active_spot_y": float(active_y),
+        }
+        return obs, done, info
+
+
+# ---------------------------------------------------------------------------
+# Accuracy-shaped fitness (sim-only experiment, not in env_timecrisis.py)
+# ---------------------------------------------------------------------------
+
+# Production fitness (episode_fitness in env_timecrisis.py) only rewards raw
+# hit COUNT (HIT_REWARD * total_hits), not hit RATE -- a policy that fires
+# constantly and clears by attrition (guaranteed eventually, since duck-on-
+# empty is hard-enforced) can score well without ever improving accuracy,
+# which dilutes any accuracy-specific ranking signal. This weight is a
+# sim-only experiment to test whether directly rewarding accuracy helps ES
+# learn better aim -- NOT yet added to config.py/env_timecrisis.py.
+ACCURACY_BONUS_WEIGHT = 1000.0
+
+
+class AccuracyShapedFitnessMixin:
+    """Mix into any Simulated*Env to add an explicit accuracy-based term on
+    top of the existing production fitness formula (CLEAR_BONUS/elapsed/
+    damage/HIT_REWARD/etc., unchanged), to test whether a stronger,
+    accuracy-specific reward signal helps ES learn better aim than raw hit
+    count alone. Sim-only: does not touch env_timecrisis.py."""
+
+    ACCURACY_BONUS_WEIGHT = ACCURACY_BONUS_WEIGHT
+
+    def episode_fitness(self, theta: np.ndarray):
+        fitness, metrics = super().episode_fitness(theta)
+        fitness += self.ACCURACY_BONUS_WEIGHT * metrics["accuracy"]
+        return float(fitness), metrics
+
+
+class TimedSpotBaselineAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotBaselineEnv):
+    """Baseline observation stack on the timed 5-spot task, with the
+    accuracy-shaped fitness on top (sim-only A/B arm)."""
+
+
+def run_timed_spot_probe(env_cls, theta_init_fn, param_count: int,
+                         seed: int = 0, gens: int = 25, pop: int = 12,
+                         sigma: float = 0.1, alpha: float = 0.02):
+    """Short ES probe for the timed 5-spot task. Returns per-generation metrics."""
+    rng = np.random.default_rng(seed)
+    theta = theta_init_fn(seed)
+    history = []
+
+    for gen in range(gens):
+        half = pop // 2
+        eps_half = rng.normal(0.0, 1.0, (half, param_count))
+        eps = np.concatenate([eps_half, -eps_half])
+        candidates = theta + sigma * eps
+
+        fitnesses, infos = [], []
+        for i, cand in enumerate(candidates):
+            env = env_cls(seed=gen * pop + i)
+            fit, info = env.episode_fitness(cand)
+            fitnesses.append(fit)
+            infos.append(info)
+
+        fitnesses = np.asarray(fitnesses, dtype=np.float64)
+        history.append({
+            "gen": gen,
+            "mean": float(fitnesses.mean()),
+            "std": float(fitnesses.std()),
+            "best": float(fitnesses.max()),
+            "clear_rate": float(np.mean([1.0 if x["cleared"] else 0.0 for x in infos])),
+            "mean_acc": float(np.mean([x["accuracy"] for x in infos])),
+            "best_acc": float(np.max([x["accuracy"] for x in infos])),
+            "mean_hits": float(np.mean([x["shots_hit"] for x in infos])),
+        })
+
+        shaped = rank_transform(fitnesses)
+        gradient = (eps.T @ shaped) / (pop * sigma)
+        theta = theta + alpha * gradient
+
+    return history
 
 
 # ---------------------------------------------------------------------------
@@ -586,6 +1338,134 @@ class ContinueScreenWatchdogSuite(unittest.TestCase):
         self.assertIn("continue_screen_count", info)
         self.assertGreaterEqual(info["continue_screen_count"], 1)
         self.assertTrue(info["timed_out"])
+
+
+class TimedSpotMemorySuite(unittest.TestCase):
+    """Simulation-only v2 checks: timed 5-spot task and hit-memory fields."""
+
+    def test_timed_spots_advance_on_schedule(self):
+        game = TimedSpotGame(seed=0)
+        first = game.active_spot_index()
+        for _ in range(TimedSpotGame.SPOT_HOLD_FRAMES):
+            game.step_frame()
+        self.assertEqual(len(game.spots), TimedSpotGame.TIMED_SPOT_COUNT)
+        self.assertNotEqual(first, game.active_spot_index())
+
+    def test_memory_env_remembers_where_and_when_a_hit_worked(self):
+        env = TimedSpotMemoryEnv(seed=0)
+        env.reset()
+        target_x, target_y = env.client._game.active_spot()
+        theta = _theta_memory_always_aim(target_x, target_y)
+
+        hit_info = None
+        for _ in range(PEEK_TRAVERSE_TICKS + 2):
+            _, _, info = env.step(theta)
+            if info["shots_hit_delta"] > 0:
+                hit_info = info
+                break
+
+        self.assertIsNotNone(hit_info, "Exact active-spot aim should score a hit quickly")
+        self.assertAlmostEqual(hit_info["last_success_aim_x"], target_x, places=3)
+        self.assertAlmostEqual(hit_info["last_success_aim_y"], target_y, places=3)
+        self.assertEqual(hit_info["ticks_since_success"], 0)
+
+
+class HotspotMemorySuite(unittest.TestCase):
+    """Regression checks for HotspotBank and TimedSpotHotspotMemoryEnv (v3):
+    remembering several recent hits, not just the single last one."""
+
+    def test_bank_merges_nearby_hits_into_one_slot(self):
+        bank = HotspotBank(capacity=5, merge_radius=0.12)
+        bank.record_hit(0.30, 0.40)
+        bank.record_hit(0.32, 0.41)  # within merge radius of the first hit
+        self.assertEqual(len(bank.slots), 1)
+        self.assertEqual(bank.slots[0]["hit_count"], 2)
+
+    def test_bank_creates_new_slots_for_distinct_hits_up_to_capacity(self):
+        bank = HotspotBank(capacity=3, merge_radius=0.05)
+        bank.record_hit(0.1, 0.1)
+        bank.record_hit(0.5, 0.5)
+        bank.record_hit(0.9, 0.9)
+        self.assertEqual(len(bank.slots), 3)
+
+    def test_bank_evicts_weakest_slot_once_full(self):
+        bank = HotspotBank(capacity=2, merge_radius=0.05, recency_horizon=10)
+        bank.record_hit(0.1, 0.1)   # slot A: 1 hit, about to go stale
+        bank.record_hit(0.5, 0.5)   # slot B: reinforced below, stays fresh/confident
+        for _ in range(5):
+            bank.tick()
+        bank.record_hit(0.5, 0.5)
+        bank.record_hit(0.5, 0.5)
+
+        bank.record_hit(0.9, 0.9)   # a new, distinct hit -- bank is full
+        positions = {(round(s["x"], 2), round(s["y"], 2)) for s in bank.slots}
+        self.assertIn((0.5, 0.5), positions)
+        self.assertIn((0.9, 0.9), positions)
+        self.assertNotIn((0.1, 0.1), positions)
+
+    def test_recency_resets_on_hit_and_grows_each_tick(self):
+        bank = HotspotBank(capacity=5, merge_radius=0.1, recency_horizon=50)
+        bank.record_hit(0.3, 0.3)
+        self.assertEqual(bank.slots[0]["ticks_since_hit"], 0)
+        bank.tick()
+        bank.tick()
+        bank.tick()
+        self.assertEqual(bank.slots[0]["ticks_since_hit"], 3)
+
+    def test_env_resets_hotspot_bank_between_episodes(self):
+        env = TimedSpotHotspotMemoryEnv(seed=0)
+        env.reset()
+        target_x, target_y = env.client._game.active_spot()
+        theta = _theta_hotspot_always_aim(target_x, target_y)
+
+        for _ in range(PEEK_TRAVERSE_TICKS + 2):
+            _, _, info = env.step(theta)
+            if info["shots_hit_delta"] > 0:
+                break
+
+        self.assertGreater(len(env.hotspots.slots), 0)
+        env.reset()
+        self.assertEqual(len(env.hotspots.slots), 0)
+
+    def test_env_remembers_a_confirmed_hit_as_best_candidate(self):
+        env = TimedSpotHotspotMemoryEnv(seed=0)
+        env.reset()
+        target_x, target_y = env.client._game.active_spot()
+        theta = _theta_hotspot_always_aim(target_x, target_y)
+
+        hit_info = None
+        for _ in range(PEEK_TRAVERSE_TICKS + 2):
+            _, _, info = env.step(theta)
+            if info["shots_hit_delta"] > 0:
+                hit_info = info
+                break
+
+        self.assertIsNotNone(hit_info, "Exact active-spot aim should score a hit quickly")
+        self.assertAlmostEqual(hit_info["hotspot_best_x"], target_x, places=3)
+        self.assertAlmostEqual(hit_info["hotspot_best_y"], target_y, places=3)
+        self.assertEqual(hit_info["hotspot_recency"], 0.0)
+        self.assertGreater(hit_info["hotspot_count"], 0)
+
+
+class AccuracyShapedFitnessSuite(unittest.TestCase):
+    """Regression check for the sim-only accuracy-shaped fitness experiment."""
+
+    def test_shaped_fitness_adds_accuracy_bonus_on_top_of_base_fitness(self):
+        rng = np.random.default_rng(3)
+        theta = rng.normal(0.0, 0.1, PARAM_COUNT)
+        theta[_B2_OFFSET + 0] += 2.0
+        theta[_B2_OFFSET + 1] += 1.0
+
+        base_fitness, base_metrics = TimedSpotBaselineEnv(seed=5).episode_fitness(theta)
+        shaped_fitness, shaped_metrics = TimedSpotBaselineAccuracyEnv(seed=5).episode_fitness(theta)
+
+        self.assertEqual(base_metrics["shots_fired"], shaped_metrics["shots_fired"])
+        self.assertEqual(base_metrics["shots_hit"], shaped_metrics["shots_hit"])
+        self.assertAlmostEqual(
+            shaped_fitness,
+            base_fitness + ACCURACY_BONUS_WEIGHT * base_metrics["accuracy"],
+            places=3,
+        )
 
 
 # ---------------------------------------------------------------------------
