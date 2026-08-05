@@ -152,6 +152,20 @@ class TimeCrisisEnv:
         # peek=True  -> A button PRESSED  -> character EXITS cover (exposed, can shoot)
         # peek=False -> A button RELEASED -> character STAYS in cover (protected)
 
+        # Hard enforcement, not just reward shaping: with an empty clip there is
+        # NEVER a reason to stay exposed -- the trigger can't fire and the only
+        # possible outcome is taking free damage. DRY_FIRE_PENALTY/RELOAD_BONUS
+        # were relied on to teach this via ES alone, but real training kept
+        # showing agents mag-dump and stay exposed anyway (a difficult, easy-to-
+        # miss local optimum for evolution to escape on its own -- see repo
+        # memory). So this overrides the policy's own peek decision the instant
+        # ammo runs out, forcing the duck-to-reload transition to start
+        # immediately. The policy is still free to choose exactly when to peek
+        # out and when to duck early (e.g. before emptying the clip); this only
+        # removes the strictly-dominated "stay out with 0 ammo" option.
+        if self.ammo_left == 0:
+            peek = False
+
         # Minimum hold lock: BOTH transitions (into cover and out of cover) have
         # to be held for PEEK_TRAVERSE_TICKS ticks so the traverse animation can
         # complete. Previously only the False→True transition (leaving cover) was

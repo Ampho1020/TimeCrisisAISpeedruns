@@ -553,6 +553,7 @@ class MiniESTrainingSuite(unittest.TestCase):
         """Run GENS generations; print a table so the user can visually inspect."""
         rng   = np.random.default_rng(42)
         theta = _theta_warm_start()
+        clear_rates = []
 
         print(f"\n{'gen':>4}  {'mean':>8}  {'std':>7}  "
               f"{'best':>8}  {'clear%':>7}  {'shots':>6}")
@@ -563,6 +564,7 @@ class MiniESTrainingSuite(unittest.TestCase):
                 theta, rng, gen_offset=gen * self.POP
             )
             clear_rate  = float(np.mean([1.0 if x["cleared"] else 0.0 for x in infos]))
+            clear_rates.append(clear_rate)
             total_shots = int(sum(x["shots_fired"] for x in infos))
 
             print(f"{gen:>4}  {fitnesses.mean():>8.1f}  {fitnesses.std():>7.2f}  "
@@ -572,15 +574,22 @@ class MiniESTrainingSuite(unittest.TestCase):
             gradient = (eps.T @ shaped) / (self.POP * self.SIGMA)
             theta    = theta + self.ALPHA * gradient
 
-        # Weak sanity: the final mean shouldn't be wildly worse than the first.
-        # (Checked after the loop so it doesn't affect diagnostic output.)
-        rng2   = np.random.default_rng(42)
-        theta2 = _theta_warm_start()
-        f0, _, _ = self._run_generation(theta2, rng2, gen_offset=0)
-        self.assertGreater(
-            fitnesses.mean(), f0.mean() - 200.0,
-            f"Mean fitness regressed by more than 200: "
-            f"{f0.mean():.1f} -> {fitnesses.mean():.1f}",
+        # Weak sanity check. Since the env now hard-forces a duck-to-reload the
+        # instant ammo hits 0 (see env_timecrisis.py step()), clears are common
+        # from generation 0 and per-generation fitness (dominated by
+        # CLEAR_BONUS - elapsed, which swings by thousands depending on how
+        # quickly a candidate happens to clear) is far noisier than the old
+        # mostly-failing dynamics this test's original +-200 absolute
+        # tolerance was calibrated against -- that tolerance is meaningless at
+        # this scale (std alone runs into the thousands here). clear_rate is
+        # the stable signal instead: confirm the population is still clearing
+        # most episodes by the final generation, i.e. the mini run didn't
+        # collapse into never-clearing.
+        self.assertGreaterEqual(
+            clear_rates[-1], 0.5,
+            f"Clear rate dropped to {clear_rates[-1]:.0%} by the final "
+            f"generation (started at {clear_rates[0]:.0%}) -- population may "
+            f"have collapsed.\nclear_rates={clear_rates}",
         )
 
 
@@ -589,9 +598,16 @@ class MiniESTrainingSuite(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class DryFireBehaviorSuite(unittest.TestCase):
-    """Confirm the dry-fire penalty / reload bonus actually distinguish
-    "never ducks after emptying the clip" from "ducks correctly on empty",
-    and quantify the fitness gap between them.
+    """Confirm the empty-clip handling actually works as intended.
+
+    env_timecrisis.py's step() now HARD-ENFORCES a duck-to-reload the instant
+    ammo_left hits 0 (overrides the policy's own peek decision), rather than
+    relying solely on the DRY_FIRE_PENALTY/RELOAD_BONUS reward shaping to
+    teach it -- real training kept showing agents mag-dump and stay exposed
+    even with that shaping in place. So "never duck" is no longer a
+    real behavior a policy can express; these tests instead confirm the
+    enforcement holds even for a policy that actively wants to stay exposed
+    forever, and that reward shaping still correctly reflects it.
 
     Uses a fixed seed throughout: shot/ammo depletion timing is deterministic
     (only hit/miss and incoming damage are randomized), so these assertions
@@ -600,14 +616,16 @@ class DryFireBehaviorSuite(unittest.TestCase):
 
     SEED = 0
 
-    def test_never_duck_accumulates_dry_fire_and_no_reload(self):
-        """peek=always-True, shoot=always-True (never ducks): must rack up
-        dry_fire_ticks once the (now ammo-capped) clip runs out, and must
-        never earn a reload bonus since it never transitions back to cover.
+    def test_env_forces_duck_even_when_policy_always_wants_to_peek(self):
+        """peek=always-True, shoot=always-True (never VOLUNTARILY ducks):
+        the environment must still force a duck the instant ammo hits 0, so
+        this policy should incur zero dry_fire_ticks and repeatedly earn the
+        reload bonus anyway -- proving the enforcement doesn't depend on the
+        policy cooperating.
 
-        Aim is deliberately saturated off-center here so a lucky one-clip
-        clear (which would end the episode before dry-fire can accumulate)
-        is effectively impossible -- isolating the behavior under test.
+        Aim is deliberately saturated off-center here so hits are rare and
+        the episode runs long enough to exercise many forced duck/reload
+        cycles rather than being decided by a single lucky clip.
         """
         theta = _theta_always(peek=True, shoot=True)
         theta[_B2_OFFSET + 2] = 50.0  # aim_x_bias -> saturates off-center
@@ -616,15 +634,16 @@ class DryFireBehaviorSuite(unittest.TestCase):
         env = SimulatedTimeCrisisEnv(seed=self.SEED)
         fitness, info = env.episode_fitness(theta)
 
-        self.assertGreater(
-            info["dry_fire_ticks"], 0,
-            f"Agent that never ducks after emptying its clip should rack up "
-            f"dry_fire_ticks once ammo runs out.\ninfo={info}",
-        )
         self.assertEqual(
+            info["dry_fire_ticks"], 0,
+            f"Environment should force a duck the instant ammo hits 0, "
+            f"even for a policy whose own peek output never wants to duck."
+            f"\ninfo={info}",
+        )
+        self.assertGreater(
             info["reload_correct_count"], 0,
-            "An agent that never transitions back to cover should never "
-            "earn a reload bonus.",
+            "Forced ducks on empty ammo should still count as correct "
+            "reloads, even though the policy itself never chose to duck.",
         )
         self._never_duck_fitness = fitness
         self._never_duck_info = info
@@ -659,11 +678,16 @@ class DryFireBehaviorSuite(unittest.TestCase):
         self._reactive_info = info
 
     def test_reactive_duck_beats_never_duck(self):
-        """Ducking correctly on empty must score materially better than
-        never ducking -- confirms the reward design actually pushes ES
-        toward the desired behavior (answers "do agents know they're
-        dry-firing" at the incentive-design level, independent of whether
-        training has converged there yet).
+        """A theta with centered aim should still score materially better
+        than one with saturated off-center aim, even though the environment
+        now forces BOTH of them through correct duck/reload cycles.
+
+        Before the hard ammo-enforcement, this gap was mostly about duck
+        *timing* (reactive vs. never). Now that duck timing is enforced
+        environment-side for everyone, this gap is mostly a proxy for aim
+        quality instead -- kept as a regression guard that the fitness
+        gradient between "good aim" and "bad aim" thetas is still large and
+        in the right direction.
         """
         never_duck_theta = _theta_always(peek=True, shoot=True)
         never_duck_theta[_B2_OFFSET + 2] = 50.0
@@ -707,10 +731,17 @@ class MultiSpotTargetingSuite(unittest.TestCase):
     SEED = 0
 
     def test_aim_on_a_target_hits_far_more_than_aim_off_all_targets(self):
-        """One magazine (6 shots) aimed exactly on a live target spot should
-        land meaningfully more hits than the same 6 shots aimed at a point
-        far from every target -- confirms hit registration depends on
-        proximity to a real target position, not just "shoot while exposed".
+        """Aiming exactly on a live target spot should need far fewer shots
+        to clear the same number of enemies than aiming at a point far from
+        every target -- confirms hit registration depends on proximity to a
+        real target position, not just "shoot while exposed".
+
+        Compares shots_fired (not shots_hit) needed to reach the same
+        outcome: since the environment now hard-forces a duck-to-reload the
+        instant ammo empties (env_timecrisis.py step()), ANY persistent
+        shoot+peek theta eventually clears given enough ticks -- ammo is
+        never a hard limiter any more, only aim quality changes how many
+        rounds that takes.
         """
         tx, ty = SimulatedGame.TARGET_POSITIONS[1]
         on_target_theta  = _theta_always_aim(tx, ty)
@@ -726,10 +757,11 @@ class MultiSpotTargetingSuite(unittest.TestCase):
         print(f"[off-target aim] shots_fired={info_off['shots_fired']}  "
               f"shots_hit={info_off['shots_hit']}")
 
-        self.assertGreater(
-            info_on["shots_hit"], info_off["shots_hit"],
-            "Aiming directly on a live target spot should land more hits "
-            "than aiming far from every target.",
+        self.assertLess(
+            info_on["shots_fired"], info_off["shots_fired"],
+            "Aiming directly on a live target spot should need fewer shots "
+            "to land the same number of hits than aiming far from every "
+            "target.",
         )
 
     def test_full_screen_requires_more_than_one_magazine(self):

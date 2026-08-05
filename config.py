@@ -142,6 +142,14 @@ AMMO_MAX_ROUNDS = 6
 # == 0 at the start of the tick) instead of ducking back into cover to
 # reload. This no longer fires just because the agent chose not to shoot --
 # only true "should have ducked, gun is empty" ticks count.
+#
+# NOTE (2026-08-04): env_timecrisis.py's step() now HARD-ENFORCES the duck
+# the instant ammo_left hits 0 (overrides the policy's own peek output --
+# see the comment there), because relying on this penalty alone to teach
+# that behavior kept failing in real training (agents mag-dumped and stayed
+# exposed anyway). With the override in place, dry_fire_ticks should always
+# be 0 in practice -- this penalty is now a harmless backstop/diagnostic, not
+# the primary mechanism. Left in place in case the override ever has a gap.
 DRY_FIRE_PENALTY = 2.0
 
 # Flat bonus (NOT scaled by shots fired) awarded exactly once, on the tick
