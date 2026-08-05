@@ -304,3 +304,21 @@ class BridgeClient:
 
     def hud_clear(self):
         self._cmd("hud_clear")
+
+    def input_state(self) -> tuple[bool, bool, float, float]:
+        """Return the bridge's latest applied input state.
+
+        Payload shape: "OK <shoot01> <peek01> <aim_x> <aim_y>".
+        Useful for debugging whether policies collapse to fixed patterns.
+        """
+        resp = self._cmd("input_state")
+        if resp is None:
+            raise RuntimeError("Bridge returned no value for 'input_state'")
+        parts = resp.split()
+        if len(parts) != 4:
+            raise RuntimeError(f"Malformed input_state payload: {resp!r}")
+        shoot = parts[0] == "1"
+        peek = parts[1] == "1"
+        aim_x = float(parts[2])
+        aim_y = float(parts[3])
+        return shoot, peek, aim_x, aim_y

@@ -122,13 +122,25 @@ def train():
             mean_flips      = float(np.mean([x["peek_flips"]      for x in infos]))
             mean_hold       = float(np.mean([x["peek_hold_score"] for x in infos]))
             mean_cover_time = float(np.mean([x["cover_time"]       for x in infos]))
+            mean_aim_x_std = float(np.mean([x["aim_x_std"] for x in infos]))
+            mean_aim_y_std = float(np.mean([x["aim_y_std"] for x in infos]))
+            mean_aim_span_x = float(np.mean([x["aim_span_x"] for x in infos]))
+            mean_aim_span_y = float(np.mean([x["aim_span_y"] for x in infos]))
+            mean_aim_dx = float(np.mean([x["mean_abs_aim_dx"] for x in infos]))
+            mean_shot_left_frac = float(np.mean([x["shot_left_frac"] for x in infos]))
+            mean_shot_mid_frac = float(np.mean([x["shot_mid_frac"] for x in infos]))
+            mean_shot_right_frac = float(np.mean([x["shot_right_frac"] for x in infos]))
 
             print(
                 f"\n=== gen {gen:03d} | best {fitnesses[best_i]:8.2f} "
                 f"| mean {fitnesses.mean():8.2f} | std {std:7.2f} | spread {spread:8.2f} "
                 f"| clear {clear_rate:5.1%} | timeout {timeout_rate:5.1%} | t {best['elapsed']:6.1f} "
                 f"| dmg {best['damage']:4.0f} | acc {best['accuracy']:5.1%} "
-                f"| ctime {mean_cover_time:5.1f} | flips {mean_flips:5.1f} | hold {mean_hold:5.1f} ===\n",
+                f"| ctime {mean_cover_time:5.1f} | flips {mean_flips:5.1f} | hold {mean_hold:5.1f} "
+                f"| aimstd ({mean_aim_x_std:.3f},{mean_aim_y_std:.3f}) "
+                f"| aimspan ({mean_aim_span_x:.3f},{mean_aim_span_y:.3f}) "
+                f"| aimdx {mean_aim_dx:.3f} "
+                f"| lanes L/M/R {mean_shot_left_frac:.0%}/{mean_shot_mid_frac:.0%}/{mean_shot_right_frac:.0%} ===\n",
                 flush=True,
             )
 
@@ -161,6 +173,14 @@ def train():
                 "mean_peek_flips": mean_flips,
                 "mean_peek_hold": mean_hold,
                 "mean_cover_time": mean_cover_time,
+                "mean_aim_x_std": mean_aim_x_std,
+                "mean_aim_y_std": mean_aim_y_std,
+                "mean_aim_span_x": mean_aim_span_x,
+                "mean_aim_span_y": mean_aim_span_y,
+                "mean_aim_dx": mean_aim_dx,
+                "mean_shot_left_frac": mean_shot_left_frac,
+                "mean_shot_mid_frac": mean_shot_mid_frac,
+                "mean_shot_right_frac": mean_shot_right_frac,
                 "sigma_used": sigma_this_gen,
             })
 

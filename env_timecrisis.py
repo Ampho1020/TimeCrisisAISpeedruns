@@ -295,6 +295,8 @@ class TimeCrisisEnv:
             "dry_fire": dry_fire,
             "reload_correct": reload_correct,
             "ammo_left": self.ammo_left,
+            "aim_x": float(aim_x),
+            "aim_y": float(aim_y),
         }
         return obs, done, info
 
@@ -309,6 +311,9 @@ class TimeCrisisEnv:
         # Record (peek, shots_fired) per tick for post-episode diagnostics.
         peek_flags = []
         shots_per_tick = []
+        hits_per_tick = []
+        aim_x_per_tick = []
+        aim_y_per_tick = []
 
         while True:
             _, done, info = self.step(theta)
@@ -320,6 +325,9 @@ class TimeCrisisEnv:
             dead = dead or info["dead"]
             peek_flags.append(info["peek"])
             shots_per_tick.append(info["shots_fired_delta"])
+            hits_per_tick.append(info["shots_hit_delta"])
+            aim_x_per_tick.append(info["aim_x"])
+            aim_y_per_tick.append(info["aim_y"])
             dry_fire_ticks += int(info["dry_fire"])
             reload_correct_count += int(info["reload_correct"])
             if done:
@@ -361,6 +369,42 @@ class TimeCrisisEnv:
         )
         ticks_in_cover = sum(1 for f in peek_flags if not f)  # A NOT pressed = protected
 
+        ax = np.asarray(aim_x_per_tick, dtype=np.float64)
+        ay = np.asarray(aim_y_per_tick, dtype=np.float64)
+        if len(ax) > 0:
+            aim_x_std = float(ax.std())
+            aim_y_std = float(ay.std())
+            aim_span_x = float(ax.max() - ax.min())
+            aim_span_y = float(ay.max() - ay.min())
+        else:
+            aim_x_std = aim_y_std = aim_span_x = aim_span_y = 0.0
+        if len(ax) > 1:
+            mean_abs_aim_dx = float(np.abs(np.diff(ax)).mean())
+            mean_abs_aim_dy = float(np.abs(np.diff(ay)).mean())
+        else:
+            mean_abs_aim_dx = mean_abs_aim_dy = 0.0
+
+        # Shot/hit location diagnostics by aim_x lane: left/mid/right.
+        shots_left = shots_mid = shots_right = 0
+        hits_left = hits_mid = hits_right = 0
+        for x, s, h in zip(aim_x_per_tick, shots_per_tick, hits_per_tick):
+            if x < (1.0 / 3.0):
+                shots_left += int(s)
+                hits_left += int(h)
+            elif x < (2.0 / 3.0):
+                shots_mid += int(s)
+                hits_mid += int(h)
+            else:
+                shots_right += int(s)
+                hits_right += int(h)
+        total_shots = max(shots_left + shots_mid + shots_right, 1)
+        shot_left_frac = float(shots_left / total_shots)
+        shot_mid_frac = float(shots_mid / total_shots)
+        shot_right_frac = float(shots_right / total_shots)
+        hit_rate_left = float(hits_left / max(shots_left, 1))
+        hit_rate_mid = float(hits_mid / max(shots_mid, 1))
+        hit_rate_right = float(hits_right / max(shots_right, 1))
+
         fitness += HIT_REWARD * total_hits
         fitness -= DRY_FIRE_PENALTY * dry_fire_ticks
         fitness += RELOAD_BONUS * reload_correct_count
@@ -379,4 +423,19 @@ class TimeCrisisEnv:
             "cover_time": int(ticks_in_cover),
             "dry_fire_ticks": int(dry_fire_ticks),
             "reload_correct_count": int(reload_correct_count),
+            "aim_x_std": aim_x_std,
+            "aim_y_std": aim_y_std,
+            "aim_span_x": aim_span_x,
+            "aim_span_y": aim_span_y,
+            "mean_abs_aim_dx": mean_abs_aim_dx,
+            "mean_abs_aim_dy": mean_abs_aim_dy,
+            "shots_left": int(shots_left),
+            "shots_mid": int(shots_mid),
+            "shots_right": int(shots_right),
+            "shot_left_frac": shot_left_frac,
+            "shot_mid_frac": shot_mid_frac,
+            "shot_right_frac": shot_right_frac,
+            "hit_rate_left": hit_rate_left,
+            "hit_rate_mid": hit_rate_mid,
+            "hit_rate_right": hit_rate_right,
         }

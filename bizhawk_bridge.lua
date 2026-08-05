@@ -44,7 +44,8 @@
 --
 -- Commands (one per line):
 --   read_u16 <addr>                               -> OK <value>
---   set_input <shoot01> <cover01> <aim_x> <aim_y> -> OK   (aim_* optional)
+--   set_input <shoot01> <peek01> <aim_x> <aim_y>  -> OK   (aim_* optional)
+--   input_state                                   -> OK <shoot01> <peek01> <aim_x> <aim_y>
 --   step <n>                                      -> OK
 --   load <slot> / save <slot>                     -> OK
 --   frame                                         -> OK <framecount>
@@ -178,6 +179,15 @@ local function handle(line)
     if parts[4] ~= nil then aim_x_norm = clamp01(tonumber(parts[4]) or 0.5) end
     if parts[5] ~= nil then aim_y_norm = clamp01(tonumber(parts[5]) or 0.5) end
     return "OK\n"
+
+  elseif cmd == "input_state" then
+    return string.format(
+      "OK %d %d %.4f %.4f\n",
+      shoot and 1 or 0,
+      peek and 1 or 0,
+      aim_x_norm,
+      aim_y_norm
+    )
 
   elseif cmd == "step" then
     -- Do NOT frameadvance here; queue it for the main loop. Advancing frames

@@ -155,13 +155,16 @@ DRY_FIRE_PENALTY = 2.0
 # Flat bonus (NOT scaled by shots fired) awarded exactly once, on the tick
 # the agent ducks back into cover with an empty clip (ammo_left == 0).
 # Reinforces the "empty clip -> duck to reload" loop without rewarding shot
-# count itself, so it can't be farmed by magdumping.
-RELOAD_BONUS = 15.0
+# count itself, so it can't be farmed by magdumping. 2026-08-05: set to 0
+# during sweep-pattern debugging -- duck-on-empty is now hard-enforced in
+# env_timecrisis.py, so this reward is no longer needed for that behavior and
+# can bias policies toward repetitive magdump/reload loops.
+RELOAD_BONUS = 0.0
 
 # -----------------------------
 # Policy dims
 # obs = [timer_norm, life_norm, fired_norm, hit_norm, acc, last_hit, last_miss,
-#        cover_phase, ammo_norm, prev_aim_x_bias, prev_aim_y_bias]
+#        peek_phase, ammo_norm, prev_aim_x_bias, prev_aim_y_bias]
 # peek_phase in [-1, +1]: sign = current peek state, magnitude = ticks_held / PEEK_TRAVERSE_TICKS
 # ammo_norm = ammo_left / AMMO_MAX_ROUNDS, in [0, 1]
 # prev_aim_x_bias / prev_aim_y_bias in [-1, 1]: the aim_x_bias/aim_y_bias the
