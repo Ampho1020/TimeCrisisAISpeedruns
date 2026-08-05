@@ -40,6 +40,13 @@ STATE_SLOT = 1        # savestate slot holding Stage 1 Area A start
 # anything <= 60 (one second at 60Hz) as "timed out" catches the drop reliably.
 TIMEOUT_TIMER_THRESHOLD = 60
 
+# Fallback continue/menu detector: if all sampled core counters
+# (shots_fired/shots_hit/timer/life) are identical for this many consecutive
+# decision ticks, treat it as a frozen non-playable terminal and force episode
+# termination/reset. This catches missed life==0 / timer-zero transitions under
+# frame-skip or RAM sampling gaps.
+CONTINUE_SCREEN_STALE_TICKS = 3
+
 # -----------------------------
 # ES hyperparameters
 # -----------------------------

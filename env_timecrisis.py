@@ -5,6 +5,7 @@ import numpy as np
 from bridge_client import BridgeClient
 from config import (
     AMMO_MAX_ROUNDS, CLEAR_BONUS, PEEK_TRAVERSE_TICKS, DAMAGE_PENALTY,
+    CONTINUE_SCREEN_STALE_TICKS,
     DRY_FIRE_PENALTY, FAIL_PENALTY, FRAME_SKIP, HOST, HIT_REWARD, MAX_TICKS,
     PORT, RAM, RELOAD_BONUS, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
 )
@@ -66,6 +67,7 @@ class TimeCrisisEnv:
         self.peek_ticks: int = 0
         self.peek_lock: int = 0   # minimum hold: any transition holds for PEEK_TRAVERSE_TICKS
         self.peek_locked_value: bool = False   # what state the lock is holding
+        self.stale_core_ticks: int = 0  # consecutive ticks with identical core RAM snapshot
         self.ammo_left: int = AMMO_MAX_ROUNDS
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
         self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
@@ -127,6 +129,7 @@ class TimeCrisisEnv:
         self.peek_ticks = 0
         self.peek_lock = 0
         self.peek_locked_value = False
+        self.stale_core_ticks = 0
         self.ammo_left = AMMO_MAX_ROUNDS
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
@@ -193,6 +196,8 @@ class TimeCrisisEnv:
 
         total_fired = total_hit = total_life_loss = 0
         cleared_guess = dead_guess = timed_out_guess = False
+        continue_screen_guess = False
+        tick_start_core = dict(self.prev)
         timer_at_tick_start = self.prev["timer"]
 
         for f in range(FRAME_SKIP):
@@ -244,6 +249,23 @@ class TimeCrisisEnv:
             self.prev = post
             if dead_guess or cleared_guess or timed_out_guess:
                 break
+
+        # Fallback continue/menu watchdog: if all core counters were frozen
+        # across the entire decision tick, count it. Several consecutive frozen
+        # ticks indicate we've likely landed on a non-playable menu (e.g.
+        # continue prompt) that escaped direct life/timer terminal detection.
+        if (
+            not dead_guess
+            and not cleared_guess
+            and not timed_out_guess
+            and self.prev == tick_start_core
+        ):
+            self.stale_core_ticks += 1
+        else:
+            self.stale_core_ticks = 0
+        if self.stale_core_ticks >= CONTINUE_SCREEN_STALE_TICKS:
+            timed_out_guess = True
+            continue_screen_guess = True
 
         # Wasted exposure: penalise ticks where the agent is fully exposed with
         # an EMPTY clip (ammo_left was already 0 at the start of this tick)
@@ -300,6 +322,7 @@ class TimeCrisisEnv:
             "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
             "dead": dead_guess,
             "timed_out": timed_out_guess,
+            "continue_screen": continue_screen_guess,
             "peek": bool(peek),
             "phase": phase.name,
             "dry_fire": dry_fire,
@@ -318,6 +341,7 @@ class TimeCrisisEnv:
         reload_correct_count = 0
         cleared = False
         timed_out = dead = False
+        continue_screen_count = 0
         # Record (peek, shots_fired) per tick for post-episode diagnostics.
         peek_flags = []
         shots_per_tick = []
@@ -333,6 +357,7 @@ class TimeCrisisEnv:
             cleared = cleared or info["cleared"]
             timed_out = timed_out or info["timed_out"]
             dead = dead or info["dead"]
+            continue_screen_count += int(info.get("continue_screen", False))
             peek_flags.append(info["peek"])
             shots_per_tick.append(info["shots_fired_delta"])
             hits_per_tick.append(info["shots_hit_delta"])
@@ -444,6 +469,7 @@ class TimeCrisisEnv:
             "cover_time": int(ticks_in_cover),
             "dry_fire_ticks": int(dry_fire_ticks),
             "reload_correct_count": int(reload_correct_count),
+            "continue_screen_count": int(continue_screen_count),
             "aim_x_std": aim_x_std,
             "aim_y_std": aim_y_std,
             "aim_span_x": aim_span_x,

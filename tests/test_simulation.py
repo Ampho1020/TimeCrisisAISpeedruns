@@ -22,7 +22,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import (
-    ACT_DIM, AMMO_MAX_ROUNDS, HIDDEN, OBS_DIM, PEEK_TRAVERSE_TICKS, RAM,
+    ACT_DIM, AMMO_MAX_ROUNDS, CONTINUE_SCREEN_STALE_TICKS, HIDDEN, OBS_DIM,
+    PEEK_TRAVERSE_TICKS, RAM,
     SIGMA as CFG_SIGMA, STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT,
     STD_STAGNATION_THRESHOLD,
 )
@@ -236,6 +237,39 @@ class SimulatedTimeCrisisEnv(TimeCrisisEnv):
         self.peek_ticks         = 0
         self.peek_lock          = 0
         self.peek_locked_value  = False
+        self.stale_core_ticks   = 0
+        self.ammo_left          = AMMO_MAX_ROUNDS
+        self.prev_aim_x_bias    = 0.0
+        self.prev_aim_y_bias    = 0.0
+
+
+class FrozenGame(SimulatedGame):
+    """Game stub that freezes all core counters forever after reset.
+
+    Mimics the non-playable continue/menu state where RAM values stop changing.
+    """
+
+    def step_frame(self):
+        self.frame_count += 1
+        # Intentionally do nothing: shots/timer/life remain frozen.
+
+
+class FrozenStateEnv(SimulatedTimeCrisisEnv):
+    """Simulated env wired to FrozenGame for watchdog regression testing."""
+
+    def __init__(self, seed: int = 0):
+        game = FrozenGame(seed=seed)
+        self.client             = MockBridgeClient(game)
+        self.state_slot         = 1
+        self.phase_infer        = PhaseInferer(vote_window=3)
+        self.prev: dict         = {}
+        self.start_timer        = 0
+        self.ticks              = 0
+        self.prev_peek          = False
+        self.peek_ticks         = 0
+        self.peek_lock          = 0
+        self.peek_locked_value  = False
+        self.stale_core_ticks   = 0
         self.ammo_left          = AMMO_MAX_ROUNDS
         self.prev_aim_x_bias    = 0.0
         self.prev_aim_y_bias    = 0.0
@@ -497,6 +531,43 @@ class PeekGatingSuite(unittest.TestCase):
             f"Agent still did not fire on tick {PEEK_TRAVERSE_TICKS} -- "
             f"gate may never open",
         )
+
+
+class ContinueScreenWatchdogSuite(unittest.TestCase):
+    """Regression tests for frozen-state (continue/menu) watchdog."""
+
+    def test_frozen_state_terminates_within_threshold(self):
+        theta = _theta_warm_start()
+        env = FrozenStateEnv(seed=0)
+        env.reset()
+
+        done_tick = None
+        saw_continue = False
+        for t in range(CONTINUE_SCREEN_STALE_TICKS + 3):
+            _, done, info = env.step(theta)
+            if info.get("continue_screen", False):
+                saw_continue = True
+            if done:
+                done_tick = t + 1
+                break
+
+        self.assertIsNotNone(done_tick, "Frozen state should terminate quickly")
+        self.assertTrue(saw_continue, "Watchdog should label frozen termination as continue_screen")
+        self.assertLessEqual(
+            done_tick,
+            CONTINUE_SCREEN_STALE_TICKS,
+            f"Frozen termination took {done_tick} ticks, expected <= "
+            f"CONTINUE_SCREEN_STALE_TICKS ({CONTINUE_SCREEN_STALE_TICKS})",
+        )
+
+    def test_episode_reports_continue_screen_count(self):
+        theta = _theta_warm_start()
+        env = FrozenStateEnv(seed=1)
+        _, info = env.episode_fitness(theta)
+
+        self.assertIn("continue_screen_count", info)
+        self.assertGreaterEqual(info["continue_screen_count"], 1)
+        self.assertTrue(info["timed_out"])
 
 
 # ---------------------------------------------------------------------------
