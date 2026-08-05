@@ -22,12 +22,13 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import (
-    ACT_DIM, AMMO_MAX_ROUNDS, CONTINUE_SCREEN_STALE_TICKS, HIDDEN, OBS_DIM,
+    ACT_DIM, AMMO_MAX_ROUNDS, CONTINUE_SCREEN_STALE_TICKS,
+    CURSOR_X_MAX, CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN, HIDDEN, OBS_DIM,
     PEEK_TRAVERSE_TICKS, RAM,
     SIGMA as CFG_SIGMA, STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT,
     STD_STAGNATION_THRESHOLD,
 )
-from env_timecrisis import TimeCrisisEnv
+from env_timecrisis import TimeCrisisEnv, normalize_cursor
 from phase_inference import PhaseInferer
 from policy import PARAM_COUNT
 
@@ -175,6 +176,10 @@ class SimulatedGame:
         if addr == RAM.shots_hit:   return self.shots_hit
         if addr == RAM.timer:       return self.timer
         if addr == RAM.life:        return self.life
+        if addr == RAM.cursor_x:
+            return int(round(CURSOR_X_MIN + self._aim_x * (CURSOR_X_MAX - CURSOR_X_MIN)))
+        if addr == RAM.cursor_y:
+            return int(round(CURSOR_Y_MIN + self._aim_y * (CURSOR_Y_MAX - CURSOR_Y_MIN)))
         return 0
 
 
@@ -320,7 +325,7 @@ def rank_transform(fitnesses: np.ndarray) -> np.ndarray:
 
 # Observation index of ammo_norm (see config.py's OBS_DIM layout comment):
 # [timer, life, fired, hit, acc, last_hit, last_miss, peek_phase, ammo_norm,
-#  prev_aim_x_bias, prev_aim_y_bias]
+#  prev_aim_x_bias, prev_aim_y_bias, cursor_x_norm, cursor_y_norm]
 _AMMO_OBS_INDEX = 8
 
 
@@ -464,6 +469,19 @@ class SmokeSuite(unittest.TestCase):
         fit2, info2 = SimulatedTimeCrisisEnv(seed=7).episode_fitness(theta)
         self.assertEqual(fit1, fit2)
         self.assertEqual(info1["shots_fired"], info2["shots_fired"])
+
+    def test_observation_includes_cursor_ram_position(self):
+        env = SimulatedTimeCrisisEnv(seed=0)
+        obs = env.reset()
+        self.assertEqual(obs.shape[0], OBS_DIM)
+        self.assertAlmostEqual(
+            float(obs[-2]),
+            normalize_cursor(env.prev["cursor_x"], CURSOR_X_MIN, CURSOR_X_MAX),
+        )
+        self.assertAlmostEqual(
+            float(obs[-1]),
+            normalize_cursor(env.prev["cursor_y"], CURSOR_Y_MIN, CURSOR_Y_MAX),
+        )
 
 
 # ---------------------------------------------------------------------------

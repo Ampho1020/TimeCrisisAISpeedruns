@@ -17,6 +17,8 @@ class RamMap:
     shots_hit:   int = 0x0B1E90
     timer:       int = 0x0B1D64
     life:        int = 0x0B20C0
+    cursor_x:    int = 0x0B1C74
+    cursor_y:    int = 0x0B1C78
 
 RAM = RamMap()
 
@@ -26,6 +28,16 @@ RAM = RamMap()
 FRAME_SKIP = 5        # emulator frames per decision (60Hz -> ~83ms)
 MAX_TICKS  = 900      # 900 * 5 = 4500 frames hard cap (~75s)
 STATE_SLOT = 1        # savestate slot holding Stage 1 Area A start
+
+# On-screen gun cursor coordinates (confirmed RAM-backed screen-space position,
+# not enemy positions). Values observed in BizHawk on this setup:
+#   X: 1..259
+#   Y: 1..232
+# We normalize both to [0, 1] before feeding them into the policy.
+CURSOR_X_MIN = 1
+CURSOR_X_MAX = 259
+CURSOR_Y_MIN = 1
+CURSOR_Y_MAX = 232
 
 # Time Crisis counts the area timer DOWN; when it hits zero the game drops to a
 # "continue?" screen. That is a SEPARATE terminal from life == 0 (being shot),
@@ -171,7 +183,8 @@ RELOAD_BONUS = 0.0
 # -----------------------------
 # Policy dims
 # obs = [timer_norm, life_norm, fired_norm, hit_norm, acc, last_hit, last_miss,
-#        peek_phase, ammo_norm, prev_aim_x_bias, prev_aim_y_bias]
+#        peek_phase, ammo_norm, prev_aim_x_bias, prev_aim_y_bias,
+#        cursor_x_norm, cursor_y_norm]
 # peek_phase in [-1, +1]: sign = current peek state, magnitude = ticks_held / PEEK_TRAVERSE_TICKS
 # ammo_norm = ammo_left / AMMO_MAX_ROUNDS, in [0, 1]
 # prev_aim_x_bias / prev_aim_y_bias in [-1, 1]: the aim_x_bias/aim_y_bias the
@@ -179,10 +192,14 @@ RELOAD_BONUS = 0.0
 # input. The net is otherwise purely feedforward/memoryless, so without this
 # it has no way to know what it last chose -- this closes that loop, letting
 # weights learn to shift aim across ticks instead of latching onto one spot.
+# cursor_x_norm / cursor_y_norm in [0, 1]: the actual current on-screen gun
+# cursor read back from RAM. This is the first live screen-space signal in the
+# policy input: even without enemy RAM yet, the policy can now correlate where
+# rewarded hits happened with where the reticle actually was.
 # act = [shoot_logit, cover_logit, aim_x_bias, aim_y_bias]
 # Both aim axes are policy-controlled: bias in [-1, 1] -> screen position in [0, 1].
 # -----------------------------
-OBS_DIM = 11
+OBS_DIM = 13
 HIDDEN  = 64
 ACT_DIM = 4
 

@@ -6,6 +6,7 @@ from bridge_client import BridgeClient
 from config import (
     AMMO_MAX_ROUNDS, CLEAR_BONUS, PEEK_TRAVERSE_TICKS, DAMAGE_PENALTY,
     CONTINUE_SCREEN_STALE_TICKS,
+    CURSOR_X_MAX, CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN,
     DRY_FIRE_PENALTY, FAIL_PENALTY, FRAME_SKIP, HOST, HIT_REWARD, MAX_TICKS,
     PORT, RAM, RELOAD_BONUS, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
 )
@@ -21,6 +22,19 @@ def u16_delta(new_v: int, old_v: int) -> int:
     elif d > 32768:
         d -= 65536
     return d
+
+
+def normalize_cursor(raw_value: int, lo: int, hi: int) -> float:
+    """Map inclusive cursor RAM coordinates to normalized screen space [0, 1]."""
+    if hi <= lo:
+        return 0.0
+    clipped = min(max(int(raw_value), lo), hi)
+    return float((clipped - lo) / (hi - lo))
+
+
+def core_watchdog_snapshot(cur: dict[str, int]) -> tuple[int, int, int, int]:
+    """Return the menu-watchdog counters only, excluding aim/cursor RAM."""
+    return cur["shots_fired"], cur["shots_hit"], cur["timer"], cur["life"]
 
 
 def peek_hold_reward(
@@ -94,6 +108,8 @@ class TimeCrisisEnv:
             "shots_hit":   self.client.read_u16(RAM.shots_hit),
             "timer":       self.client.read_u16(RAM.timer),
             "life":        self.client.read_u16(RAM.life),
+            "cursor_x":    self.client.read_u16(RAM.cursor_x),
+            "cursor_y":    self.client.read_u16(RAM.cursor_y),
         }
 
     @staticmethod
@@ -113,6 +129,8 @@ class TimeCrisisEnv:
             ammo_left / AMMO_MAX_ROUNDS,
             prev_aim_x_bias,
             prev_aim_y_bias,
+            normalize_cursor(cur.get("cursor_x", CURSOR_X_MIN), CURSOR_X_MIN, CURSOR_X_MAX),
+            normalize_cursor(cur.get("cursor_y", CURSOR_Y_MIN), CURSOR_Y_MIN, CURSOR_Y_MAX),
         ], dtype=np.float32)
 
     # -- episode --------------------------------------------------------
@@ -197,7 +215,7 @@ class TimeCrisisEnv:
         total_fired = total_hit = total_life_loss = 0
         cleared_guess = dead_guess = timed_out_guess = False
         continue_screen_guess = False
-        tick_start_core = dict(self.prev)
+        tick_start_core = core_watchdog_snapshot(self.prev)
         timer_at_tick_start = self.prev["timer"]
 
         for f in range(FRAME_SKIP):
@@ -258,7 +276,7 @@ class TimeCrisisEnv:
             not dead_guess
             and not cleared_guess
             and not timed_out_guess
-            and self.prev == tick_start_core
+            and core_watchdog_snapshot(self.prev) == tick_start_core
         ):
             self.stale_core_ticks += 1
         else:
