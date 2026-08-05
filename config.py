@@ -73,7 +73,31 @@ POP_SIZE    = 30      # MUST be even (mirrored sampling)
 # larger SIGMA makes it more likely at least some candidates flip sign again.
 SIGMA       = 0.1     # perturbation scale
 ALPHA       = 0.02    # learning rate
-GENERATIONS = 100
+
+# Episodes evaluated per candidate per generation, averaged before ranking
+# (mirrors run_timed_spot_probe's episodes_per_candidate in
+# tests/test_simulation.py). Added 2026-08-05: single-episode fitness is
+# noisy enough that rank-transform ES (which only uses ORDER) can flip a
+# genuinely-better candidate below a worse one just from one unlucky
+# episode's stochastic hit/damage rolls. A sim A/B probe (5 seeds x 40
+# gens, see repo memory "Multi-episode fitness averaging probe") showed
+# averaging 3 episodes/candidate fixed two seeds that otherwise collapsed
+# to ~8% clear rate, and improved every aggregate metric (clear_rate,
+# mean/best accuracy, mean hits) with no seed getting more than a small dip
+# worse. Set to 1 to fully disable (exact prior single-episode behavior).
+EPISODES_PER_CANDIDATE = 3
+
+# GENERATIONS reduced 100 -> 34 (2026-08-05) to roughly offset
+# EPISODES_PER_CANDIDATE's ~3x increase in real BizHawk episodes evaluated
+# per generation, so total training wall-clock stays in the same ballpark.
+# NOTE: this specific generations-vs-episodes-per-candidate tradeoff has
+# NOT been validated in sim -- the sim probe compared 1 vs 3 episodes/
+# candidate at the SAME generation count (40), not at an equal total-
+# episode compute budget. If real training with 34 generations converges
+# worse than the old 100-generation single-episode runs, try raising
+# GENERATIONS back up (compute cost permitting) before concluding episode
+# averaging itself doesn't help live.
+GENERATIONS = 34
 SEED        = 42
 CHECKPOINT_EVERY = 10
 

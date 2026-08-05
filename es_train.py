@@ -3,9 +3,10 @@
 import numpy as np
 
 from config import (
-    ACT_DIM, ALPHA, CHECKPOINT_EVERY, GENERATIONS, HIDDEN, HUD_ENABLED,
-    LOG_CSV, OBS_DIM, POP_SIZE, SEED, SIGMA, STAGNATION_PATIENCE,
-    STAGNATION_SIGMA_MULT, STD_STAGNATION_THRESHOLD, VERBOSE_EPISODES,
+    ACT_DIM, ALPHA, CHECKPOINT_EVERY, EPISODES_PER_CANDIDATE, GENERATIONS,
+    HIDDEN, HUD_ENABLED, LOG_CSV, OBS_DIM, POP_SIZE, SEED, SIGMA,
+    STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT, STD_STAGNATION_THRESHOLD,
+    VERBOSE_EPISODES,
 )
 from logger import TrainingLogger
 from policy import PARAM_COUNT
@@ -21,6 +22,18 @@ def rank_transform(fitnesses: np.ndarray) -> np.ndarray:
     ranks = np.empty_like(fitnesses, dtype=np.float64)
     ranks[np.argsort(fitnesses)] = np.arange(len(fitnesses))
     return ranks / (len(fitnesses) - 1) - 0.5
+
+
+def _average_episode_infos(infos: list) -> dict:
+    """Average a list of same-keyed per-episode info dicts into one dict
+    (used to collapse EPISODES_PER_CANDIDATE raw episodes down to one
+    averaged info per candidate before ranking). Booleans (e.g. 'cleared',
+    'timed_out', 'dead') become fractions in [0, 1] rather than a single
+    True/False -- with EPISODES_PER_CANDIDATE=1 this reduces to the exact
+    original 0.0/1.0 value.
+    """
+    keys = infos[0].keys()
+    return {k: float(np.mean([float(info[k]) for info in infos])) for k in keys}
 
 
 def train():
@@ -90,9 +103,19 @@ def train():
             candidates = theta[None, :] + sigma_this_gen * eps
 
             # Evaluate the whole population across all workers in parallel.
-            results = pool.evaluate(candidates)
-            fitnesses = [r[0] for r in results]
-            infos = [r[1] for r in results]
+            # Each candidate gets EPISODES_PER_CANDIDATE episodes (averaged
+            # before ranking) to reduce single-episode fitness-ranking noise
+            # -- see EPISODES_PER_CANDIDATE's comment in config.py and repo
+            # memory's "Multi-episode fitness averaging probe" for why.
+            expanded_candidates = np.repeat(candidates, EPISODES_PER_CANDIDATE, axis=0)
+            raw_results = pool.evaluate(expanded_candidates)
+
+            fitnesses = np.empty(POP_SIZE, dtype=np.float64)
+            infos = []
+            for i in range(POP_SIZE):
+                chunk = raw_results[i * EPISODES_PER_CANDIDATE:(i + 1) * EPISODES_PER_CANDIDATE]
+                fitnesses[i] = float(np.mean([r[0] for r in chunk]))
+                infos.append(_average_episode_infos([r[1] for r in chunk]))
 
             if VERBOSE_EPISODES:
                 for i, (fit, info) in enumerate(zip(fitnesses, infos)):
@@ -100,11 +123,9 @@ def train():
                         f"  gen {gen:03d} ep {i + 1:02d}/{POP_SIZE} | "
                         f"fit {fit:8.2f} | t {info['elapsed']:6.1f} | "
                         f"dmg {info['damage']:4.0f} | acc {info['accuracy']:5.1%} | "
-                        f"{'CLEAR' if info['cleared'] else '.....'}",
+                        f"{'CLEAR' if info['cleared'] >= 1.0 else '.....'}",
                         flush=True,
                     )
-
-            fitnesses = np.asarray(fitnesses, dtype=np.float64)
 
             # --- the ES update ---
             shaped = rank_transform(fitnesses)
@@ -116,8 +137,11 @@ def train():
             best = infos[best_i]
             std = float(fitnesses.std())
             spread = float(fitnesses.max() - fitnesses.min())
-            clear_rate = float(np.mean([1.0 if x["cleared"] else 0.0 for x in infos]))
-            timeout_rate = float(np.mean([1.0 if x["timed_out"] else 0.0 for x in infos]))
+            # x["cleared"]/x["timed_out"] are already fractions in [0, 1]
+            # per candidate (mean over its EPISODES_PER_CANDIDATE episodes),
+            # exactly 0.0/1.0 when EPISODES_PER_CANDIDATE == 1.
+            clear_rate = float(np.mean([x["cleared"] for x in infos]))
+            timeout_rate = float(np.mean([x["timed_out"] for x in infos]))
             mean_acc = float(np.mean([x["accuracy"] for x in infos]))
             mean_flips      = float(np.mean([x["peek_flips"]      for x in infos]))
             mean_hold       = float(np.mean([x["peek_hold_score"] for x in infos]))

@@ -994,24 +994,64 @@ class TimedSpotBaselineAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotBaseline
 
 def run_timed_spot_probe(env_cls, theta_init_fn, param_count: int,
                          seed: int = 0, gens: int = 25, pop: int = 12,
-                         sigma: float = 0.1, alpha: float = 0.02):
-    """Short ES probe for the timed 5-spot task. Returns per-generation metrics."""
+                         sigma: float = 0.1, alpha: float = 0.02,
+                         use_stagnation_kick: bool = False,
+                         episodes_per_candidate: int = 1):
+    """Short ES probe for the timed 5-spot task. Returns per-generation metrics.
+
+    ``use_stagnation_kick``: when True, mirrors es_train.py's stagnation-kick
+    escape mechanism exactly, using the SAME config.py constants
+    (STD_STAGNATION_THRESHOLD/STAGNATION_PATIENCE/STAGNATION_SIGMA_MULT) as
+    the live project (see ExtendedMiniESTrendSuite for the same pattern
+    applied to the original sim env). Once fitness std has stayed below
+    STD_STAGNATION_THRESHOLD for STAGNATION_PATIENCE consecutive generations,
+    that generation is sampled with sigma * STAGNATION_SIGMA_MULT instead of
+    sigma (and the gradient normalization uses whichever sigma was actually
+    used), reverting to the normal sigma as soon as std recovers for one
+    generation. Default False keeps this probe's original fixed-sigma
+    behavior unchanged.
+
+    ``episodes_per_candidate``: when > 1, each candidate's fitness and
+    accuracy/cleared/shots_hit metrics are averaged over this many episodes
+    (each with a distinct seed) before rank_transform() ranks the
+    population. This directly reduces single-episode ranking noise -- a
+    single stochastic hit/damage roll can otherwise flip candidate order in
+    rank-transform ES even when true policy quality differs. Default 1
+    reproduces the original single-episode behavior and seeding scheme
+    exactly (same per-candidate seed as before).
+    """
     rng = np.random.default_rng(seed)
     theta = theta_init_fn(seed)
     history = []
+    stagnant_gens = 0
 
     for gen in range(gens):
+        kicking = use_stagnation_kick and stagnant_gens >= STAGNATION_PATIENCE
+        sigma_this_gen = sigma * STAGNATION_SIGMA_MULT if kicking else sigma
+
         half = pop // 2
         eps_half = rng.normal(0.0, 1.0, (half, param_count))
         eps = np.concatenate([eps_half, -eps_half])
-        candidates = theta + sigma * eps
+        candidates = theta + sigma_this_gen * eps
 
         fitnesses, infos = [], []
         for i, cand in enumerate(candidates):
-            env = env_cls(seed=gen * pop + i)
-            fit, info = env.episode_fitness(cand)
-            fitnesses.append(fit)
-            infos.append(info)
+            ep_fits, ep_cleared, ep_acc, ep_hits = [], [], [], []
+            for e in range(episodes_per_candidate):
+                ep_seed = (gen * pop * episodes_per_candidate
+                           + i * episodes_per_candidate + e)
+                env = env_cls(seed=ep_seed)
+                fit, info = env.episode_fitness(cand)
+                ep_fits.append(fit)
+                ep_cleared.append(1.0 if info["cleared"] else 0.0)
+                ep_acc.append(info["accuracy"])
+                ep_hits.append(info["shots_hit"])
+            fitnesses.append(float(np.mean(ep_fits)))
+            infos.append({
+                "cleared": float(np.mean(ep_cleared)),
+                "accuracy": float(np.mean(ep_acc)),
+                "shots_hit": float(np.mean(ep_hits)),
+            })
 
         fitnesses = np.asarray(fitnesses, dtype=np.float64)
         history.append({
@@ -1019,15 +1059,24 @@ def run_timed_spot_probe(env_cls, theta_init_fn, param_count: int,
             "mean": float(fitnesses.mean()),
             "std": float(fitnesses.std()),
             "best": float(fitnesses.max()),
-            "clear_rate": float(np.mean([1.0 if x["cleared"] else 0.0 for x in infos])),
+            "clear_rate": float(np.mean([x["cleared"] for x in infos])),
             "mean_acc": float(np.mean([x["accuracy"] for x in infos])),
             "best_acc": float(np.max([x["accuracy"] for x in infos])),
             "mean_hits": float(np.mean([x["shots_hit"] for x in infos])),
+            "kicking": bool(kicking),
+            "sigma_used": float(sigma_this_gen),
+            "episodes_per_candidate": int(episodes_per_candidate),
         })
 
         shaped = rank_transform(fitnesses)
-        gradient = (eps.T @ shaped) / (pop * sigma)
+        gradient = (eps.T @ shaped) / (pop * sigma_this_gen)
         theta = theta + alpha * gradient
+
+        if use_stagnation_kick:
+            if float(fitnesses.std()) < STD_STAGNATION_THRESHOLD:
+                stagnant_gens += 1
+            else:
+                stagnant_gens = 0
 
     return history
 
@@ -1466,6 +1515,102 @@ class AccuracyShapedFitnessSuite(unittest.TestCase):
             base_fitness + ACCURACY_BONUS_WEIGHT * base_metrics["accuracy"],
             places=3,
         )
+
+
+class StagnationKickProbeSuite(unittest.TestCase):
+    """Regression checks that run_timed_spot_probe's optional stagnation-kick
+    mirrors es_train.py's mechanism (config.py's STD_STAGNATION_THRESHOLD/
+    STAGNATION_PATIENCE/STAGNATION_SIGMA_MULT, same as ExtendedMiniESTrendSuite
+    for the original sim env) when opted into, and is a true no-op otherwise.
+    """
+
+    def test_kick_disabled_by_default_uses_fixed_sigma(self):
+        hist = run_timed_spot_probe(
+            TimedSpotBaselineEnv, _theta_warm_start, PARAM_COUNT,
+            seed=0, gens=3, pop=6, sigma=0.1, alpha=0.02,
+        )
+        self.assertTrue(all(g["sigma_used"] == 0.1 for g in hist))
+        self.assertTrue(all(g["kicking"] is False for g in hist))
+
+    def test_kick_enabled_escalates_sigma_after_patience_stagnant_gens(self):
+        # A theta whose peek logit is saturated hard-negative never exposes
+        # (out = b2 exactly, since every other weight is 0), so every
+        # mirrored candidate scores identically (-FAIL_PENALTY) regardless of
+        # SIGMA=0.1 perturbation -- deterministically reproducing the "flat
+        # std" stagnation trigger without depending on RNG luck.
+        theta = np.zeros(PARAM_COUNT)
+        theta[_B2_OFFSET + 1] = -50.0  # peek logit: always False
+
+        def _frozen_init(seed):
+            return theta.copy()
+
+        gens = STAGNATION_PATIENCE + 2
+        hist = run_timed_spot_probe(
+            TimedSpotBaselineEnv, _frozen_init, PARAM_COUNT,
+            seed=0, gens=gens, pop=6, sigma=0.1, alpha=0.02,
+            use_stagnation_kick=True,
+        )
+        self.assertTrue(hist[-1]["kicking"])
+        self.assertAlmostEqual(hist[-1]["sigma_used"], 0.1 * STAGNATION_SIGMA_MULT)
+
+
+class EpisodeAveragingProbeSuite(unittest.TestCase):
+    """Regression checks that run_timed_spot_probe's optional
+    episodes_per_candidate averaging is a true no-op at its default (1),
+    and genuinely averages over distinct-seeded episodes when > 1."""
+
+    def test_default_episode_count_matches_pre_change_single_episode_behavior(self):
+        # With episodes_per_candidate=1, per-candidate seeds must reduce to
+        # exactly gen * pop + i (the original scheme), so history is
+        # unaffected for every existing caller that doesn't pass the new arg.
+        hist_default = run_timed_spot_probe(
+            TimedSpotBaselineEnv, _theta_warm_start, PARAM_COUNT,
+            seed=0, gens=3, pop=6, sigma=0.1, alpha=0.02,
+        )
+        hist_explicit = run_timed_spot_probe(
+            TimedSpotBaselineEnv, _theta_warm_start, PARAM_COUNT,
+            seed=0, gens=3, pop=6, sigma=0.1, alpha=0.02,
+            episodes_per_candidate=1,
+        )
+        for g_default, g_explicit in zip(hist_default, hist_explicit):
+            self.assertEqual(g_default["mean"], g_explicit["mean"])
+            self.assertEqual(g_default["clear_rate"], g_explicit["clear_rate"])
+            self.assertEqual(g_default["mean_acc"], g_explicit["mean_acc"])
+        self.assertTrue(all(g["episodes_per_candidate"] == 1 for g in hist_default))
+
+    def test_multi_episode_fitness_equals_mean_of_distinct_seeded_episodes(self):
+        # Reconstruct generation 0's per-candidate averaged fitness by hand
+        # from N direct episode_fitness() calls using the SAME seed formula
+        # the probe uses internally, and confirm they match exactly -- this
+        # also proves each episode uses a distinct seed (not one episode
+        # replayed N times), since TimedSpotBaselineEnv's spot schedule/
+        # enemy behavior depends on its seed.
+        pop = 6
+        episodes = 3
+        theta = _theta_warm_start(0)
+        rng = np.random.default_rng(0)
+        half = pop // 2
+        eps_half = rng.normal(0.0, 1.0, (half, PARAM_COUNT))
+        eps = np.concatenate([eps_half, -eps_half])
+        candidates = theta + 0.1 * eps
+
+        expected_fits = []
+        for i, cand in enumerate(candidates):
+            ep_fits = []
+            for e in range(episodes):
+                seed = 0 * pop * episodes + i * episodes + e
+                env = TimedSpotBaselineEnv(seed=seed)
+                fit, _info = env.episode_fitness(cand)
+                ep_fits.append(fit)
+            expected_fits.append(float(np.mean(ep_fits)))
+
+        hist = run_timed_spot_probe(
+            TimedSpotBaselineEnv, _theta_warm_start, PARAM_COUNT,
+            seed=0, gens=1, pop=pop, sigma=0.1, alpha=0.02,
+            episodes_per_candidate=episodes,
+        )
+        self.assertAlmostEqual(hist[0]["mean"], float(np.mean(expected_fits)), places=6)
+        self.assertEqual(hist[0]["episodes_per_candidate"], episodes)
 
 
 # ---------------------------------------------------------------------------
