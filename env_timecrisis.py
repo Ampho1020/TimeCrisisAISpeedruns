@@ -216,7 +216,17 @@ class TimeCrisisEnv:
             if life_d < 0:
                 total_life_loss += -life_d
 
-            if post["life"] == 0:
+            # Death detection: normally life reaches exactly 0, but under
+            # frame-skip / u16 sampling we can also observe a lethal underflow
+            # wrap (e.g. 1 -> 65535) instead of an exact 0 sample. Treat that
+            # as terminal too so we don't drift into the continue menu.
+            lethal_wrap = (
+                pre["life"] > 0
+                and life_d < 0
+                and post["life"] > pre["life"]
+                and post["life"] >= 65000
+            )
+            if post["life"] == 0 or lethal_wrap:
                 dead_guess = True
             # Heuristic clear detection: timer jumps discontinuously upward.
             # Replace with a real flag if you ever find one.
@@ -408,6 +418,17 @@ class TimeCrisisEnv:
         fitness += HIT_REWARD * total_hits
         fitness -= DRY_FIRE_PENALTY * dry_fire_ticks
         fitness += RELOAD_BONUS * reload_correct_count
+
+        # Hygiene reset: if this episode ended in a failed terminal state
+        # (death/timeout), proactively reload now so BizHawk does not linger on
+        # the "Continue?" UI between evaluations. The next episode still calls
+        # reset() as usual; this just prevents visible spillover screens.
+        if dead or timed_out:
+            try:
+                self.client.load_state(self.state_slot)
+                self.client.step_frames(1)
+            except Exception:
+                pass
 
         return float(fitness), {
             "cleared": cleared,
