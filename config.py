@@ -99,7 +99,7 @@ EPISODES_PER_CANDIDATE = 3
 # averaging itself doesn't help live.
 GENERATIONS = 34
 SEED        = 42
-CHECKPOINT_EVERY = 10
+CHECKPOINT_EVERY = 5
 
 # Stagnation kick (see SIGMA note above): if fitness std stays below
 # STD_STAGNATION_THRESHOLD for STAGNATION_PATIENCE consecutive generations,
@@ -146,6 +146,16 @@ BIZHAWK_LAUNCH      = "/home/ampho/Downloads/BizHawk/BizHawk-2.11.1-linux-x64/./
 BIZHAWK_ROM         = "/home/ampho/Downloads/TimeCrisis_NTSC/Time Crisis.cue"                  # absolute path to the Time Crisis disc image
 BIZHAWK_LUA         = "/home/ampho/TimeCrisisAISpeedruns/bizhawk_bridge.lua"  # absolute path recommended
 BIZHAWK_EXTRA_ARGS  = []                  # any extra EmuHawk CLI flags
+
+# All EmuHawk instances on a machine share a single config.ini in the BizHawk
+# install directory (confirmed: only one config.ini exists, no per-instance
+# copy). Launching NUM_WORKERS instances back-to-back with zero delay lets them
+# race on reading/writing that shared file during startup, which crashed a real
+# 4-worker run within the first tick (bridge_client got ConnectionResetError
+# right after all 4 handshakes succeeded -- one instance died moments later).
+# A short stagger between launches avoids the race. Raise this if instances
+# still crash shortly after startup; 0 restores the old (unstaggered) behavior.
+BIZHAWK_LAUNCH_STAGGER_SECONDS = 2.0
 
 # -----------------------------
 # Fitness shaping
@@ -194,6 +204,41 @@ AMMO_MAX_ROUNDS = 6
 # be 0 in practice -- this penalty is now a harmless backstop/diagnostic, not
 # the primary mechanism. Left in place in case the override ever has a gap.
 DRY_FIRE_PENALTY = 2.0
+
+# Miss-correction shaping: reward sequences that recover from a miss by
+# shifting aim instead of repeating the same spot, and penalize repeated
+# misses / edge-center camping patterns that tend to waste shots.
+MISS_CORRECTION_BONUS = 180.0
+REPEATED_MISS_PENALTY = 60.0
+MOVE_EPS = 0.03
+SAME_EPS = 0.015
+EDGE_BAND = 0.08
+CENTER_BAND = 0.04
+EDGE_SCATTER_PENALTY = 30.0
+CENTER_CAMP_PENALTY = 30.0
+
+# Accuracy-shaped fitness bonus (rewards hit RATE, not just hit COUNT).
+# Sim-validated (repo memory "Miss-correction objective probe", 2026-08-06):
+# combining this with the miss-correction terms above (the "miss-
+# correction+accuracy" arm) was the best-performing arm of that probe --
+# preserved clear rate, improved mean_acc (0.089 -> 0.111), raised the local
+# self-correction rate, and increased aim coordinate diversity, all without
+# collapsing to edges/center. Also note: fitness shaping only changes what
+# future ES generations are selected for -- it does not alter the behavior
+# of an already-trained checkpoint (theta_*.npy) without re-running training.
+ACCURACY_BONUS_WEIGHT = 1000.0
+
+# Direct reward for clip_shift (aim variation between consecutive magazines/
+# reloads) -- targets the "same aim arc every reload" symptom specifically.
+# Sim-validated (repo memory "Clip-shift reward probe", 2026-08-06): a 5-seed
+# x 30-gen A/B on top of the miss-correction+accuracy formula above found
+# weight=60 actually made clip_shift WORSE (0.057 -> 0.049) while weight=150
+# improved clear rate (60% -> 80%), mean_acc (0.069 -> 0.092), AND clip_shift
+# (0.057 -> 0.076) together, with no metric regressing -- a clean win, not a
+# trade-off. Earlier naive diversity-reward attempts (a reload-parity obs bit,
+# a raw clip-novelty bonus) both hurt training in prior probes, so don't
+# assume this generalizes to other diversity-reward designs without testing.
+CLIP_SHIFT_BONUS = 150.0
 
 # Flat bonus (NOT scaled by shots fired) awarded exactly once, on the tick
 # the agent ducks back into cover with an empty clip (ammo_left == 0).

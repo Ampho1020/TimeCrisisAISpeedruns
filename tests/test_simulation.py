@@ -28,7 +28,13 @@ from config import (
     SIGMA as CFG_SIGMA, STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT,
     STD_STAGNATION_THRESHOLD,
 )
-from env_timecrisis import TimeCrisisEnv, core_watchdog_snapshot, normalize_cursor, u16_delta
+from env_timecrisis import (
+    TimeCrisisEnv,
+    compute_miss_correction_metrics,
+    core_watchdog_snapshot,
+    normalize_cursor,
+    u16_delta,
+)
 from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import PARAM_COUNT
 
@@ -1831,6 +1837,62 @@ class DryFireBehaviorSuite(unittest.TestCase):
             "never ducking -- if not, the reward shaping isn't actually "
             "teaching the desired behavior.",
         )
+
+
+class MissCorrectionMetricsSuite(unittest.TestCase):
+    """Verify the miss-correction reward diagnostics are computed as intended."""
+
+    def test_metrics_detect_corrective_and_repeated_miss_patterns(self):
+        shots = [
+            {"aim_x": 0.50, "aim_y": 0.50, "hit": False},
+            {"aim_x": 0.535, "aim_y": 0.50, "hit": False},
+            {"aim_x": 0.540, "aim_y": 0.50, "hit": False},
+            {"aim_x": 0.60, "aim_y": 0.50, "hit": True},
+            {"aim_x": 0.62, "aim_y": 0.50, "hit": True},
+        ]
+
+        metrics = compute_miss_correction_metrics(shots)
+
+        self.assertGreater(metrics["corrected"], 0.0)
+        self.assertGreater(metrics["repeated"], 0.0)
+        self.assertGreater(metrics["center_camp"], 0.0)
+
+    def test_clip_shift_rewards_aim_variation_between_magazines(self):
+        """Two 6-shot magazines aimed at very different spots should score a
+        much higher clip_shift than two magazines aimed at the same spot --
+        this is the metric that directly targets the "same arc every reload"
+        symptom, now wired into production fitness via CLIP_SHIFT_BONUS."""
+        same_spot_shots = [
+            {"aim_x": 0.3, "aim_y": 0.3, "hit": False} for _ in range(12)
+        ]
+        shifted_shots = (
+            [{"aim_x": 0.2, "aim_y": 0.2, "hit": False} for _ in range(6)]
+            + [{"aim_x": 0.8, "aim_y": 0.8, "hit": False} for _ in range(6)]
+        )
+
+        same_metrics = compute_miss_correction_metrics(same_spot_shots)
+        shifted_metrics = compute_miss_correction_metrics(shifted_shots)
+
+        self.assertGreater(shifted_metrics["clip_shift"], same_metrics["clip_shift"])
+
+    def test_clip_shift_penalizes_shift_once_then_repeat_pattern(self):
+        """Regression for the live-reported symptom (2026-08-06): arc1 shifts
+        to a different arc2, but arc3+ then keep repeating arc2 unchanged.
+        A mean-of-raw-distances metric let this pattern still score a decent
+        clip_shift (one big jump dilutes across several zero-shift pairs but
+        doesn't zero out the average) -- the fix takes the MIN across all
+        consecutive clip pairs, so any single repeated pair should drag the
+        whole score down close to 0, regardless of how many clips came before."""
+        shift_once_then_repeat = (
+            [{"aim_x": 0.2, "aim_y": 0.2, "hit": False} for _ in range(6)]      # arc1
+            + [{"aim_x": 0.8, "aim_y": 0.8, "hit": False} for _ in range(6)]    # arc2 (differs)
+            + [{"aim_x": 0.8, "aim_y": 0.8, "hit": False} for _ in range(6)]    # arc3 (repeats arc2)
+            + [{"aim_x": 0.8, "aim_y": 0.8, "hit": False} for _ in range(6)]    # arc4 (repeats arc2)
+        )
+
+        metrics = compute_miss_correction_metrics(shift_once_then_repeat)
+
+        self.assertLess(metrics["clip_shift"], 0.1)
 
 
 class MultiSpotTargetingSuite(unittest.TestCase):

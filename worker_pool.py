@@ -12,11 +12,13 @@ for) every emulator, then accept + handshake each.
 """
 
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from config import (
     AUTO_LAUNCH_BIZHAWK, BASE_PORT, BIZHAWK_EXTRA_ARGS, BIZHAWK_LAUNCH,
-    BIZHAWK_LUA, BIZHAWK_ROM, HOST, NUM_WORKERS,
+    BIZHAWK_LAUNCH_STAGGER_SECONDS, BIZHAWK_LUA, BIZHAWK_ROM, HOST,
+    NUM_WORKERS,
 )
 from env_timecrisis import TimeCrisisEnv
 
@@ -61,9 +63,15 @@ class WorkerPool:
         for env in self.envs:
             env.start_listening()
 
-        # 2. Bring up the emulators.
+        # 2. Bring up the emulators. Staggered so concurrent instances don't
+        #    race on BizHawk's single shared config.ini during startup (see
+        #    BIZHAWK_LAUNCH_STAGGER_SECONDS in config.py).
         if AUTO_LAUNCH_BIZHAWK:
-            self._procs = [_launch_bizhawk(p) for p in self.ports]
+            self._procs = []
+            for idx, p in enumerate(self.ports):
+                self._procs.append(_launch_bizhawk(p))
+                if idx < len(self.ports) - 1 and BIZHAWK_LAUNCH_STAGGER_SECONDS > 0:
+                    time.sleep(BIZHAWK_LAUNCH_STAGGER_SECONDS)
         else:
             print(
                 f"[pool] AUTO_LAUNCH_BIZHAWK is off. Launch {self.num_workers} "
