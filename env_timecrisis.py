@@ -10,7 +10,8 @@ from config import (
     DRY_FIRE_PENALTY, EDGE_BAND, EDGE_SCATTER_PENALTY, FAIL_PENALTY,
     FRAME_SKIP, HOST, HIT_REWARD, MAX_TICKS, MISS_CORRECTION_BONUS, MOVE_EPS,
     PEEK_TRAVERSE_TICKS, PORT, RAM, RELOAD_BONUS, REPEATED_MISS_PENALTY,
-    SAME_EPS, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
+    SAME_EPS, SHOT_SLOT_DIVERSITY_BONUS, SHOT_SLOT_DIVERSITY_SCALE,
+    STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import act
@@ -34,6 +35,27 @@ def normalize_cursor(raw_value: int, lo: int, hi: int) -> float:
     return float((clipped - lo) / (hi - lo))
 
 
+def shot_phase_features(ammo_left: int) -> tuple[float, float]:
+    """Return (sin, cos) of the current shot-in-clip phase angle.
+
+    Uses shot_idx = AMMO_MAX_ROUNDS - ammo_left so the angle advances by
+    2*pi/AMMO_MAX_ROUNDS with each shot; when ammo refills back to the max
+    at the reload transition, the angle wraps back to 0 (sin=0, cos=1) --
+    same value as the first shot of a clip. Non-smooth per-shot signal
+    (see config.py OBS_DIM comment) intended to break the "same 6-shot arc
+    every clip" symptom by giving the policy an explicit cue for which
+    shot in the clip is currently loaded, independent of the smooth
+    ammo_norm ramp already in the observation.
+    """
+    idx = AMMO_MAX_ROUNDS - int(ammo_left)
+    if idx < 0:
+        idx = 0
+    elif idx >= AMMO_MAX_ROUNDS:
+        idx = AMMO_MAX_ROUNDS - 1
+    angle = 2.0 * np.pi * idx / AMMO_MAX_ROUNDS
+    return float(np.sin(angle)), float(np.cos(angle))
+
+
 def core_watchdog_snapshot(cur: dict[str, int]) -> tuple[int, int, int, int]:
     """Return the menu-watchdog counters only, excluding aim/cursor RAM."""
     return cur["shots_fired"], cur["shots_hit"], cur["timer"], cur["life"]
@@ -54,6 +76,7 @@ def compute_miss_correction_metrics(shots: list[dict[str, float | bool]]) -> dic
             "center_camp": 0.0,
             "unique_ratio": 0.0,
             "clip_shift": 0.0,
+            "shot_slot_diversity": 0.0,
         }
 
     def chunks6(items: list[tuple[float, float]]) -> list[list[tuple[float, float]]]:
@@ -81,6 +104,23 @@ def compute_miss_correction_metrics(shots: list[dict[str, float | bool]]) -> dic
             vals.append(float(np.clip(dist / 0.15, 0.0, 1.0)))
         return float(np.min(vals))
 
+    def shot_slot_diversity_metric(clips: list[list[tuple[float, float]]]) -> float:
+        """Score per-shot-slot coordinate diversity across clips.
+
+        If every clip repeats the same arc, each shot slot's variance across
+        clips is ~0. Higher values mean the same slot (shot 1, shot 2, ...)
+        lands at different coordinates on different clips.
+        """
+        if len(clips) < 2:
+            return 0.0
+        slot_spreads = []
+        for j in range(6):
+            xs = np.asarray([clip[j][0] for clip in clips], dtype=np.float64)
+            ys = np.asarray([clip[j][1] for clip in clips], dtype=np.float64)
+            slot_spreads.append(float(np.sqrt(xs.var() + ys.var())))
+        mean_slot_spread = float(np.mean(slot_spreads))
+        return float(np.clip(mean_slot_spread / SHOT_SLOT_DIVERSITY_SCALE, 0.0, 1.0))
+
     corrected = 0.0
     repeated = 0.0
     edge_camp = 0.0
@@ -105,7 +145,9 @@ def compute_miss_correction_metrics(shots: list[dict[str, float | bool]]) -> dic
     edge_camp /= n
     center_camp /= n
     uniq = len({(round(s["aim_x"], 3), round(s["aim_y"], 3)) for s in shots}) / max(len(shots), 1)
-    clip_shift = clip_shift_metric(chunks6([(s["aim_x"], s["aim_y"]) for s in shots]))
+    clips = chunks6([(s["aim_x"], s["aim_y"]) for s in shots])
+    clip_shift = clip_shift_metric(clips)
+    shot_slot_diversity = shot_slot_diversity_metric(clips)
     return {
         "corrected": float(corrected),
         "repeated": float(repeated),
@@ -113,6 +155,7 @@ def compute_miss_correction_metrics(shots: list[dict[str, float | bool]]) -> dic
         "center_camp": float(center_camp),
         "unique_ratio": float(uniq),
         "clip_shift": float(clip_shift),
+        "shot_slot_diversity": float(shot_slot_diversity),
     }
 
 
@@ -196,6 +239,7 @@ class TimeCrisisEnv:
                    ammo_left: int = AMMO_MAX_ROUNDS,
                    prev_aim_x_bias: float = 0.0, prev_aim_y_bias: float = 0.0) -> np.ndarray:
         fired = max(cur["shots_fired"], 1)
+        shot_sin, shot_cos = shot_phase_features(ammo_left)
         return np.array([
             cur["timer"] / 10000.0,
             cur["life"] / 100.0,
@@ -210,6 +254,8 @@ class TimeCrisisEnv:
             prev_aim_y_bias,
             normalize_cursor(cur.get("cursor_x", CURSOR_X_MIN), CURSOR_X_MIN, CURSOR_X_MAX),
             normalize_cursor(cur.get("cursor_y", CURSOR_Y_MIN), CURSOR_Y_MIN, CURSOR_Y_MAX),
+            shot_sin,
+            shot_cos,
         ], dtype=np.float32)
 
     # -- episode --------------------------------------------------------
@@ -553,6 +599,7 @@ class TimeCrisisEnv:
         fitness -= CENTER_CAMP_PENALTY * miss_metrics["center_camp"]
         fitness += ACCURACY_BONUS_WEIGHT * accuracy
         fitness += CLIP_SHIFT_BONUS * miss_metrics["clip_shift"]
+        fitness += SHOT_SLOT_DIVERSITY_BONUS * miss_metrics["shot_slot_diversity"]
 
         fitness += HIT_REWARD * total_hits
         fitness -= DRY_FIRE_PENALTY * dry_fire_ticks
@@ -605,4 +652,5 @@ class TimeCrisisEnv:
             "miss_center_camp": miss_metrics["center_camp"],
             "miss_unique_ratio": miss_metrics["unique_ratio"],
             "miss_clip_shift": miss_metrics["clip_shift"],
+            "miss_shot_slot_diversity": miss_metrics["shot_slot_diversity"],
         }

@@ -12,6 +12,7 @@ for) every emulator, then accept + handshake each.
 """
 
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -40,7 +41,9 @@ def _launch_bizhawk(port: int) -> subprocess.Popen:
         *BIZHAWK_EXTRA_ARGS,
     ]
     print(f"[pool] launching BizHawk on port {port}: {' '.join(cmd)}", flush=True)
-    return subprocess.Popen(cmd)
+    # Keep the trainer log readable: BizHawk itself is extremely chatty
+    # (state-load timing lines every reset), which can drown ES progress output.
+    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 class WorkerPool:
@@ -108,7 +111,7 @@ class WorkerPool:
 
     # -- evaluation -----------------------------------------------------
 
-    def evaluate(self, candidates):
+    def evaluate(self, candidates, progress_cb=None):
         """Evaluate every candidate; returns aligned [(fitness, info), ...].
 
         Candidates are dealt round-robin to workers, so each env is touched by
@@ -119,11 +122,18 @@ class WorkerPool:
             raise RuntimeError("WorkerPool.start() must be called before evaluate().")
 
         results: list = [None] * len(candidates)
+        done = 0
+        done_lock = threading.Lock()
 
         def run_chunk(worker_idx: int):
+            nonlocal done
             env = self.envs[worker_idx]
             for i in range(worker_idx, len(candidates), self.num_workers):
                 results[i] = env.episode_fitness(candidates[i])
+                if progress_cb is not None:
+                    with done_lock:
+                        done += 1
+                        progress_cb(done, len(candidates))
 
         # One task per worker; each drains its slice sequentially on its own env.
         list(self._executor.map(run_chunk, range(self.num_workers)))

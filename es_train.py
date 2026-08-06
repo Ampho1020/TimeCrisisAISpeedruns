@@ -1,10 +1,13 @@
 """Evolution Strategies training loop."""
 
+import time
+
 import numpy as np
 
 from config import (
     ACT_DIM, ALPHA, CHECKPOINT_EVERY, EPISODES_PER_CANDIDATE, GENERATIONS,
     HIDDEN, HUD_ENABLED, LOG_CSV, OBS_DIM, POP_SIZE, SEED, SIGMA,
+    SHOT_PHASE_WARMSTART_ROW_STD,
     STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT, STD_STAGNATION_THRESHOLD,
     VERBOSE_EPISODES,
 )
@@ -73,6 +76,25 @@ def train():
     theta[_b2_start + 0] += 2.0  # shoot logit
     theta[_b2_start + 1] += 1.0  # peek  logit
 
+    # Shot-phase port (OBS_DIM 13 -> 15): initialize ONLY the newly-added
+    # input rows (shot_phase_sin/cos) in w1 with a small configurable std.
+    # - std=0.0 reproduces strict zero-init (gen0 equals pre-port behavior).
+    # - std>0.0 injects a small early signal so the policy can start using
+    #   shot-phase features sooner, which helps break repeated clip arcs.
+    shot_phase_extra_dims = 2
+    base_obs_dim = OBS_DIM - shot_phase_extra_dims
+    if base_obs_dim > 0:
+        _w1_end = OBS_DIM * HIDDEN
+        w1 = theta[:_w1_end].reshape(OBS_DIM, HIDDEN)
+        if SHOT_PHASE_WARMSTART_ROW_STD > 0.0:
+            w1[base_obs_dim:OBS_DIM, :] = rng.normal(
+                0.0,
+                SHOT_PHASE_WARMSTART_ROW_STD,
+                size=(shot_phase_extra_dims, HIDDEN),
+            )
+        else:
+            w1[base_obs_dim:OBS_DIM, :] = 0.0
+
     pool = WorkerPool()
     pool.start()
     logger = TrainingLogger(LOG_CSV)
@@ -108,7 +130,20 @@ def train():
             # -- see EPISODES_PER_CANDIDATE's comment in config.py and repo
             # memory's "Multi-episode fitness averaging probe" for why.
             expanded_candidates = np.repeat(candidates, EPISODES_PER_CANDIDATE, axis=0)
-            raw_results = pool.evaluate(expanded_candidates)
+            total_evals = len(expanded_candidates)
+            report_every = max(1, total_evals // 10)
+            gen_eval_start = time.monotonic()
+
+            def _on_eval_progress(done: int, total: int):
+                if done % report_every == 0 or done == total:
+                    elapsed = time.monotonic() - gen_eval_start
+                    print(
+                        f"  [gen {gen:03d}] eval {done:3d}/{total:3d} "
+                        f"({100.0 * done / total:5.1f}%) in {elapsed:6.1f}s",
+                        flush=True,
+                    )
+
+            raw_results = pool.evaluate(expanded_candidates, progress_cb=_on_eval_progress)
 
             fitnesses = np.empty(POP_SIZE, dtype=np.float64)
             infos = []

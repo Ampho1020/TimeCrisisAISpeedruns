@@ -85,7 +85,12 @@ ALPHA       = 0.02    # learning rate
 # to ~8% clear rate, and improved every aggregate metric (clear_rate,
 # mean/best accuracy, mean hits) with no seed getting more than a small dip
 # worse. Set to 1 to fully disable (exact prior single-episode behavior).
-EPISODES_PER_CANDIDATE = 3
+#
+# TEMP tuning for faster live iteration while debugging arc behavior
+# (2026-08-06): currently set to 1 so generations complete much faster and
+# behavior shifts become observable earlier. Once the shaping/architecture
+# direction is validated live, switch back to 3 for lower-noise ranking.
+EPISODES_PER_CANDIDATE = 1
 
 # GENERATIONS reduced 100 -> 34 (2026-08-05) to roughly offset
 # EPISODES_PER_CANDIDATE's ~3x increase in real BizHawk episodes evaluated
@@ -155,7 +160,14 @@ BIZHAWK_EXTRA_ARGS  = []                  # any extra EmuHawk CLI flags
 # right after all 4 handshakes succeeded -- one instance died moments later).
 # A short stagger between launches avoids the race. Raise this if instances
 # still crash shortly after startup; 0 restores the old (unstaggered) behavior.
-BIZHAWK_LAUNCH_STAGGER_SECONDS = 2.0
+BIZHAWK_LAUNCH_STAGGER_SECONDS = 3.0
+
+# Warm-start scale for the two shot-phase input rows in es_train.py's w1.
+# 0.0 keeps the strict zero-init behavior (gen0 exactly matches pre-port).
+# >0 seeds the new shot-phase channels with small non-zero weights so arc
+# variation can show up earlier instead of waiting for many generations to
+# discover/use those dims from pure perturbation noise.
+SHOT_PHASE_WARMSTART_ROW_STD = 0.08
 
 # -----------------------------
 # Fitness shaping
@@ -240,6 +252,18 @@ ACCURACY_BONUS_WEIGHT = 1000.0
 # assume this generalizes to other diversity-reward designs without testing.
 CLIP_SHIFT_BONUS = 150.0
 
+# Direct reward for per-shot-slot diversity across clips (same shot index,
+# different coordinates). This specifically targets the "same 6-shot arch
+# every reload" behavior even when a policy still earns decent clip_shift by
+# making only occasional whole-clip moves.
+#
+# The metric is normalized in env_timecrisis.py as:
+#   mean_slot_std = mean_j sqrt(var(x_j across clips) + var(y_j across clips))
+#   shot_slot_diversity = clip(mean_slot_std / SHOT_SLOT_DIVERSITY_SCALE, 0, 1)
+# where j is shot index in the 6-shot clip.
+SHOT_SLOT_DIVERSITY_BONUS = 120.0
+SHOT_SLOT_DIVERSITY_SCALE = 0.08
+
 # Flat bonus (NOT scaled by shots fired) awarded exactly once, on the tick
 # the agent ducks back into cover with an empty clip (ammo_left == 0).
 # Reinforces the "empty clip -> duck to reload" loop without rewarding shot
@@ -253,7 +277,8 @@ RELOAD_BONUS = 0.0
 # Policy dims
 # obs = [timer_norm, life_norm, fired_norm, hit_norm, acc, last_hit, last_miss,
 #        peek_phase, ammo_norm, prev_aim_x_bias, prev_aim_y_bias,
-#        cursor_x_norm, cursor_y_norm]
+#        cursor_x_norm, cursor_y_norm,
+#        shot_phase_sin, shot_phase_cos]
 # peek_phase in [-1, +1]: sign = current peek state, magnitude = ticks_held / PEEK_TRAVERSE_TICKS
 # ammo_norm = ammo_left / AMMO_MAX_ROUNDS, in [0, 1]
 # prev_aim_x_bias / prev_aim_y_bias in [-1, 1]: the aim_x_bias/aim_y_bias the
@@ -265,10 +290,27 @@ RELOAD_BONUS = 0.0
 # cursor read back from RAM. This is the first live screen-space signal in the
 # policy input: even without enemy RAM yet, the policy can now correlate where
 # rewarded hits happened with where the reticle actually was.
+# shot_phase_sin / shot_phase_cos: (sin, cos) of the shot-in-clip phase angle,
+# angle = 2*pi * (AMMO_MAX_ROUNDS - ammo_left) / AMMO_MAX_ROUNDS. Non-smooth
+# per-shot signal (adjacent shots land at distinct 2-D positions on the unit
+# circle, not on a monotonic ramp like ammo_norm) intended to break the "same
+# 6-shot arc every clip" symptom -- the memoryless MLP fed only smooth
+# monotonic inputs (ammo_norm ramp, prev_aim drift) naturally emits a smooth
+# deterministic arc; adding a non-smooth per-shot cue lets ES route each shot
+# through distinct hidden-layer paths without disentangling it from the ramp.
+# Sim-validated (repo memory "Shot-phase sin/cos + zero-init port", 2026-08-06):
+# a 5-seed x 30-gen A/B on TimedSpotBaselineAccuracyEnv showed this loosens the
+# per-shot arc std on BOTH x (+66%) and y (+62%) axes vs. baseline OBS_DIM=13,
+# and roughly triples pooled aim-y range -- the direct symptom fix the user
+# asked for. Caveat: it also cost ~22 percentage points of clear rate in the
+# sim (52% -> 30% at 30 gens) because the extra 2 dims add 2*HIDDEN=128 more
+# parameters for ES to search over. The es_train.py warm-start zero-initializes
+# the input-column weights on these 2 dims so at gen 0 behavior matches the
+# pre-port baseline exactly and ES has to actively learn to USE these dims.
 # act = [shoot_logit, cover_logit, aim_x_bias, aim_y_bias]
 # Both aim axes are policy-controlled: bias in [-1, 1] -> screen position in [0, 1].
 # -----------------------------
-OBS_DIM = 13
+OBS_DIM = 15
 HIDDEN  = 64
 ACT_DIM = 4
 

@@ -965,6 +965,453 @@ class TimedSpotHotspotMemoryEnv(TimedSpotBaselineEnv):
 
 
 # ---------------------------------------------------------------------------
+# Shot-index one-hot observation env (sim-only, idea #1 from 2026-08-06)
+# ---------------------------------------------------------------------------
+#
+# Motivation: the memoryless MLP in policy.py, fed a smooth deterministic
+# ammo_norm ramp (1.0 -> 0.17 across a clip) and a smooth prev_aim_bias
+# feedback, naturally emits a smooth deterministic AIM arc across the 6
+# shots of every clip -- the arc is essentially defined by the architecture,
+# not chosen by the agent. ES then picks whichever random arc a lucky theta
+# stumbled into. Adding a one-hot of the CURRENT shot index in the clip
+# gives the network 6 independent input columns, one per shot, so ES can
+# route each shot to a distinct aim output without disentangling it from a
+# scalar ramp. This directly targets the "same 6-shot arc every clip"
+# symptom without adding recurrence or changing the fitness formula.
+#
+# Shot index := AMMO_MAX_ROUNDS - ammo_left, clamped to [0, AMMO_MAX_ROUNDS-1].
+# On the first shot of a clip ammo_left == 6 so shot_index == 0; on the last
+# shot ammo_left == 1 so shot_index == 5. After the last shot ammo_left
+# would drop to 0 but the hard duck-on-empty override kicks in and refills
+# on the reload transition, so the index resets to 0 at the start of the
+# next clip.
+
+_SIM_SHOTIDX_EXTRA_DIMS = AMMO_MAX_ROUNDS
+_SIM_SHOTIDX_OBS_DIM = OBS_DIM + _SIM_SHOTIDX_EXTRA_DIMS
+_SIM_SHOTIDX_PARAM_COUNT = _SIM_SHOTIDX_OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM + ACT_DIM
+_SIM_SHOTIDX_B2_OFFSET = _SIM_SHOTIDX_OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM
+
+
+def _theta_shotidx_warm_start(seed: int = 42) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    theta = rng.normal(0.0, 0.1, _SIM_SHOTIDX_PARAM_COUNT)
+    theta[_SIM_SHOTIDX_B2_OFFSET + 0] += 2.0  # shoot logit
+    theta[_SIM_SHOTIDX_B2_OFFSET + 1] += 1.0  # peek  logit
+    return theta
+
+
+def _shot_index_one_hot(ammo_left: int) -> np.ndarray:
+    """Return a 6-dim one-hot of the current shot index within the clip."""
+    idx = AMMO_MAX_ROUNDS - int(ammo_left)
+    if idx < 0:
+        idx = 0
+    elif idx >= AMMO_MAX_ROUNDS:
+        idx = AMMO_MAX_ROUNDS - 1
+    onehot = np.zeros(AMMO_MAX_ROUNDS, dtype=np.float32)
+    onehot[idx] = 1.0
+    return onehot
+
+
+class TimedSpotShotIndexEnv(TimedSpotBaselineEnv):
+    """Sim-only env: timed 5-spot game + a 6-dim one-hot of the current
+    shot index in the clip appended to the observation. See the module
+    comment above for motivation. Fitness formula and step() bookkeeping
+    are IDENTICAL to ``TimedSpotBaselineEnv``; only the observation stack
+    differs, so any A/B result vs. baseline is attributable to the extra
+    input dims (and the wider policy that consumes them) alone."""
+
+    def reset(self) -> np.ndarray:
+        obs = super().reset()
+        return np.concatenate(
+            [obs, _shot_index_one_hot(self.ammo_left)], dtype=np.float32
+        )
+
+    def step(self, theta: np.ndarray):
+        peek_phase = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if self.prev_peek else -1.0)
+        base_obs = self._build_obs(
+            self.prev, 0, 0, peek_phase, self.ammo_left,
+            self.prev_aim_x_bias, self.prev_aim_y_bias,
+        )
+        aug_obs = np.concatenate(
+            [base_obs, _shot_index_one_hot(self.ammo_left)], dtype=np.float32
+        )
+        shoot, peek, aim_x_bias, aim_y_bias = _act_with_obs_dim(
+            theta, aug_obs, _SIM_SHOTIDX_OBS_DIM,
+        )
+        self.prev_aim_x_bias = float(aim_x_bias)
+        self.prev_aim_y_bias = float(aim_y_bias)
+
+        if self.ammo_left == 0:
+            peek = False
+
+        if self.peek_lock > 0:
+            peek = self.peek_locked_value
+            self.peek_lock -= 1
+        elif peek != self.prev_peek:
+            self.peek_lock = PEEK_TRAVERSE_TICKS - 1
+            self.peek_locked_value = peek
+
+        shoot_allowed = peek and self.prev_peek and self.peek_ticks >= PEEK_TRAVERSE_TICKS
+        aim_x = min(1.0, max(0.0, 0.5 + float(aim_x_bias)))
+        aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
+
+        total_fired = total_hit = total_life_loss = 0
+        cleared_guess = dead_guess = timed_out_guess = False
+        continue_screen_guess = False
+        tick_start_core = core_watchdog_snapshot(self.prev)
+        timer_at_tick_start = self.prev["timer"]
+
+        for f in range(FRAME_SKIP):
+            self.client.set_input(
+                shoot=bool(shoot and shoot_allowed and f < 2),
+                peek=peek,
+                aim_x=aim_x,
+                aim_y=aim_y,
+            )
+            pre = self.prev
+            self.client.step_frames(1)
+            post = self._read_core()
+
+            total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
+            total_hit   += max(0, u16_delta(post["shots_hit"],   pre["shots_hit"]))
+            life_d       = u16_delta(post["life"], pre["life"])
+            if life_d < 0:
+                total_life_loss += -life_d
+
+            lethal_wrap = (
+                pre["life"] > 0
+                and life_d < 0
+                and post["life"] > pre["life"]
+                and post["life"] >= 65000
+            )
+            if post["life"] == 0 or lethal_wrap:
+                dead_guess = True
+            if u16_delta(post["timer"], self.start_timer) > 100:
+                cleared_guess = True
+            timer_step = u16_delta(post["timer"], pre["timer"])
+            if post["timer"] <= TIMEOUT_TIMER_THRESHOLD or (
+                timer_step < 0 and pre["timer"] + timer_step <= TIMEOUT_TIMER_THRESHOLD
+            ):
+                timed_out_guess = True
+
+            self.prev = post
+            if dead_guess or cleared_guess or timed_out_guess:
+                break
+
+        if (
+            not dead_guess
+            and not cleared_guess
+            and not timed_out_guess
+            and core_watchdog_snapshot(self.prev) == tick_start_core
+        ):
+            self.stale_core_ticks += 1
+        else:
+            self.stale_core_ticks = 0
+        if self.stale_core_ticks >= CONTINUE_SCREEN_STALE_TICKS:
+            timed_out_guess = True
+            continue_screen_guess = True
+
+        ammo_before_tick = self.ammo_left
+        dry_fire = bool(shoot_allowed and ammo_before_tick == 0)
+        self.ammo_left = max(0, self.ammo_left - total_fired)
+        ending_peek = (peek != self.prev_peek) and not peek
+        reload_correct = False
+        if ending_peek:
+            reload_correct = self.ammo_left == 0
+            self.ammo_left = AMMO_MAX_ROUNDS
+
+        self.ticks += 1
+
+        phase = self.phase_infer.infer(TickSignals(
+            shots_fired_delta=total_fired,
+            shots_hit_delta=total_hit,
+            life_delta=-total_life_loss,
+            timer_delta=u16_delta(self.prev["timer"], timer_at_tick_start),
+            cleared_guess=cleared_guess,
+            dead_guess=dead_guess or timed_out_guess,
+            can_fire_probe=(total_fired > 0),
+        ))
+
+        last_hit = 1 if total_hit > 0 else 0
+        last_miss = 1 if (total_fired > 0 and total_hit == 0) else 0
+        if peek == self.prev_peek:
+            self.peek_ticks = min(self.peek_ticks + 1, PEEK_TRAVERSE_TICKS)
+        else:
+            self.peek_ticks = 1
+        self.prev_peek = peek
+        peek_phase_next = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if peek else -1.0)
+        base_obs_next = self._build_obs(
+            self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left,
+            self.prev_aim_x_bias, self.prev_aim_y_bias,
+        )
+        obs = np.concatenate(
+            [base_obs_next, _shot_index_one_hot(self.ammo_left)], dtype=np.float32
+        )
+
+        done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
+        info = {
+            "shots_fired_delta": total_fired,
+            "shots_hit_delta": total_hit,
+            "life_loss": total_life_loss,
+            "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
+            "dead": dead_guess,
+            "timed_out": timed_out_guess,
+            "continue_screen": continue_screen_guess,
+            "peek": bool(peek),
+            "phase": phase.name,
+            "dry_fire": dry_fire,
+            "reload_correct": reload_correct,
+            "ammo_left": self.ammo_left,
+            "aim_x": float(aim_x),
+            "aim_y": float(aim_y),
+            "shot_index": int(AMMO_MAX_ROUNDS - ammo_before_tick),
+        }
+        return obs, done, info
+
+
+# ---------------------------------------------------------------------------
+# Shot-phase (sin/cos) observation env (sim-only, follow-up to shot-index)
+# ---------------------------------------------------------------------------
+#
+# The 6-dim one-hot shot-index probe (`TimedSpotShotIndexEnv` above) DID
+# loosen the arch on the X axis and increased overall aim spread, but
+# hurt task performance in a fixed 30-gen budget -- 6 extra input dims add
+# 6*HIDDEN=384 extra parameters for ES to random-walk over, which slows
+# convergence even when the mechanism is sound.
+#
+# This variant tries the same idea with a much smaller signal:
+#   shot_phase = 2 * pi * (AMMO_MAX_ROUNDS - ammo_left) / AMMO_MAX_ROUNDS
+#   obs_extra  = (sin(shot_phase), cos(shot_phase))
+# so only 2 extra dims (2*HIDDEN=128 extra params, 33% of the one-hot cost)
+# still give a NON-SMOOTH per-shot signal (adjacent shot indices land at
+# distinct 2-D positions on the unit circle, not on a monotonic ramp like
+# ammo_norm) without the parameter blowup.
+#
+# The warm-start ALSO zero-initializes the two new input-column rows of
+# `w1` (see `_theta_shotphase_warm_start` below), so at gen 0 the network
+# behaves EXACTLY like the baseline warm-start: the new dims contribute
+# nothing until ES's random perturbations discover them. This isolates the
+# effect of the extra representational capacity from the effect of
+# perturbing early behavior on day one.
+
+_SIM_SHOTPHASE_EXTRA_DIMS = 2
+_SIM_SHOTPHASE_OBS_DIM = OBS_DIM + _SIM_SHOTPHASE_EXTRA_DIMS
+_SIM_SHOTPHASE_PARAM_COUNT = (
+    _SIM_SHOTPHASE_OBS_DIM * HIDDEN + HIDDEN
+    + HIDDEN * ACT_DIM + ACT_DIM
+)
+_SIM_SHOTPHASE_B2_OFFSET = (
+    _SIM_SHOTPHASE_OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM
+)
+
+
+def _shot_phase_features(ammo_left: int) -> np.ndarray:
+    """Return (sin, cos) of the current shot-in-clip phase angle.
+
+    Uses shot_idx = AMMO_MAX_ROUNDS - ammo_left so the angle advances by
+    2*pi/AMMO_MAX_ROUNDS with each shot; when ammo refills back to the
+    max at the reload transition, the angle wraps back to 0 (sin=0,
+    cos=1) -- same value as the first shot of a clip.
+    """
+    idx = AMMO_MAX_ROUNDS - int(ammo_left)
+    if idx < 0:
+        idx = 0
+    elif idx >= AMMO_MAX_ROUNDS:
+        idx = AMMO_MAX_ROUNDS - 1
+    angle = 2.0 * np.pi * idx / AMMO_MAX_ROUNDS
+    return np.array([np.sin(angle), np.cos(angle)], dtype=np.float32)
+
+
+def _theta_shotphase_warm_start(seed: int = 42) -> np.ndarray:
+    """Warm-start for the shot-phase env, structured so that at gen 0 the
+    network's output is IDENTICAL to a `_theta_warm_start` baseline theta
+    with the same seed.
+
+    Trick: draw the BASELINE theta first (13-dim obs). Its `w1` occupies
+    the first OBS_DIM*HIDDEN entries. For the wider theta we need a
+    (15, HIDDEN) `w1` block. We reshape the baseline's `w1` to (13, HIDDEN),
+    concatenate a (2, HIDDEN) block of ZEROS for the new sin/cos input
+    columns, flatten, and append the baseline's `b1`/`w2`/`b2` verbatim.
+    So the extra input dims multiply against zero weights at gen 0 and
+    contribute nothing to the hidden layer -- the net is behaviorally
+    identical to baseline until ES perturbations kick in.
+    """
+    baseline_theta = _theta_warm_start(seed)
+    i = 0
+    w1_base = baseline_theta[i:i + OBS_DIM * HIDDEN].reshape(OBS_DIM, HIDDEN)
+    i += OBS_DIM * HIDDEN
+    b1 = baseline_theta[i:i + HIDDEN]
+    i += HIDDEN
+    w2 = baseline_theta[i:i + HIDDEN * ACT_DIM]
+    i += HIDDEN * ACT_DIM
+    b2 = baseline_theta[i:i + ACT_DIM]
+
+    extra_rows = np.zeros((_SIM_SHOTPHASE_EXTRA_DIMS, HIDDEN), dtype=w1_base.dtype)
+    w1_wide = np.concatenate([w1_base, extra_rows], axis=0)  # (15, HIDDEN)
+
+    theta = np.concatenate([w1_wide.reshape(-1), b1, w2, b2]).astype(baseline_theta.dtype)
+    assert theta.shape[0] == _SIM_SHOTPHASE_PARAM_COUNT
+    return theta
+
+
+class TimedSpotShotPhaseEnv(TimedSpotBaselineEnv):
+    """Sim-only env: timed 5-spot game + 2-dim (sin, cos) shot-phase
+    features appended to the obs. See the module comment above for
+    motivation and the zero-init warm-start rationale. Fitness formula
+    and step() bookkeeping are IDENTICAL to `TimedSpotBaselineEnv`; only
+    the observation stack differs.
+    """
+
+    def reset(self) -> np.ndarray:
+        obs = super().reset()
+        return np.concatenate(
+            [obs, _shot_phase_features(self.ammo_left)], dtype=np.float32
+        )
+
+    def step(self, theta: np.ndarray):
+        peek_phase = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if self.prev_peek else -1.0)
+        base_obs = self._build_obs(
+            self.prev, 0, 0, peek_phase, self.ammo_left,
+            self.prev_aim_x_bias, self.prev_aim_y_bias,
+        )
+        aug_obs = np.concatenate(
+            [base_obs, _shot_phase_features(self.ammo_left)], dtype=np.float32
+        )
+        shoot, peek, aim_x_bias, aim_y_bias = _act_with_obs_dim(
+            theta, aug_obs, _SIM_SHOTPHASE_OBS_DIM,
+        )
+        self.prev_aim_x_bias = float(aim_x_bias)
+        self.prev_aim_y_bias = float(aim_y_bias)
+
+        if self.ammo_left == 0:
+            peek = False
+
+        if self.peek_lock > 0:
+            peek = self.peek_locked_value
+            self.peek_lock -= 1
+        elif peek != self.prev_peek:
+            self.peek_lock = PEEK_TRAVERSE_TICKS - 1
+            self.peek_locked_value = peek
+
+        shoot_allowed = peek and self.prev_peek and self.peek_ticks >= PEEK_TRAVERSE_TICKS
+        aim_x = min(1.0, max(0.0, 0.5 + float(aim_x_bias)))
+        aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
+
+        total_fired = total_hit = total_life_loss = 0
+        cleared_guess = dead_guess = timed_out_guess = False
+        continue_screen_guess = False
+        tick_start_core = core_watchdog_snapshot(self.prev)
+        timer_at_tick_start = self.prev["timer"]
+
+        for f in range(FRAME_SKIP):
+            self.client.set_input(
+                shoot=bool(shoot and shoot_allowed and f < 2),
+                peek=peek,
+                aim_x=aim_x,
+                aim_y=aim_y,
+            )
+            pre = self.prev
+            self.client.step_frames(1)
+            post = self._read_core()
+
+            total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
+            total_hit   += max(0, u16_delta(post["shots_hit"],   pre["shots_hit"]))
+            life_d       = u16_delta(post["life"], pre["life"])
+            if life_d < 0:
+                total_life_loss += -life_d
+
+            lethal_wrap = (
+                pre["life"] > 0
+                and life_d < 0
+                and post["life"] > pre["life"]
+                and post["life"] >= 65000
+            )
+            if post["life"] == 0 or lethal_wrap:
+                dead_guess = True
+            if u16_delta(post["timer"], self.start_timer) > 100:
+                cleared_guess = True
+            timer_step = u16_delta(post["timer"], pre["timer"])
+            if post["timer"] <= TIMEOUT_TIMER_THRESHOLD or (
+                timer_step < 0 and pre["timer"] + timer_step <= TIMEOUT_TIMER_THRESHOLD
+            ):
+                timed_out_guess = True
+
+            self.prev = post
+            if dead_guess or cleared_guess or timed_out_guess:
+                break
+
+        if (
+            not dead_guess
+            and not cleared_guess
+            and not timed_out_guess
+            and core_watchdog_snapshot(self.prev) == tick_start_core
+        ):
+            self.stale_core_ticks += 1
+        else:
+            self.stale_core_ticks = 0
+        if self.stale_core_ticks >= CONTINUE_SCREEN_STALE_TICKS:
+            timed_out_guess = True
+            continue_screen_guess = True
+
+        ammo_before_tick = self.ammo_left
+        dry_fire = bool(shoot_allowed and ammo_before_tick == 0)
+        self.ammo_left = max(0, self.ammo_left - total_fired)
+        ending_peek = (peek != self.prev_peek) and not peek
+        reload_correct = False
+        if ending_peek:
+            reload_correct = self.ammo_left == 0
+            self.ammo_left = AMMO_MAX_ROUNDS
+
+        self.ticks += 1
+
+        phase = self.phase_infer.infer(TickSignals(
+            shots_fired_delta=total_fired,
+            shots_hit_delta=total_hit,
+            life_delta=-total_life_loss,
+            timer_delta=u16_delta(self.prev["timer"], timer_at_tick_start),
+            cleared_guess=cleared_guess,
+            dead_guess=dead_guess or timed_out_guess,
+            can_fire_probe=(total_fired > 0),
+        ))
+
+        last_hit = 1 if total_hit > 0 else 0
+        last_miss = 1 if (total_fired > 0 and total_hit == 0) else 0
+        if peek == self.prev_peek:
+            self.peek_ticks = min(self.peek_ticks + 1, PEEK_TRAVERSE_TICKS)
+        else:
+            self.peek_ticks = 1
+        self.prev_peek = peek
+        peek_phase_next = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if peek else -1.0)
+        base_obs_next = self._build_obs(
+            self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left,
+            self.prev_aim_x_bias, self.prev_aim_y_bias,
+        )
+        obs = np.concatenate(
+            [base_obs_next, _shot_phase_features(self.ammo_left)], dtype=np.float32
+        )
+
+        done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
+        info = {
+            "shots_fired_delta": total_fired,
+            "shots_hit_delta": total_hit,
+            "life_loss": total_life_loss,
+            "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
+            "dead": dead_guess,
+            "timed_out": timed_out_guess,
+            "continue_screen": continue_screen_guess,
+            "peek": bool(peek),
+            "phase": phase.name,
+            "dry_fire": dry_fire,
+            "reload_correct": reload_correct,
+            "ammo_left": self.ammo_left,
+            "aim_x": float(aim_x),
+            "aim_y": float(aim_y),
+            "shot_index": int(AMMO_MAX_ROUNDS - ammo_before_tick),
+        }
+        return obs, done, info
+
+
+# ---------------------------------------------------------------------------
 # Accuracy-shaped fitness (sim-only experiment, not in env_timecrisis.py)
 # ---------------------------------------------------------------------------
 
@@ -996,6 +1443,20 @@ class AccuracyShapedFitnessMixin:
 class TimedSpotBaselineAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotBaselineEnv):
     """Baseline observation stack on the timed 5-spot task, with the
     accuracy-shaped fitness on top (sim-only A/B arm)."""
+
+
+class TimedSpotShotIndexAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotShotIndexEnv):
+    """Shot-index one-hot observation stack on the timed 5-spot task, with
+    the accuracy-shaped fitness on top -- direct A/B counterpart to
+    ``TimedSpotBaselineAccuracyEnv`` where only the observation stack
+    differs. See ``TimedSpotShotIndexEnv`` for motivation."""
+
+
+class TimedSpotShotPhaseAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotShotPhaseEnv):
+    """Shot-phase (sin, cos) observation stack on the timed 5-spot task,
+    with the accuracy-shaped fitness on top -- follow-up variant to the
+    one-hot arm above, using only 2 extra obs dims + zero-init on the new
+    input columns. See ``TimedSpotShotPhaseEnv`` for motivation."""
 
 
 def run_timed_spot_probe(env_cls, theta_init_fn, param_count: int,
@@ -1281,12 +1742,14 @@ class SmokeSuite(unittest.TestCase):
         env = SimulatedTimeCrisisEnv(seed=0)
         obs = env.reset()
         self.assertEqual(obs.shape[0], OBS_DIM)
+        # obs tail layout is now [..., cursor_x, cursor_y, shot_phase_sin,
+        # shot_phase_cos], so cursor is at -4/-3 rather than -2/-1.
         self.assertAlmostEqual(
-            float(obs[-2]),
+            float(obs[-4]),
             normalize_cursor(env.prev["cursor_x"], CURSOR_X_MIN, CURSOR_X_MAX),
         )
         self.assertAlmostEqual(
-            float(obs[-1]),
+            float(obs[-3]),
             normalize_cursor(env.prev["cursor_y"], CURSOR_Y_MIN, CURSOR_Y_MAX),
         )
 
@@ -1521,6 +1984,115 @@ class AccuracyShapedFitnessSuite(unittest.TestCase):
             base_fitness + ACCURACY_BONUS_WEIGHT * base_metrics["accuracy"],
             places=3,
         )
+
+
+class ShotIndexObservationSuite(unittest.TestCase):
+    """Regression checks for the shot-index one-hot obs env (idea #1)."""
+
+    def test_reset_obs_has_extra_one_hot_dims(self):
+        env = TimedSpotShotIndexEnv(seed=0)
+        obs = env.reset()
+        self.assertEqual(obs.shape[0], _SIM_SHOTIDX_OBS_DIM)
+        onehot = obs[OBS_DIM:]
+        # Ammo starts full, so shot_index == 0 -> onehot[0] == 1.
+        self.assertEqual(onehot.shape[0], AMMO_MAX_ROUNDS)
+        self.assertEqual(float(onehot[0]), 1.0)
+        self.assertEqual(float(onehot[1:].sum()), 0.0)
+
+    def test_one_hot_advances_with_each_shot_in_clip(self):
+        env = TimedSpotShotIndexEnv(seed=0)
+        env.reset()
+        # Aim at the first spot so shots register.
+        target_x, target_y = env.client._game.spots[0]
+        theta = np.zeros(_SIM_SHOTIDX_PARAM_COUNT)
+        theta[_SIM_SHOTIDX_B2_OFFSET + 0] = 50.0  # shoot logit
+        theta[_SIM_SHOTIDX_B2_OFFSET + 1] = 50.0  # peek logit
+        theta[_SIM_SHOTIDX_B2_OFFSET + 2] = _aim_bias_for(target_x)
+        theta[_SIM_SHOTIDX_B2_OFFSET + 3] = _aim_bias_for(target_y)
+
+        # Walk enough ticks to burn one full clip (peek traverse + up to 6 shots).
+        seen_indices = []
+        for _ in range(PEEK_TRAVERSE_TICKS + AMMO_MAX_ROUNDS + 4):
+            obs, _, info = env.step(theta)
+            onehot = obs[OBS_DIM:]
+            active_idx = int(np.argmax(onehot))
+            seen_indices.append((info["ammo_left"], active_idx, float(onehot.sum())))
+        # Every observation is a proper one-hot (exactly one dim == 1.0).
+        for _, _, s in seen_indices:
+            self.assertEqual(s, 1.0)
+        # We should have seen at least 3 distinct one-hot positions across
+        # a clip (i.e. the index actually advances, not stuck at 0).
+        distinct = {idx for _, idx, _ in seen_indices}
+        self.assertGreaterEqual(len(distinct), 3)
+
+    def test_param_count_matches_wider_obs_dim(self):
+        expected = (
+            _SIM_SHOTIDX_OBS_DIM * HIDDEN + HIDDEN
+            + HIDDEN * ACT_DIM + ACT_DIM
+        )
+        self.assertEqual(_SIM_SHOTIDX_PARAM_COUNT, expected)
+        # Warm-start theta is the right shape and the shoot/peek biases
+        # were bumped like the baseline warm-start.
+        theta = _theta_shotidx_warm_start(seed=42)
+        self.assertEqual(theta.shape[0], _SIM_SHOTIDX_PARAM_COUNT)
+        self.assertGreater(theta[_SIM_SHOTIDX_B2_OFFSET + 0], 1.5)
+        self.assertGreater(theta[_SIM_SHOTIDX_B2_OFFSET + 1], 0.5)
+
+
+class ShotPhaseObservationSuite(unittest.TestCase):
+    """Regression checks for the shot-phase (sin/cos) obs env variant."""
+
+    def test_reset_obs_has_two_extra_phase_dims(self):
+        env = TimedSpotShotPhaseEnv(seed=0)
+        obs = env.reset()
+        self.assertEqual(obs.shape[0], _SIM_SHOTPHASE_OBS_DIM)
+        # At reset, ammo is full so shot_idx=0 -> sin=0, cos=1.
+        self.assertAlmostEqual(float(obs[OBS_DIM + 0]), 0.0, places=6)
+        self.assertAlmostEqual(float(obs[OBS_DIM + 1]), 1.0, places=6)
+
+    def test_phase_features_advance_on_the_unit_circle(self):
+        # As shot_idx goes 0..5, sin/cos should land at 6 distinct points on
+        # the unit circle. This is what makes the signal non-smooth even
+        # though it's only 2 dims: adjacent shots aren't monotonically close.
+        pts = []
+        for ammo in range(AMMO_MAX_ROUNDS, 0, -1):
+            feat = _shot_phase_features(ammo)
+            pts.append((round(float(feat[0]), 6), round(float(feat[1]), 6)))
+        # 6 distinct points -> all shots have unique phase features.
+        self.assertEqual(len(set(pts)), AMMO_MAX_ROUNDS)
+        # sin^2 + cos^2 == 1 for every point.
+        for s, c in pts:
+            self.assertAlmostEqual(s * s + c * c, 1.0, places=5)
+
+    def test_warm_start_matches_baseline_behavior_exactly_at_gen0(self):
+        # The whole point of zero-initing the extra input-column rows: at
+        # gen 0 the phase env's warm-start theta should produce IDENTICAL
+        # (shoot, peek, aim_x, aim_y) as the baseline warm-start theta on
+        # the same obs (with the extra sin/cos dims appended).
+        rng = np.random.default_rng(0)
+        obs_base = rng.normal(0.0, 1.0, OBS_DIM).astype(np.float32)
+        obs_phase = np.concatenate([obs_base, _shot_phase_features(AMMO_MAX_ROUNDS)])
+
+        theta_base = _theta_warm_start(seed=42)
+        theta_phase = _theta_shotphase_warm_start(seed=42)
+
+        # Use the same _act_with_obs_dim helper both arms use in step().
+        out_base = _act_with_obs_dim(theta_base, obs_base, OBS_DIM)
+        out_phase = _act_with_obs_dim(theta_phase, obs_phase, _SIM_SHOTPHASE_OBS_DIM)
+
+        self.assertEqual(out_base[0], out_phase[0])  # shoot
+        self.assertEqual(out_base[1], out_phase[1])  # peek
+        self.assertAlmostEqual(out_base[2], out_phase[2], places=6)  # aim_x
+        self.assertAlmostEqual(out_base[3], out_phase[3], places=6)  # aim_y
+
+    def test_param_count_matches_wider_obs_dim(self):
+        expected = (
+            _SIM_SHOTPHASE_OBS_DIM * HIDDEN + HIDDEN
+            + HIDDEN * ACT_DIM + ACT_DIM
+        )
+        self.assertEqual(_SIM_SHOTPHASE_PARAM_COUNT, expected)
+        theta = _theta_shotphase_warm_start(seed=42)
+        self.assertEqual(theta.shape[0], _SIM_SHOTPHASE_PARAM_COUNT)
 
 
 class StagnationKickProbeSuite(unittest.TestCase):
@@ -1893,6 +2465,43 @@ class MissCorrectionMetricsSuite(unittest.TestCase):
         metrics = compute_miss_correction_metrics(shift_once_then_repeat)
 
         self.assertLess(metrics["clip_shift"], 0.1)
+
+    def test_shot_slot_diversity_rewards_slot_variation_across_clips(self):
+        """If the same shot slot lands at different coordinates across clips,
+        shot_slot_diversity should be higher than for repeated identical arcs."""
+        repeated_arc = (
+            [{"aim_x": 0.20, "aim_y": 0.20, "hit": False} for _ in range(6)]
+            + [{"aim_x": 0.20, "aim_y": 0.20, "hit": False} for _ in range(6)]
+        )
+        varied_slots = [
+            # clip 1
+            {"aim_x": 0.20, "aim_y": 0.20, "hit": False},
+            {"aim_x": 0.30, "aim_y": 0.20, "hit": False},
+            {"aim_x": 0.40, "aim_y": 0.20, "hit": False},
+            {"aim_x": 0.50, "aim_y": 0.20, "hit": False},
+            {"aim_x": 0.60, "aim_y": 0.20, "hit": False},
+            {"aim_x": 0.70, "aim_y": 0.20, "hit": False},
+            # clip 2 (slot-wise shifted)
+            {"aim_x": 0.25, "aim_y": 0.25, "hit": False},
+            {"aim_x": 0.35, "aim_y": 0.25, "hit": False},
+            {"aim_x": 0.45, "aim_y": 0.25, "hit": False},
+            {"aim_x": 0.55, "aim_y": 0.25, "hit": False},
+            {"aim_x": 0.65, "aim_y": 0.25, "hit": False},
+            {"aim_x": 0.75, "aim_y": 0.25, "hit": False},
+        ]
+
+        repeated_metrics = compute_miss_correction_metrics(repeated_arc)
+        varied_metrics = compute_miss_correction_metrics(varied_slots)
+
+        self.assertGreater(
+            varied_metrics["shot_slot_diversity"],
+            repeated_metrics["shot_slot_diversity"],
+        )
+
+    def test_shot_slot_diversity_is_zero_with_fewer_than_two_clips(self):
+        one_clip = [{"aim_x": 0.4, "aim_y": 0.5, "hit": False} for _ in range(6)]
+        metrics = compute_miss_correction_metrics(one_clip)
+        self.assertEqual(metrics["shot_slot_diversity"], 0.0)
 
 
 class MultiSpotTargetingSuite(unittest.TestCase):
