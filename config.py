@@ -229,6 +229,14 @@ CENTER_BAND = 0.04
 EDGE_SCATTER_PENALTY = 30.0
 CENTER_CAMP_PENALTY = 30.0
 
+# hit_delta shaping: per-frame counter of how long we've gone without a hit.
+# The counter resets to 0 on any confirmed hit and increments by 1 on every
+# frame that does not register a hit. It is exposed to the policy as
+# hit_delta_norm and penalized in fitness (below) so the agent is nudged away
+# from long dry streaks.
+HIT_DELTA_NORM_FRAMES = 300.0
+HIT_DELTA_PENALTY = 80.0
+
 # Accuracy-shaped fitness bonus (rewards hit RATE, not just hit COUNT).
 # Sim-validated (repo memory "Miss-correction objective probe", 2026-08-06):
 # combining this with the miss-correction terms above (the "miss-
@@ -276,7 +284,7 @@ RELOAD_BONUS = 0.0
 # -----------------------------
 # Policy dims
 # obs = [timer_norm, life_norm, fired_norm, hit_norm, acc, last_hit, last_miss,
-#        peek_phase, ammo_norm, prev_aim_x_bias, prev_aim_y_bias,
+#        hit_delta_norm, peek_phase, ammo_norm, prev_aim_x_bias, prev_aim_y_bias,
 #        cursor_x_norm, cursor_y_norm,
 #        shot_phase_sin, shot_phase_cos]
 # peek_phase in [-1, +1]: sign = current peek state, magnitude = ticks_held / PEEK_TRAVERSE_TICKS
@@ -286,6 +294,9 @@ RELOAD_BONUS = 0.0
 # input. The net is otherwise purely feedforward/memoryless, so without this
 # it has no way to know what it last chose -- this closes that loop, letting
 # weights learn to shift aim across ticks instead of latching onto one spot.
+# hit_delta_norm in [0, 1] (clipped): normalized per-frame streak length since
+# the last confirmed hit. 0 means "just hit"; larger values mean the policy has
+# gone longer without landing anything.
 # cursor_x_norm / cursor_y_norm in [0, 1]: the actual current on-screen gun
 # cursor read back from RAM. This is the first live screen-space signal in the
 # policy input: even without enemy RAM yet, the policy can now correlate where
@@ -310,7 +321,7 @@ RELOAD_BONUS = 0.0
 # act = [shoot_logit, cover_logit, aim_x_bias, aim_y_bias]
 # Both aim axes are policy-controlled: bias in [-1, 1] -> screen position in [0, 1].
 # -----------------------------
-OBS_DIM = 15
+OBS_DIM = 16
 HIDDEN  = 64
 ACT_DIM = 4
 

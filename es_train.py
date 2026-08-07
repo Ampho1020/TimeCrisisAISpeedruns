@@ -189,6 +189,7 @@ def train():
             mean_shot_left_frac = float(np.mean([x["shot_left_frac"] for x in infos]))
             mean_shot_mid_frac = float(np.mean([x["shot_mid_frac"] for x in infos]))
             mean_shot_right_frac = float(np.mean([x["shot_right_frac"] for x in infos]))
+            mean_hit_delta = float(np.mean([x["mean_hit_delta"] for x in infos]))
 
             print(
                 f"\n=== gen {gen:03d} | best {fitnesses[best_i]:8.2f} "
@@ -199,6 +200,7 @@ def train():
                 f"| aimstd ({mean_aim_x_std:.3f},{mean_aim_y_std:.3f}) "
                 f"| aimspan ({mean_aim_span_x:.3f},{mean_aim_span_y:.3f}) "
                 f"| aimdx {mean_aim_dx:.3f} "
+                f"| hitd {mean_hit_delta:.1f} "
                 f"| lanes L/M/R {mean_shot_left_frac:.0%}/{mean_shot_mid_frac:.0%}/{mean_shot_right_frac:.0%} ===\n",
                 flush=True,
             )
@@ -237,6 +239,7 @@ def train():
                 "mean_aim_span_x": mean_aim_span_x,
                 "mean_aim_span_y": mean_aim_span_y,
                 "mean_aim_dx": mean_aim_dx,
+                "mean_hit_delta": mean_hit_delta,
                 "mean_shot_left_frac": mean_shot_left_frac,
                 "mean_shot_mid_frac": mean_shot_mid_frac,
                 "mean_shot_right_frac": mean_shot_right_frac,

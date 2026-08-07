@@ -250,6 +250,7 @@ class SimulatedTimeCrisisEnv(TimeCrisisEnv):
         self.peek_locked_value  = False
         self.stale_core_ticks   = 0
         self.ammo_left          = AMMO_MAX_ROUNDS
+        self.hit_delta          = 0
         self.prev_aim_x_bias    = 0.0
         self.prev_aim_y_bias    = 0.0
 
@@ -282,6 +283,7 @@ class FrozenStateEnv(SimulatedTimeCrisisEnv):
         self.peek_locked_value  = False
         self.stale_core_ticks   = 0
         self.ammo_left          = AMMO_MAX_ROUNDS
+        self.hit_delta          = 0
         self.prev_aim_x_bias    = 0.0
         self.prev_aim_y_bias    = 0.0
 
@@ -424,6 +426,7 @@ class TimedSpotBaselineEnv(SimulatedTimeCrisisEnv):
         self.peek_locked_value  = False
         self.stale_core_ticks   = 0
         self.ammo_left          = AMMO_MAX_ROUNDS
+        self.hit_delta          = 0
         self.prev_aim_x_bias    = 0.0
         self.prev_aim_y_bias    = 0.0
 
@@ -480,6 +483,7 @@ class TimedSpotMemoryEnv(TimedSpotBaselineEnv):
         self.peek_locked_value = False
         self.stale_core_ticks = 0
         self.ammo_left = AMMO_MAX_ROUNDS
+        self.hit_delta = 0
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
         self.last_success_aim_x = 0.5
@@ -499,6 +503,7 @@ class TimedSpotMemoryEnv(TimedSpotBaselineEnv):
             ammo_left,
             self.prev_aim_x_bias,
             self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
         )
         since_norm = min(self.ticks_since_success / self.MEMORY_HORIZON_TICKS, 1.0)
         memory = np.array([
@@ -551,7 +556,12 @@ class TimedSpotMemoryEnv(TimedSpotBaselineEnv):
             post = self._read_core()
 
             total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
-            total_hit   += max(0, u16_delta(post["shots_hit"],   pre["shots_hit"]))
+            frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
+            total_hit += frame_hits
+            if frame_hits > 0:
+                self.hit_delta = 0
+            else:
+                self.hit_delta += 1
             life_d       = u16_delta(post["life"], pre["life"])
             if life_d < 0:
                 total_life_loss += -life_d
@@ -644,6 +654,7 @@ class TimedSpotMemoryEnv(TimedSpotBaselineEnv):
             "dry_fire": dry_fire,
             "reload_correct": reload_correct,
             "ammo_left": self.ammo_left,
+            "hit_delta": int(self.hit_delta),
             "aim_x": float(aim_x),
             "aim_y": float(aim_y),
             "last_success_aim_x": float(self.last_success_aim_x),
@@ -780,6 +791,7 @@ class TimedSpotHotspotMemoryEnv(TimedSpotBaselineEnv):
         self.peek_locked_value  = False
         self.stale_core_ticks   = 0
         self.ammo_left          = AMMO_MAX_ROUNDS
+        self.hit_delta          = 0
         self.prev_aim_x_bias    = 0.0
         self.prev_aim_y_bias    = 0.0
         self.hotspots           = HotspotBank()
@@ -796,6 +808,7 @@ class TimedSpotHotspotMemoryEnv(TimedSpotBaselineEnv):
         self.peek_locked_value = False
         self.stale_core_ticks = 0
         self.ammo_left = AMMO_MAX_ROUNDS
+        self.hit_delta = 0
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
         self.hotspots.reset()
@@ -808,6 +821,7 @@ class TimedSpotHotspotMemoryEnv(TimedSpotBaselineEnv):
         base = self._build_obs(
             cur, last_hit, last_miss, peek_phase, ammo_left,
             self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
         )
         best_x, best_y, confidence_norm, recency_norm = self.hotspots.best_candidate()
         memory = np.array([best_x, best_y, confidence_norm, recency_norm], dtype=np.float32)
@@ -856,7 +870,12 @@ class TimedSpotHotspotMemoryEnv(TimedSpotBaselineEnv):
             post = self._read_core()
 
             total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
-            total_hit   += max(0, u16_delta(post["shots_hit"],   pre["shots_hit"]))
+            frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
+            total_hit += frame_hits
+            if frame_hits > 0:
+                self.hit_delta = 0
+            else:
+                self.hit_delta += 1
             life_d       = u16_delta(post["life"], pre["life"])
             if life_d < 0:
                 total_life_loss += -life_d
@@ -950,6 +969,7 @@ class TimedSpotHotspotMemoryEnv(TimedSpotBaselineEnv):
             "dry_fire": dry_fire,
             "reload_correct": reload_correct,
             "ammo_left": self.ammo_left,
+            "hit_delta": int(self.hit_delta),
             "aim_x": float(aim_x),
             "aim_y": float(aim_y),
             "hotspot_best_x": float(best_x),
@@ -1031,6 +1051,7 @@ class TimedSpotShotIndexEnv(TimedSpotBaselineEnv):
         base_obs = self._build_obs(
             self.prev, 0, 0, peek_phase, self.ammo_left,
             self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
         )
         aug_obs = np.concatenate(
             [base_obs, _shot_index_one_hot(self.ammo_left)], dtype=np.float32
@@ -1073,7 +1094,12 @@ class TimedSpotShotIndexEnv(TimedSpotBaselineEnv):
             post = self._read_core()
 
             total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
-            total_hit   += max(0, u16_delta(post["shots_hit"],   pre["shots_hit"]))
+            frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
+            total_hit += frame_hits
+            if frame_hits > 0:
+                self.hit_delta = 0
+            else:
+                self.hit_delta += 1
             life_d       = u16_delta(post["life"], pre["life"])
             if life_d < 0:
                 total_life_loss += -life_d
@@ -1143,6 +1169,7 @@ class TimedSpotShotIndexEnv(TimedSpotBaselineEnv):
         base_obs_next = self._build_obs(
             self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left,
             self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
         )
         obs = np.concatenate(
             [base_obs_next, _shot_index_one_hot(self.ammo_left)], dtype=np.float32
@@ -1162,6 +1189,7 @@ class TimedSpotShotIndexEnv(TimedSpotBaselineEnv):
             "dry_fire": dry_fire,
             "reload_correct": reload_correct,
             "ammo_left": self.ammo_left,
+            "hit_delta": int(self.hit_delta),
             "aim_x": float(aim_x),
             "aim_y": float(aim_y),
             "shot_index": int(AMMO_MAX_ROUNDS - ammo_before_tick),
@@ -1273,6 +1301,7 @@ class TimedSpotShotPhaseEnv(TimedSpotBaselineEnv):
         base_obs = self._build_obs(
             self.prev, 0, 0, peek_phase, self.ammo_left,
             self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
         )
         aug_obs = np.concatenate(
             [base_obs, _shot_phase_features(self.ammo_left)], dtype=np.float32
@@ -1315,7 +1344,12 @@ class TimedSpotShotPhaseEnv(TimedSpotBaselineEnv):
             post = self._read_core()
 
             total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
-            total_hit   += max(0, u16_delta(post["shots_hit"],   pre["shots_hit"]))
+            frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
+            total_hit += frame_hits
+            if frame_hits > 0:
+                self.hit_delta = 0
+            else:
+                self.hit_delta += 1
             life_d       = u16_delta(post["life"], pre["life"])
             if life_d < 0:
                 total_life_loss += -life_d
@@ -1385,6 +1419,7 @@ class TimedSpotShotPhaseEnv(TimedSpotBaselineEnv):
         base_obs_next = self._build_obs(
             self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left,
             self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
         )
         obs = np.concatenate(
             [base_obs_next, _shot_phase_features(self.ammo_left)], dtype=np.float32
@@ -1404,6 +1439,7 @@ class TimedSpotShotPhaseEnv(TimedSpotBaselineEnv):
             "dry_fire": dry_fire,
             "reload_correct": reload_correct,
             "ammo_left": self.ammo_left,
+            "hit_delta": int(self.hit_delta),
             "aim_x": float(aim_x),
             "aim_y": float(aim_y),
             "shot_index": int(AMMO_MAX_ROUNDS - ammo_before_tick),
@@ -1592,9 +1628,10 @@ def rank_transform(fitnesses: np.ndarray) -> np.ndarray:
 
 
 # Observation index of ammo_norm (see config.py's OBS_DIM layout comment):
-# [timer, life, fired, hit, acc, last_hit, last_miss, peek_phase, ammo_norm,
-#  prev_aim_x_bias, prev_aim_y_bias, cursor_x_norm, cursor_y_norm]
-_AMMO_OBS_INDEX = 8
+# [timer, life, fired, hit, acc, last_hit, last_miss, hit_delta_norm,
+#  peek_phase, ammo_norm, prev_aim_x_bias, prev_aim_y_bias,
+#  cursor_x_norm, cursor_y_norm, shot_phase_sin, shot_phase_cos]
+_AMMO_OBS_INDEX = 9
 
 
 def _theta_reactive_ammo_duck(aim_bias: float = 0.0) -> np.ndarray:

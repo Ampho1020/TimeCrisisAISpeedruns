@@ -8,7 +8,8 @@ from config import (
     CLEAR_BONUS, CLIP_SHIFT_BONUS, CONTINUE_SCREEN_STALE_TICKS, CURSOR_X_MAX,
     CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN, DAMAGE_PENALTY,
     DRY_FIRE_PENALTY, EDGE_BAND, EDGE_SCATTER_PENALTY, FAIL_PENALTY,
-    FRAME_SKIP, HOST, HIT_REWARD, MAX_TICKS, MISS_CORRECTION_BONUS, MOVE_EPS,
+    FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
+    MAX_TICKS, MISS_CORRECTION_BONUS, MOVE_EPS,
     PEEK_TRAVERSE_TICKS, PORT, RAM, RELOAD_BONUS, REPEATED_MISS_PENALTY,
     SAME_EPS, SHOT_SLOT_DIVERSITY_BONUS, SHOT_SLOT_DIVERSITY_SCALE,
     STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
@@ -205,6 +206,7 @@ class TimeCrisisEnv:
         self.peek_locked_value: bool = False   # what state the lock is holding
         self.stale_core_ticks: int = 0  # consecutive ticks with identical core RAM snapshot
         self.ammo_left: int = AMMO_MAX_ROUNDS
+        self.hit_delta: int = 0  # frames since the last confirmed hit
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
         self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
 
@@ -237,9 +239,11 @@ class TimeCrisisEnv:
     @staticmethod
     def _build_obs(cur, last_hit: int, last_miss: int, peek_phase: float = 0.0,
                    ammo_left: int = AMMO_MAX_ROUNDS,
-                   prev_aim_x_bias: float = 0.0, prev_aim_y_bias: float = 0.0) -> np.ndarray:
+                   prev_aim_x_bias: float = 0.0, prev_aim_y_bias: float = 0.0,
+                   hit_delta: int = 0) -> np.ndarray:
         fired = max(cur["shots_fired"], 1)
         shot_sin, shot_cos = shot_phase_features(ammo_left)
+        hit_delta_norm = float(np.clip(hit_delta / HIT_DELTA_NORM_FRAMES, 0.0, 1.0))
         return np.array([
             cur["timer"] / 10000.0,
             cur["life"] / 100.0,
@@ -248,6 +252,7 @@ class TimeCrisisEnv:
             cur["shots_hit"] / fired,
             float(last_hit),
             float(last_miss),
+            hit_delta_norm,
             peek_phase,
             ammo_left / AMMO_MAX_ROUNDS,
             prev_aim_x_bias,
@@ -274,10 +279,15 @@ class TimeCrisisEnv:
         self.peek_locked_value = False
         self.stale_core_ticks = 0
         self.ammo_left = AMMO_MAX_ROUNDS
+        self.hit_delta = 0
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
         self.phase_infer.reset()
-        return self._build_obs(self.prev, 0, 0, 0.0, self.ammo_left, self.prev_aim_x_bias, self.prev_aim_y_bias)
+        return self._build_obs(
+            self.prev, 0, 0, 0.0, self.ammo_left,
+            self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
+        )
 
     def step(self, theta: np.ndarray):
         peek_phase = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if self.prev_peek else -1.0)
@@ -285,6 +295,7 @@ class TimeCrisisEnv:
             theta, self._build_obs(
                 self.prev, 0, 0, peek_phase, self.ammo_left,
                 self.prev_aim_x_bias, self.prev_aim_y_bias,
+                hit_delta=self.hit_delta,
             )
         )
         # Feed this tick's aim decision back as next tick's "previous aim" obs.
@@ -359,7 +370,12 @@ class TimeCrisisEnv:
             post = self._read_core()
 
             total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
-            total_hit   += max(0, u16_delta(post["shots_hit"],   pre["shots_hit"]))
+            frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
+            total_hit += frame_hits
+            if frame_hits > 0:
+                self.hit_delta = 0
+            else:
+                self.hit_delta += 1
             life_d       = u16_delta(post["life"], pre["life"])
             if life_d < 0:
                 total_life_loss += -life_d
@@ -455,6 +471,7 @@ class TimeCrisisEnv:
         obs = self._build_obs(
             self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left,
             self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
         )
 
         done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
@@ -471,6 +488,7 @@ class TimeCrisisEnv:
             "dry_fire": dry_fire,
             "reload_correct": reload_correct,
             "ammo_left": self.ammo_left,
+            "hit_delta": int(self.hit_delta),
             "aim_x": float(aim_x),
             "aim_y": float(aim_y),
         }
@@ -491,6 +509,7 @@ class TimeCrisisEnv:
         hits_per_tick = []
         aim_x_per_tick = []
         aim_y_per_tick = []
+        hit_delta_per_tick = []
         shot_events = []
 
         while True:
@@ -507,6 +526,7 @@ class TimeCrisisEnv:
             hits_per_tick.append(info["shots_hit_delta"])
             aim_x_per_tick.append(info["aim_x"])
             aim_y_per_tick.append(info["aim_y"])
+            hit_delta_per_tick.append(float(info.get("hit_delta", self.hit_delta)))
             if info["shots_fired_delta"] > 0:
                 shot_events.append({
                     "aim_x": float(info["aim_x"]),
@@ -591,6 +611,8 @@ class TimeCrisisEnv:
         hit_rate_right = float(hits_right / max(shots_right, 1))
 
         accuracy = float(total_hits / max(total_fired, 1))
+        mean_hit_delta = float(np.mean(hit_delta_per_tick)) if hit_delta_per_tick else 0.0
+        mean_hit_delta_norm = mean_hit_delta / HIT_DELTA_NORM_FRAMES
 
         miss_metrics = compute_miss_correction_metrics(shot_events)
         fitness += MISS_CORRECTION_BONUS * miss_metrics["corrected"]
@@ -600,6 +622,7 @@ class TimeCrisisEnv:
         fitness += ACCURACY_BONUS_WEIGHT * accuracy
         fitness += CLIP_SHIFT_BONUS * miss_metrics["clip_shift"]
         fitness += SHOT_SLOT_DIVERSITY_BONUS * miss_metrics["shot_slot_diversity"]
+        fitness -= HIT_DELTA_PENALTY * mean_hit_delta_norm
 
         fitness += HIT_REWARD * total_hits
         fitness -= DRY_FIRE_PENALTY * dry_fire_ticks
@@ -653,4 +676,6 @@ class TimeCrisisEnv:
             "miss_unique_ratio": miss_metrics["unique_ratio"],
             "miss_clip_shift": miss_metrics["clip_shift"],
             "miss_shot_slot_diversity": miss_metrics["shot_slot_diversity"],
+            "mean_hit_delta": mean_hit_delta,
+            "mean_hit_delta_norm": mean_hit_delta_norm,
         }

@@ -10,7 +10,8 @@ class TrainingLogger:
         "clear_rate", "best_time", "best_damage", "best_acc", "mean_acc",
         "mean_peek_flips", "mean_peek_hold", "mean_cover_time",
         "mean_aim_x_std", "mean_aim_y_std", "mean_aim_span_x", "mean_aim_span_y",
-        "mean_aim_dx", "mean_shot_left_frac", "mean_shot_mid_frac", "mean_shot_right_frac",
+        "mean_aim_dx", "mean_hit_delta",
+        "mean_shot_left_frac", "mean_shot_mid_frac", "mean_shot_right_frac",
         "sigma_used",
     ]
 
