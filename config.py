@@ -92,18 +92,13 @@ ALPHA       = 0.02    # learning rate
 # direction is validated live, switch back to 3 for lower-noise ranking.
 EPISODES_PER_CANDIDATE = 1
 
-# GENERATIONS reduced 100 -> 34 (2026-08-05) to roughly offset
-# EPISODES_PER_CANDIDATE's ~3x increase in real BizHawk episodes evaluated
-# per generation, so total training wall-clock stays in the same ballpark.
-# NOTE: this specific generations-vs-episodes-per-candidate tradeoff has
-# NOT been validated in sim -- the sim probe compared 1 vs 3 episodes/
-# candidate at the SAME generation count (40), not at an equal total-
-# episode compute budget. If real training with 34 generations converges
-# worse than the old 100-generation single-episode runs, try raising
-# GENERATIONS back up (compute cost permitting) before concluding episode
-# averaging itself doesn't help live.
-GENERATIONS = 34
-SEED        = 42
+# GENERATIONS raised back up for live convergence passes (2026-08-08).
+# With EPISODES_PER_CANDIDATE temporarily at 1 (fast but noisy ranking),
+# 34 generations can end before clear-rate improvements have enough update
+# steps to emerge. 80 keeps wall-clock manageable while giving ES more
+# selection cycles to exploit the newer anti-arc/anti-stall signals.
+GENERATIONS = 80
+SEED        = 10
 CHECKPOINT_EVERY = 5
 
 # Stagnation kick (see SIGMA note above): if fitness std stays below
@@ -328,7 +323,7 @@ ACT_DIM = 4
 # -----------------------------
 # Logging / feedback
 # -----------------------------
-VERBOSE_EPISODES = True
+VERBOSE_EPISODES = False
 LOG_CSV = "training_log.csv"
 HUD_ENABLED = True    # draw status text on the emulator window
 
