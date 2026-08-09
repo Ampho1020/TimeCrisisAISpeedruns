@@ -1,0 +1,1063 @@
+[bridge] listening on 127.0.0.1:8765 -- now launch BizHawk with --socket_ip=127.0.0.1 --socket_port=8765
+[bridge] listening on 127.0.0.1:8766 -- now launch BizHawk with --socket_ip=127.0.0.1 --socket_port=8766
+[bridge] listening on 127.0.0.1:8767 -- now launch BizHawk with --socket_ip=127.0.0.1 --socket_port=8767
+[bridge] listening on 127.0.0.1:8768 -- now launch BizHawk with --socket_ip=127.0.0.1 --socket_port=8768
+[pool] launching BizHawk on port 8765: /home/ampho/Downloads/BizHawk/BizHawk-2.11.1-linux-x64/./EmuHawkMono.sh /home/ampho/Downloads/TimeCrisis_NTSC/Time Crisis.cue --socket_ip=127.0.0.1 --socket_port=8765 --lua=/home/ampho/TimeCrisisAISpeedruns/bizhawk_bridge.lua
+[pool] launching BizHawk on port 8766: /home/ampho/Downloads/BizHawk/BizHawk-2.11.1-linux-x64/./EmuHawkMono.sh /home/ampho/Downloads/TimeCrisis_NTSC/Time Crisis.cue --socket_ip=127.0.0.1 --socket_port=8766 --lua=/home/ampho/TimeCrisisAISpeedruns/bizhawk_bridge.lua
+[pool] launching BizHawk on port 8767: /home/ampho/Downloads/BizHawk/BizHawk-2.11.1-linux-x64/./EmuHawkMono.sh /home/ampho/Downloads/TimeCrisis_NTSC/Time Crisis.cue --socket_ip=127.0.0.1 --socket_port=8767 --lua=/home/ampho/TimeCrisisAISpeedruns/bizhawk_bridge.lua
+[pool] launching BizHawk on port 8768: /home/ampho/Downloads/BizHawk/BizHawk-2.11.1-linux-x64/./EmuHawkMono.sh /home/ampho/Downloads/TimeCrisis_NTSC/Time Crisis.cue --socket_ip=127.0.0.1 --socket_port=8768 --lua=/home/ampho/TimeCrisisAISpeedruns/bizhawk_bridge.lua
+[pool] waiting for worker 0 on port 8765...
+[bridge] BizHawk connected from ('127.0.0.1', 57770); polling for Lua handshake (load the game and open bizhawk_bridge.lua)...
+[bridge] handshake OK -- bridge live
+[pool] waiting for worker 1 on port 8766...
+[bridge] BizHawk connected from ('127.0.0.1', 60134); polling for Lua handshake (load the game and open bizhawk_bridge.lua)...
+[bridge] handshake OK -- bridge live
+[pool] waiting for worker 2 on port 8767...
+[bridge] BizHawk connected from ('127.0.0.1', 60830); polling for Lua handshake (load the game and open bizhawk_bridge.lua)...
+[bridge] handshake OK -- bridge live
+[pool] waiting for worker 3 on port 8768...
+[bridge] BizHawk connected from ('127.0.0.1', 58804); polling for Lua handshake (load the game and open bizhawk_bridge.lua)...
+[bridge] handshake OK -- bridge live
+[pool] 4 worker(s) live.
+  [gen 000] eval   3/ 30 ( 10.0%) in   11.7s
+  [gen 000] eval   6/ 30 ( 20.0%) in   17.2s
+  [gen 000] eval   9/ 30 ( 30.0%) in   19.4s
+  [gen 000] eval  12/ 30 ( 40.0%) in   25.9s
+  [gen 000] eval  15/ 30 ( 50.0%) in   30.5s
+  [gen 000] eval  18/ 30 ( 60.0%) in   35.9s
+  [gen 000] eval  21/ 30 ( 70.0%) in   38.7s
+  [gen 000] eval  24/ 30 ( 80.0%) in   46.1s
+  [gen 000] eval  27/ 30 ( 90.0%) in   49.0s
+  [gen 000] eval  30/ 30 (100.0%) in   60.8s
+
+=== gen 000 | best  1988.07 | mean   349.33 | std  562.53 | spread  2217.38 | clear 13.3% | timeout 50.0% | t -488.0 | dmg    0 | acc 44.4% | ctime   8.5 | flips   5.7 | hold   7.2 | aimstd (0.130,0.145) | aimspan (0.629,0.663) | aimdx 0.149 | hitd 117.6 | lanes L/M/R 13%/79%/8% ===
+
+  [gen 001] eval   3/ 30 ( 10.0%) in    3.6s
+  [gen 001] eval   6/ 30 ( 20.0%) in    8.7s
+  [gen 001] eval   9/ 30 ( 30.0%) in   13.8s
+  [gen 001] eval  12/ 30 ( 40.0%) in   18.7s
+  [gen 001] eval  15/ 30 ( 50.0%) in   22.7s
+  [gen 001] eval  18/ 30 ( 60.0%) in   29.2s
+  [gen 001] eval  21/ 30 ( 70.0%) in   32.4s
+  [gen 001] eval  24/ 30 ( 80.0%) in   36.2s
+  [gen 001] eval  27/ 30 ( 90.0%) in   41.9s
+  [gen 001] eval  30/ 30 (100.0%) in   48.6s
+
+=== gen 001 | best  1992.19 | mean   222.15 | std  444.76 | spread  2220.85 | clear  6.7% | timeout 53.3% | t -416.0 | dmg    0 | acc 25.0% | ctime   7.6 | flips   5.1 | hold   6.8 | aimstd (0.127,0.144) | aimspan (0.605,0.643) | aimdx 0.146 | hitd 110.6 | lanes L/M/R 14%/75%/11% ===
+
+  [gen 002] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 002] eval   6/ 30 ( 20.0%) in   11.7s
+  [gen 002] eval   9/ 30 ( 30.0%) in   18.0s
+  [gen 002] eval  12/ 30 ( 40.0%) in   20.1s
+  [gen 002] eval  15/ 30 ( 50.0%) in   25.2s
+  [gen 002] eval  18/ 30 ( 60.0%) in   32.1s
+  [gen 002] eval  21/ 30 ( 70.0%) in   34.5s
+  [gen 002] eval  24/ 30 ( 80.0%) in   39.4s
+  [gen 002] eval  27/ 30 ( 90.0%) in   44.4s
+  [gen 002] eval  30/ 30 (100.0%) in   53.9s
+
+=== gen 002 | best  1734.66 | mean   308.38 | std  462.34 | spread  1692.65 | clear 10.0% | timeout 60.0% | t -340.0 | dmg    0 | acc 30.0% | ctime   9.2 | flips   6.1 | hold   7.7 | aimstd (0.131,0.143) | aimspan (0.618,0.664) | aimdx 0.151 | hitd 115.3 | lanes L/M/R 12%/77%/11% ===
+
+  [gen 003] eval   3/ 30 ( 10.0%) in    2.9s
+  [gen 003] eval   6/ 30 ( 20.0%) in    9.9s
+  [gen 003] eval   9/ 30 ( 30.0%) in   14.0s
+  [gen 003] eval  12/ 30 ( 40.0%) in   17.8s
+  [gen 003] eval  15/ 30 ( 50.0%) in   21.2s
+  [gen 003] eval  18/ 30 ( 60.0%) in   27.9s
+  [gen 003] eval  21/ 30 ( 70.0%) in   34.8s
+  [gen 003] eval  24/ 30 ( 80.0%) in   38.7s
+  [gen 003] eval  27/ 30 ( 90.0%) in   41.8s
+  [gen 003] eval  30/ 30 (100.0%) in   55.0s
+
+=== gen 003 | best  2048.27 | mean   396.44 | std  641.40 | spread  2270.92 | clear 16.7% | timeout 53.3% | t -362.0 | dmg    0 | acc 33.3% | ctime   9.2 | flips   6.0 | hold   7.3 | aimstd (0.131,0.145) | aimspan (0.623,0.664) | aimdx 0.150 | hitd 98.3 | lanes L/M/R 14%/77%/9% ===
+
+  [gen 004] eval   3/ 30 ( 10.0%) in    4.9s
+  [gen 004] eval   6/ 30 ( 20.0%) in   11.2s
+  [gen 004] eval   9/ 30 ( 30.0%) in   14.6s
+  [gen 004] eval  12/ 30 ( 40.0%) in   18.1s
+  [gen 004] eval  15/ 30 ( 50.0%) in   24.8s
+  [gen 004] eval  18/ 30 ( 60.0%) in   27.9s
+  [gen 004] eval  21/ 30 ( 70.0%) in   33.6s
+  [gen 004] eval  24/ 30 ( 80.0%) in   39.1s
+  [gen 004] eval  27/ 30 ( 90.0%) in   45.0s
+  [gen 004] eval  30/ 30 (100.0%) in   60.3s
+
+=== gen 004 | best  1933.71 | mean   369.73 | std  575.93 | spread  2160.35 | clear 13.3% | timeout 56.7% | t -490.0 | dmg    0 | acc 33.3% | ctime   9.4 | flips   6.2 | hold   7.4 | aimstd (0.133,0.144) | aimspan (0.643,0.648) | aimdx 0.152 | hitd 107.9 | lanes L/M/R 11%/78%/10% ===
+
+  [gen 005] eval   3/ 30 ( 10.0%) in    7.1s
+  [gen 005] eval   6/ 30 ( 20.0%) in   12.3s
+  [gen 005] eval   9/ 30 ( 30.0%) in   19.2s
+  [gen 005] eval  12/ 30 ( 40.0%) in   22.0s
+  [gen 005] eval  15/ 30 ( 50.0%) in   28.6s
+  [gen 005] eval  18/ 30 ( 60.0%) in   36.0s
+  [gen 005] eval  21/ 30 ( 70.0%) in   39.4s
+  [gen 005] eval  24/ 30 ( 80.0%) in   46.8s
+  [gen 005] eval  27/ 30 ( 90.0%) in   49.4s
+  [gen 005] eval  30/ 30 (100.0%) in   55.1s
+
+=== gen 005 | best  1485.11 | mean   210.35 | std  244.30 | spread  1478.89 | clear  3.3% | timeout 73.3% | t -188.0 | dmg    1 | acc 25.0% | ctime   9.9 | flips   6.5 | hold   8.1 | aimstd (0.133,0.143) | aimspan (0.658,0.654) | aimdx 0.153 | hitd 119.1 | lanes L/M/R 11%/80%/8% ===
+
+  [gen 006] eval   3/ 30 ( 10.0%) in   11.0s
+  [gen 006] eval   6/ 30 ( 20.0%) in   13.9s
+  [gen 006] eval   9/ 30 ( 30.0%) in   20.6s
+  [gen 006] eval  12/ 30 ( 40.0%) in   23.2s
+  [gen 006] eval  15/ 30 ( 50.0%) in   27.6s
+  [gen 006] eval  18/ 30 ( 60.0%) in   34.2s
+  [gen 006] eval  21/ 30 ( 70.0%) in   38.7s
+  [gen 006] eval  24/ 30 ( 80.0%) in   43.9s
+  [gen 006] eval  27/ 30 ( 90.0%) in   50.4s
+  [gen 006] eval  30/ 30 (100.0%) in   59.7s
+
+=== gen 006 | best  2083.07 | mean   332.14 | std  545.10 | spread  2054.38 | clear 10.0% | timeout 63.3% | t -486.0 | dmg    0 | acc 25.0% | ctime  10.5 | flips   6.9 | hold   8.1 | aimstd (0.131,0.145) | aimspan (0.639,0.683) | aimdx 0.148 | hitd 111.3 | lanes L/M/R 10%/79%/10% ===
+
+  [gen 007] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 007] eval   6/ 30 ( 20.0%) in   13.4s
+  [gen 007] eval   9/ 30 ( 30.0%) in   16.4s
+  [gen 007] eval  12/ 30 ( 40.0%) in   20.5s
+  [gen 007] eval  15/ 30 ( 50.0%) in   24.1s
+  [gen 007] eval  18/ 30 ( 60.0%) in   30.2s
+  [gen 007] eval  21/ 30 ( 70.0%) in   34.1s
+  [gen 007] eval  24/ 30 ( 80.0%) in   39.1s
+  [gen 007] eval  27/ 30 ( 90.0%) in   42.7s
+  [gen 007] eval  30/ 30 (100.0%) in   49.3s
+
+=== gen 007 | best  2042.36 | mean   482.19 | std  651.21 | spread  1981.56 | clear 20.0% | timeout 40.0% | t -508.0 | dmg    0 | acc 44.4% | ctime   8.8 | flips   5.8 | hold   7.1 | aimstd (0.130,0.144) | aimspan (0.647,0.656) | aimdx 0.146 | hitd 99.4 | lanes L/M/R 11%/77%/12% ===
+
+  [gen 008] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 008] eval   6/ 30 ( 20.0%) in   12.0s
+  [gen 008] eval   9/ 30 ( 30.0%) in   18.2s
+  [gen 008] eval  12/ 30 ( 40.0%) in   23.5s
+  [gen 008] eval  15/ 30 ( 50.0%) in   31.6s
+  [gen 008] eval  18/ 30 ( 60.0%) in   33.0s
+  [gen 008] eval  21/ 30 ( 70.0%) in   38.4s
+  [gen 008] eval  24/ 30 ( 80.0%) in   44.0s
+  [gen 008] eval  27/ 30 ( 90.0%) in   49.9s
+  [gen 008] eval  30/ 30 (100.0%) in   56.7s
+
+=== gen 008 | best   268.41 | mean   152.27 | std   73.40 | spread   294.18 | clear  0.0% | timeout 63.3% | t 2048.0 | dmg    2 | acc 13.9% | ctime  10.1 | flips   6.7 | hold   8.2 | aimstd (0.133,0.143) | aimspan (0.652,0.680) | aimdx 0.151 | hitd 118.3 | lanes L/M/R 11%/80%/9% ===
+
+  !! note: no clears yet -- running on partial credit only.
+  [gen 009] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 009] eval   6/ 30 ( 20.0%) in   13.8s
+  [gen 009] eval   9/ 30 ( 30.0%) in   16.5s
+  [gen 009] eval  12/ 30 ( 40.0%) in   18.5s
+  [gen 009] eval  15/ 30 ( 50.0%) in   25.1s
+  [gen 009] eval  18/ 30 ( 60.0%) in   28.3s
+  [gen 009] eval  21/ 30 ( 70.0%) in   34.0s
+  [gen 009] eval  24/ 30 ( 80.0%) in   39.1s
+  [gen 009] eval  27/ 30 ( 90.0%) in   45.0s
+  [gen 009] eval  30/ 30 (100.0%) in   58.6s
+
+=== gen 009 | best  2089.69 | mean   275.31 | std  466.95 | spread  2026.49 | clear  6.7% | timeout 63.3% | t -616.0 | dmg    0 | acc 37.5% | ctime   9.5 | flips   6.2 | hold   7.9 | aimstd (0.135,0.143) | aimspan (0.666,0.642) | aimdx 0.154 | hitd 110.5 | lanes L/M/R 10%/81%/9% ===
+
+  [gen 010] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 010] eval   6/ 30 ( 20.0%) in   11.6s
+  [gen 010] eval   9/ 30 ( 30.0%) in   16.3s
+  [gen 010] eval  12/ 30 ( 40.0%) in   21.1s
+  [gen 010] eval  15/ 30 ( 50.0%) in   28.3s
+  [gen 010] eval  18/ 30 ( 60.0%) in   34.9s
+  [gen 010] eval  21/ 30 ( 70.0%) in   37.4s
+  [gen 010] eval  24/ 30 ( 80.0%) in   44.0s
+  [gen 010] eval  27/ 30 ( 90.0%) in   50.1s
+  [gen 010] eval  30/ 30 (100.0%) in   56.8s
+
+=== gen 010 | best  1912.99 | mean   303.50 | std  466.87 | spread  1832.79 | clear 10.0% | timeout 63.3% | t -538.0 | dmg    0 | acc 30.0% | ctime  10.2 | flips   6.7 | hold   8.3 | aimstd (0.135,0.144) | aimspan (0.662,0.691) | aimdx 0.155 | hitd 112.8 | lanes L/M/R 11%/79%/10% ===
+
+  [gen 011] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 011] eval   6/ 30 ( 20.0%) in    8.6s
+  [gen 011] eval   9/ 30 ( 30.0%) in   14.3s
+  [gen 011] eval  12/ 30 ( 40.0%) in   21.2s
+  [gen 011] eval  15/ 30 ( 50.0%) in   26.9s
+  [gen 011] eval  18/ 30 ( 60.0%) in   33.7s
+  [gen 011] eval  21/ 30 ( 70.0%) in   40.2s
+  [gen 011] eval  24/ 30 ( 80.0%) in   42.0s
+  [gen 011] eval  27/ 30 ( 90.0%) in   51.0s
+  [gen 011] eval  30/ 30 (100.0%) in   57.8s
+
+=== gen 011 | best  2065.64 | mean   397.50 | std  590.22 | spread  2289.62 | clear 16.7% | timeout 60.0% | t -486.0 | dmg    0 | acc 25.0% | ctime  10.6 | flips   7.1 | hold   8.5 | aimstd (0.135,0.145) | aimspan (0.639,0.680) | aimdx 0.151 | hitd 111.6 | lanes L/M/R 11%/79%/10% ===
+
+  [gen 012] eval   3/ 30 ( 10.0%) in    5.3s
+  [gen 012] eval   6/ 30 ( 20.0%) in   10.4s
+  [gen 012] eval   9/ 30 ( 30.0%) in   15.3s
+  [gen 012] eval  12/ 30 ( 40.0%) in   17.6s
+  [gen 012] eval  15/ 30 ( 50.0%) in   22.0s
+  [gen 012] eval  18/ 30 ( 60.0%) in   27.1s
+  [gen 012] eval  21/ 30 ( 70.0%) in   31.8s
+  [gen 012] eval  24/ 30 ( 80.0%) in   34.0s
+  [gen 012] eval  27/ 30 ( 90.0%) in   39.3s
+  [gen 012] eval  30/ 30 (100.0%) in   47.8s
+
+=== gen 012 | best  1985.27 | mean   491.26 | std  651.12 | spread  2212.76 | clear 23.3% | timeout 43.3% | t -490.0 | dmg    0 | acc 40.0% | ctime   8.1 | flips   5.4 | hold   6.9 | aimstd (0.133,0.144) | aimspan (0.631,0.661) | aimdx 0.153 | hitd 93.5 | lanes L/M/R 12%/78%/10% ===
+
+  [gen 013] eval   3/ 30 ( 10.0%) in    7.1s
+  [gen 013] eval   6/ 30 ( 20.0%) in   14.0s
+  [gen 013] eval   9/ 30 ( 30.0%) in   20.0s
+  [gen 013] eval  12/ 30 ( 40.0%) in   25.2s
+  [gen 013] eval  15/ 30 ( 50.0%) in   31.7s
+  [gen 013] eval  18/ 30 ( 60.0%) in   33.5s
+  [gen 013] eval  21/ 30 ( 70.0%) in   38.4s
+  [gen 013] eval  24/ 30 ( 80.0%) in   44.4s
+  [gen 013] eval  27/ 30 ( 90.0%) in   51.2s
+  [gen 013] eval  30/ 30 (100.0%) in   56.4s
+
+=== gen 013 | best  2694.29 | mean   407.08 | std  678.13 | spread  2761.88 | clear 13.3% | timeout 56.7% | t -794.0 | dmg    0 | acc 83.3% | ctime  10.5 | flips   6.9 | hold   8.2 | aimstd (0.136,0.147) | aimspan (0.671,0.669) | aimdx 0.154 | hitd 105.1 | lanes L/M/R 12%/78%/11% ===
+
+  [gen 014] eval   3/ 30 ( 10.0%) in    7.0s
+  [gen 014] eval   6/ 30 ( 20.0%) in   13.9s
+  [gen 014] eval   9/ 30 ( 30.0%) in   20.8s
+  [gen 014] eval  12/ 30 ( 40.0%) in   24.3s
+  [gen 014] eval  15/ 30 ( 50.0%) in   31.1s
+  [gen 014] eval  18/ 30 ( 60.0%) in   34.6s
+  [gen 014] eval  21/ 30 ( 70.0%) in   38.1s
+  [gen 014] eval  24/ 30 ( 80.0%) in   44.6s
+  [gen 014] eval  27/ 30 ( 90.0%) in   50.9s
+  [gen 014] eval  30/ 30 (100.0%) in   56.5s
+
+=== gen 014 | best  1454.41 | mean   191.21 | std  244.03 | spread  1511.65 | clear  3.3% | timeout 70.0% | t -160.0 | dmg    1 | acc 25.0% | ctime  10.3 | flips   6.9 | hold   8.6 | aimstd (0.139,0.147) | aimspan (0.691,0.706) | aimdx 0.155 | hitd 112.1 | lanes L/M/R 11%/78%/11% ===
+
+  [gen 015] eval   3/ 30 ( 10.0%) in    5.4s
+  [gen 015] eval   6/ 30 ( 20.0%) in    8.7s
+  [gen 015] eval   9/ 30 ( 30.0%) in   15.3s
+  [gen 015] eval  12/ 30 ( 40.0%) in   17.9s
+  [gen 015] eval  15/ 30 ( 50.0%) in   22.1s
+  [gen 015] eval  18/ 30 ( 60.0%) in   27.9s
+  [gen 015] eval  21/ 30 ( 70.0%) in   31.8s
+  [gen 015] eval  24/ 30 ( 80.0%) in   35.8s
+  [gen 015] eval  27/ 30 ( 90.0%) in   41.8s
+  [gen 015] eval  30/ 30 (100.0%) in   50.2s
+
+=== gen 015 | best  2068.44 | mean   509.66 | std  708.04 | spread  2293.76 | clear 23.3% | timeout 46.7% | t -586.0 | dmg    0 | acc 40.0% | ctime   9.1 | flips   6.0 | hold   7.3 | aimstd (0.139,0.146) | aimspan (0.668,0.666) | aimdx 0.157 | hitd 99.2 | lanes L/M/R 11%/77%/12% ===
+
+  [gen 016] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 016] eval   6/ 30 ( 20.0%) in   10.7s
+  [gen 016] eval   9/ 30 ( 30.0%) in   16.8s
+  [gen 016] eval  12/ 30 ( 40.0%) in   21.0s
+  [gen 016] eval  15/ 30 ( 50.0%) in   27.2s
+  [gen 016] eval  18/ 30 ( 60.0%) in   32.7s
+  [gen 016] eval  21/ 30 ( 70.0%) in   38.7s
+  [gen 016] eval  24/ 30 ( 80.0%) in   41.3s
+  [gen 016] eval  27/ 30 ( 90.0%) in   48.0s
+  [gen 016] eval  30/ 30 (100.0%) in   54.1s
+
+=== gen 016 | best  2044.04 | mean   373.42 | std  566.90 | spread  2147.61 | clear 13.3% | timeout 60.0% | t -464.0 | dmg    0 | acc 25.0% | ctime   9.7 | flips   6.4 | hold   8.1 | aimstd (0.134,0.145) | aimspan (0.652,0.686) | aimdx 0.151 | hitd 95.8 | lanes L/M/R 11%/79%/10% ===
+
+  [gen 017] eval   3/ 30 ( 10.0%) in    7.0s
+  [gen 017] eval   6/ 30 ( 20.0%) in   12.3s
+  [gen 017] eval   9/ 30 ( 30.0%) in   18.1s
+  [gen 017] eval  12/ 30 ( 40.0%) in   22.7s
+  [gen 017] eval  15/ 30 ( 50.0%) in   27.5s
+  [gen 017] eval  18/ 30 ( 60.0%) in   30.2s
+  [gen 017] eval  21/ 30 ( 70.0%) in   34.4s
+  [gen 017] eval  24/ 30 ( 80.0%) in   42.9s
+  [gen 017] eval  27/ 30 ( 90.0%) in   49.8s
+  [gen 017] eval  30/ 30 (100.0%) in   65.3s
+
+=== gen 017 | best  2445.36 | mean   489.29 | std  721.88 | spread  2379.40 | clear 16.7% | timeout 76.7% | t -844.0 | dmg    0 | acc 50.0% | ctime  11.1 | flips   7.3 | hold   8.5 | aimstd (0.135,0.144) | aimspan (0.653,0.680) | aimdx 0.154 | hitd 101.8 | lanes L/M/R 11%/76%/13% ===
+
+  [gen 018] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 018] eval   6/ 30 ( 20.0%) in    9.5s
+  [gen 018] eval   9/ 30 ( 30.0%) in   16.3s
+  [gen 018] eval  12/ 30 ( 40.0%) in   18.8s
+  [gen 018] eval  15/ 30 ( 50.0%) in   24.7s
+  [gen 018] eval  18/ 30 ( 60.0%) in   29.6s
+  [gen 018] eval  21/ 30 ( 70.0%) in   36.5s
+  [gen 018] eval  24/ 30 ( 80.0%) in   38.5s
+  [gen 018] eval  27/ 30 ( 90.0%) in   49.3s
+  [gen 018] eval  30/ 30 (100.0%) in   60.4s
+
+=== gen 018 | best  2003.79 | mean   331.25 | std  531.39 | spread  2084.39 | clear 10.0% | timeout 70.0% | t -410.0 | dmg    0 | acc 25.0% | ctime  10.2 | flips   6.7 | hold   8.3 | aimstd (0.135,0.148) | aimspan (0.656,0.702) | aimdx 0.155 | hitd 95.4 | lanes L/M/R 11%/76%/12% ===
+
+  [gen 019] eval   3/ 30 ( 10.0%) in    7.1s
+  [gen 019] eval   6/ 30 ( 20.0%) in   13.7s
+  [gen 019] eval   9/ 30 ( 30.0%) in   17.5s
+  [gen 019] eval  12/ 30 ( 40.0%) in   21.7s
+  [gen 019] eval  15/ 30 ( 50.0%) in   24.2s
+  [gen 019] eval  18/ 30 ( 60.0%) in   32.1s
+  [gen 019] eval  21/ 30 ( 70.0%) in   34.2s
+  [gen 019] eval  24/ 30 ( 80.0%) in   40.5s
+  [gen 019] eval  27/ 30 ( 90.0%) in   47.8s
+  [gen 019] eval  30/ 30 (100.0%) in   58.4s
+
+=== gen 019 | best  2413.72 | mean   460.24 | std  669.00 | spread  2351.59 | clear 16.7% | timeout 56.7% | t -812.0 | dmg    0 | acc 50.0% | ctime  10.1 | flips   6.7 | hold   8.1 | aimstd (0.136,0.145) | aimspan (0.648,0.678) | aimdx 0.153 | hitd 97.6 | lanes L/M/R 12%/75%/13% ===
+
+  [gen 020] eval   3/ 30 ( 10.0%) in    9.4s
+  [gen 020] eval   6/ 30 ( 20.0%) in   13.6s
+  [gen 020] eval   9/ 30 ( 30.0%) in   18.7s
+  [gen 020] eval  12/ 30 ( 40.0%) in   23.6s
+  [gen 020] eval  15/ 30 ( 50.0%) in   27.4s
+  [gen 020] eval  18/ 30 ( 60.0%) in   32.5s
+  [gen 020] eval  21/ 30 ( 70.0%) in   34.8s
+  [gen 020] eval  24/ 30 ( 80.0%) in   41.1s
+  [gen 020] eval  27/ 30 ( 90.0%) in   45.7s
+  [gen 020] eval  30/ 30 (100.0%) in   53.7s
+
+=== gen 020 | best  2445.18 | mean   462.62 | std  679.11 | spread  2470.98 | clear 16.7% | timeout 63.3% | t -844.0 | dmg    0 | acc 50.0% | ctime   9.8 | flips   6.5 | hold   7.9 | aimstd (0.135,0.143) | aimspan (0.651,0.656) | aimdx 0.155 | hitd 91.6 | lanes L/M/R 12%/77%/11% ===
+
+  [gen 021] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 021] eval   6/ 30 ( 20.0%) in   11.2s
+  [gen 021] eval   9/ 30 ( 30.0%) in   16.7s
+  [gen 021] eval  12/ 30 ( 40.0%) in   23.5s
+  [gen 021] eval  15/ 30 ( 50.0%) in   29.0s
+  [gen 021] eval  18/ 30 ( 60.0%) in   32.5s
+  [gen 021] eval  21/ 30 ( 70.0%) in   38.5s
+  [gen 021] eval  24/ 30 ( 80.0%) in   43.1s
+  [gen 021] eval  27/ 30 ( 90.0%) in   46.1s
+  [gen 021] eval  30/ 30 (100.0%) in   51.6s
+
+=== gen 021 | best  2149.31 | mean   458.83 | std  646.87 | spread  2379.97 | clear 20.0% | timeout 53.3% | t -464.0 | dmg    0 | acc 33.3% | ctime   9.5 | flips   6.2 | hold   7.7 | aimstd (0.137,0.147) | aimspan (0.637,0.670) | aimdx 0.156 | hitd 91.6 | lanes L/M/R 11%/75%/14% ===
+
+  [gen 022] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 022] eval   6/ 30 ( 20.0%) in   10.1s
+  [gen 022] eval   9/ 30 ( 30.0%) in   13.2s
+  [gen 022] eval  12/ 30 ( 40.0%) in   20.1s
+  [gen 022] eval  15/ 30 ( 50.0%) in   26.5s
+  [gen 022] eval  18/ 30 ( 60.0%) in   29.9s
+  [gen 022] eval  21/ 30 ( 70.0%) in   33.6s
+  [gen 022] eval  24/ 30 ( 80.0%) in   40.3s
+  [gen 022] eval  27/ 30 ( 90.0%) in   46.5s
+  [gen 022] eval  30/ 30 (100.0%) in   53.2s
+
+=== gen 022 | best  1706.68 | mean   330.45 | std  471.75 | spread  1803.00 | clear 13.3% | timeout 60.0% | t -162.0 | dmg    0 | acc 21.4% | ctime  10.2 | flips   6.8 | hold   8.4 | aimstd (0.137,0.148) | aimspan (0.663,0.693) | aimdx 0.155 | hitd 107.0 | lanes L/M/R 10%/78%/12% ===
+
+  [gen 023] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 023] eval   6/ 30 ( 20.0%) in   13.0s
+  [gen 023] eval   9/ 30 ( 30.0%) in   19.7s
+  [gen 023] eval  12/ 30 ( 40.0%) in   26.6s
+  [gen 023] eval  15/ 30 ( 50.0%) in   30.9s
+  [gen 023] eval  18/ 30 ( 60.0%) in   37.1s
+  [gen 023] eval  21/ 30 ( 70.0%) in   40.8s
+  [gen 023] eval  24/ 30 ( 80.0%) in   44.5s
+  [gen 023] eval  27/ 30 ( 90.0%) in   49.1s
+  [gen 023] eval  30/ 30 (100.0%) in   55.8s
+
+=== gen 023 | best   856.89 | mean   176.91 | std  139.78 | spread   830.04 | clear  3.3% | timeout 63.3% | t -120.0 | dmg    2 | acc 27.3% | ctime  11.3 | flips   7.5 | hold   8.8 | aimstd (0.139,0.146) | aimspan (0.693,0.686) | aimdx 0.156 | hitd 116.7 | lanes L/M/R 13%/73%/14% ===
+
+  [gen 024] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 024] eval   6/ 30 ( 20.0%) in   10.7s
+  [gen 024] eval   9/ 30 ( 30.0%) in   16.5s
+  [gen 024] eval  12/ 30 ( 40.0%) in   22.1s
+  [gen 024] eval  15/ 30 ( 50.0%) in   28.2s
+  [gen 024] eval  18/ 30 ( 60.0%) in   32.8s
+  [gen 024] eval  21/ 30 ( 70.0%) in   38.7s
+  [gen 024] eval  24/ 30 ( 80.0%) in   45.2s
+  [gen 024] eval  27/ 30 ( 90.0%) in   52.0s
+  [gen 024] eval  30/ 30 (100.0%) in   64.3s
+
+=== gen 024 | best  1820.35 | mean   414.53 | std  541.08 | spread  1914.13 | clear 16.7% | timeout 46.7% | t -460.0 | dmg    0 | acc 27.3% | ctime  10.6 | flips   7.0 | hold   8.5 | aimstd (0.137,0.145) | aimspan (0.675,0.673) | aimdx 0.153 | hitd 89.6 | lanes L/M/R 11%/78%/11% ===
+
+  [gen 025] eval   3/ 30 ( 10.0%) in    6.5s
+  [gen 025] eval   6/ 30 ( 20.0%) in   12.9s
+  [gen 025] eval   9/ 30 ( 30.0%) in   17.7s
+  [gen 025] eval  12/ 30 ( 40.0%) in   24.6s
+  [gen 025] eval  15/ 30 ( 50.0%) in   27.0s
+  [gen 025] eval  18/ 30 ( 60.0%) in   33.6s
+  [gen 025] eval  21/ 30 ( 70.0%) in   35.9s
+  [gen 025] eval  24/ 30 ( 80.0%) in   40.9s
+  [gen 025] eval  27/ 30 ( 90.0%) in   47.4s
+  [gen 025] eval  30/ 30 (100.0%) in   58.1s
+
+=== gen 025 | best  2221.56 | mean   463.32 | std  662.45 | spread  2121.92 | clear 16.7% | timeout 66.7% | t -616.0 | dmg    0 | acc 50.0% | ctime  10.9 | flips   7.2 | hold   8.5 | aimstd (0.138,0.147) | aimspan (0.681,0.705) | aimdx 0.158 | hitd 101.1 | lanes L/M/R 14%/73%/13% ===
+
+  [gen 026] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 026] eval   6/ 30 ( 20.0%) in   11.3s
+  [gen 026] eval   9/ 30 ( 30.0%) in   15.0s
+  [gen 026] eval  12/ 30 ( 40.0%) in   22.0s
+  [gen 026] eval  15/ 30 ( 50.0%) in   27.3s
+  [gen 026] eval  18/ 30 ( 60.0%) in   31.0s
+  [gen 026] eval  21/ 30 ( 70.0%) in   38.1s
+  [gen 026] eval  24/ 30 ( 80.0%) in   40.3s
+  [gen 026] eval  27/ 30 ( 90.0%) in   42.4s
+  [gen 026] eval  30/ 30 (100.0%) in   45.2s
+
+=== gen 026 | best  2554.89 | mean   647.97 | std  780.43 | spread  2778.89 | clear 30.0% | timeout 53.3% | t -824.0 | dmg    0 | acc 60.0% | ctime   9.0 | flips   5.9 | hold   7.3 | aimstd (0.137,0.146) | aimspan (0.620,0.680) | aimdx 0.156 | hitd 84.2 | lanes L/M/R 13%/73%/14% ===
+
+  [gen 027] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 027] eval   6/ 30 ( 20.0%) in   13.9s
+  [gen 027] eval   9/ 30 ( 30.0%) in   20.8s
+  [gen 027] eval  12/ 30 ( 40.0%) in   21.9s
+  [gen 027] eval  15/ 30 ( 50.0%) in   27.8s
+  [gen 027] eval  18/ 30 ( 60.0%) in   31.3s
+  [gen 027] eval  21/ 30 ( 70.0%) in   35.1s
+  [gen 027] eval  24/ 30 ( 80.0%) in   38.9s
+  [gen 027] eval  27/ 30 ( 90.0%) in   45.6s
+  [gen 027] eval  30/ 30 (100.0%) in   58.6s
+
+=== gen 027 | best  2383.58 | mean   457.97 | std  635.77 | spread  2377.13 | clear 16.7% | timeout 50.0% | t -738.0 | dmg    0 | acc 50.0% | ctime  10.4 | flips   6.8 | hold   8.3 | aimstd (0.138,0.148) | aimspan (0.667,0.682) | aimdx 0.158 | hitd 91.0 | lanes L/M/R 12%/75%/13% ===
+
+  [gen 028] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 028] eval   6/ 30 ( 20.0%) in   13.8s
+  [gen 028] eval   9/ 30 ( 30.0%) in   17.6s
+  [gen 028] eval  12/ 30 ( 40.0%) in   22.7s
+  [gen 028] eval  15/ 30 ( 50.0%) in   27.5s
+  [gen 028] eval  18/ 30 ( 60.0%) in   31.4s
+  [gen 028] eval  21/ 30 ( 70.0%) in   36.7s
+  [gen 028] eval  24/ 30 ( 80.0%) in   41.7s
+  [gen 028] eval  27/ 30 ( 90.0%) in   45.4s
+  [gen 028] eval  30/ 30 (100.0%) in   56.1s
+
+=== gen 028 | best  2015.79 | mean   431.48 | std  610.56 | spread  2079.93 | clear 16.7% | timeout 63.3% | t -464.0 | dmg    0 | acc 45.5% | ctime  10.6 | flips   7.0 | hold   8.5 | aimstd (0.140,0.150) | aimspan (0.670,0.684) | aimdx 0.160 | hitd 100.5 | lanes L/M/R 13%/73%/14% ===
+
+  [gen 029] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 029] eval   6/ 30 ( 20.0%) in   12.2s
+  [gen 029] eval   9/ 30 ( 30.0%) in   17.8s
+  [gen 029] eval  12/ 30 ( 40.0%) in   23.8s
+  [gen 029] eval  15/ 30 ( 50.0%) in   28.9s
+  [gen 029] eval  18/ 30 ( 60.0%) in   32.7s
+  [gen 029] eval  21/ 30 ( 70.0%) in   36.7s
+  [gen 029] eval  24/ 30 ( 80.0%) in   41.9s
+  [gen 029] eval  27/ 30 ( 90.0%) in   48.5s
+  [gen 029] eval  30/ 30 (100.0%) in   64.3s
+
+=== gen 029 | best  2044.19 | mean   451.13 | std  640.54 | spread  1990.74 | clear 16.7% | timeout 70.0% | t -488.0 | dmg    0 | acc 25.0% | ctime  11.1 | flips   7.3 | hold   8.5 | aimstd (0.141,0.149) | aimspan (0.670,0.694) | aimdx 0.162 | hitd 110.3 | lanes L/M/R 11%/75%/14% ===
+
+  [gen 030] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 030] eval   6/ 30 ( 20.0%) in   11.0s
+  [gen 030] eval   9/ 30 ( 30.0%) in   17.7s
+  [gen 030] eval  12/ 30 ( 40.0%) in   20.2s
+  [gen 030] eval  15/ 30 ( 50.0%) in   24.4s
+  [gen 030] eval  18/ 30 ( 60.0%) in   31.7s
+  [gen 030] eval  21/ 30 ( 70.0%) in   35.4s
+  [gen 030] eval  24/ 30 ( 80.0%) in   40.6s
+  [gen 030] eval  27/ 30 ( 90.0%) in   45.0s
+  [gen 030] eval  30/ 30 (100.0%) in   54.1s
+
+=== gen 030 | best  2220.44 | mean   458.84 | std  655.96 | spread  2185.11 | clear 16.7% | timeout 50.0% | t -536.0 | dmg    0 | acc 33.3% | ctime   9.8 | flips   6.5 | hold   7.8 | aimstd (0.140,0.148) | aimspan (0.681,0.691) | aimdx 0.163 | hitd 101.4 | lanes L/M/R 10%/75%/15% ===
+
+  [gen 031] eval   3/ 30 ( 10.0%) in    6.7s
+  [gen 031] eval   6/ 30 ( 20.0%) in   10.0s
+  [gen 031] eval   9/ 30 ( 30.0%) in   18.3s
+  [gen 031] eval  12/ 30 ( 40.0%) in   21.0s
+  [gen 031] eval  15/ 30 ( 50.0%) in   25.9s
+  [gen 031] eval  18/ 30 ( 60.0%) in   30.3s
+  [gen 031] eval  21/ 30 ( 70.0%) in   35.6s
+  [gen 031] eval  24/ 30 ( 80.0%) in   41.9s
+  [gen 031] eval  27/ 30 ( 90.0%) in   48.0s
+  [gen 031] eval  30/ 30 (100.0%) in   54.0s
+
+=== gen 031 | best  2011.17 | mean   429.51 | std  587.71 | spread  2066.37 | clear 16.7% | timeout 40.0% | t -412.0 | dmg    0 | acc 25.0% | ctime   9.6 | flips   6.3 | hold   7.8 | aimstd (0.142,0.149) | aimspan (0.663,0.681) | aimdx 0.165 | hitd 93.1 | lanes L/M/R 12%/73%/15% ===
+
+  [gen 032] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 032] eval   6/ 30 ( 20.0%) in   12.0s
+  [gen 032] eval   9/ 30 ( 30.0%) in   18.1s
+  [gen 032] eval  12/ 30 ( 40.0%) in   20.6s
+  [gen 032] eval  15/ 30 ( 50.0%) in   25.5s
+  [gen 032] eval  18/ 30 ( 60.0%) in   30.0s
+  [gen 032] eval  21/ 30 ( 70.0%) in   33.9s
+  [gen 032] eval  24/ 30 ( 80.0%) in   39.0s
+  [gen 032] eval  27/ 30 ( 90.0%) in   43.2s
+  [gen 032] eval  30/ 30 (100.0%) in   49.5s
+
+=== gen 032 | best  2082.63 | mean   400.93 | std  621.18 | spread  2309.27 | clear 16.7% | timeout 50.0% | t -486.0 | dmg    0 | acc 25.0% | ctime   8.6 | flips   5.7 | hold   7.3 | aimstd (0.144,0.148) | aimspan (0.681,0.656) | aimdx 0.167 | hitd 110.2 | lanes L/M/R 11%/74%/15% ===
+
+  [gen 033] eval   3/ 30 ( 10.0%) in   10.8s
+  [gen 033] eval   6/ 30 ( 20.0%) in   14.3s
+  [gen 033] eval   9/ 30 ( 30.0%) in   17.2s
+  [gen 033] eval  12/ 30 ( 40.0%) in   22.8s
+  [gen 033] eval  15/ 30 ( 50.0%) in   25.8s
+  [gen 033] eval  18/ 30 ( 60.0%) in   32.3s
+  [gen 033] eval  21/ 30 ( 70.0%) in   37.5s
+  [gen 033] eval  24/ 30 ( 80.0%) in   43.3s
+  [gen 033] eval  27/ 30 ( 90.0%) in   45.0s
+  [gen 033] eval  30/ 30 (100.0%) in   55.1s
+
+=== gen 033 | best  2460.70 | mean   446.90 | std  663.42 | spread  2691.36 | clear 16.7% | timeout 43.3% | t -860.0 | dmg    0 | acc 50.0% | ctime  10.3 | flips   6.7 | hold   8.1 | aimstd (0.145,0.151) | aimspan (0.677,0.689) | aimdx 0.170 | hitd 97.1 | lanes L/M/R 12%/72%/16% ===
+
+  [gen 034] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 034] eval   6/ 30 ( 20.0%) in   13.4s
+  [gen 034] eval   9/ 30 ( 30.0%) in   19.0s
+  [gen 034] eval  12/ 30 ( 40.0%) in   24.6s
+  [gen 034] eval  15/ 30 ( 50.0%) in   31.3s
+  [gen 034] eval  18/ 30 ( 60.0%) in   34.0s
+  [gen 034] eval  21/ 30 ( 70.0%) in   36.9s
+  [gen 034] eval  24/ 30 ( 80.0%) in   43.0s
+  [gen 034] eval  27/ 30 ( 90.0%) in   48.4s
+  [gen 034] eval  30/ 30 (100.0%) in   51.1s
+
+=== gen 034 | best  2414.98 | mean   460.37 | std  677.48 | spread  2474.17 | clear 16.7% | timeout 63.3% | t -814.0 | dmg    0 | acc 50.0% | ctime  10.1 | flips   6.6 | hold   8.2 | aimstd (0.145,0.151) | aimspan (0.675,0.682) | aimdx 0.167 | hitd 104.4 | lanes L/M/R 13%/69%/18% ===
+
+  [gen 035] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 035] eval   6/ 30 ( 20.0%) in   12.1s
+  [gen 035] eval   9/ 30 ( 30.0%) in   14.7s
+  [gen 035] eval  12/ 30 ( 40.0%) in   21.0s
+  [gen 035] eval  15/ 30 ( 50.0%) in   23.8s
+  [gen 035] eval  18/ 30 ( 60.0%) in   26.5s
+  [gen 035] eval  21/ 30 ( 70.0%) in   30.3s
+  [gen 035] eval  24/ 30 ( 80.0%) in   37.5s
+  [gen 035] eval  27/ 30 ( 90.0%) in   40.1s
+  [gen 035] eval  30/ 30 (100.0%) in   53.7s
+
+=== gen 035 | best  2491.76 | mean   769.15 | std  823.00 | spread  2427.15 | clear 36.7% | timeout 53.3% | t -890.0 | dmg    0 | acc 50.0% | ctime   8.8 | flips   5.7 | hold   7.2 | aimstd (0.142,0.152) | aimspan (0.643,0.682) | aimdx 0.165 | hitd 87.7 | lanes L/M/R 10%/73%/17% ===
+
+  [gen 036] eval   3/ 30 ( 10.0%) in    7.0s
+  [gen 036] eval   6/ 30 ( 20.0%) in   13.7s
+  [gen 036] eval   9/ 30 ( 30.0%) in   18.0s
+  [gen 036] eval  12/ 30 ( 40.0%) in   20.6s
+  [gen 036] eval  15/ 30 ( 50.0%) in   23.0s
+  [gen 036] eval  18/ 30 ( 60.0%) in   27.1s
+  [gen 036] eval  21/ 30 ( 70.0%) in   35.1s
+  [gen 036] eval  24/ 30 ( 80.0%) in   39.4s
+  [gen 036] eval  27/ 30 ( 90.0%) in   46.3s
+  [gen 036] eval  30/ 30 (100.0%) in   60.6s
+
+=== gen 036 | best  2124.35 | mean   509.86 | std  699.79 | spread  2045.31 | clear 20.0% | timeout 53.3% | t -510.0 | dmg    0 | acc 25.0% | ctime   9.9 | flips   6.6 | hold   8.1 | aimstd (0.147,0.152) | aimspan (0.687,0.701) | aimdx 0.172 | hitd 108.2 | lanes L/M/R 15%/70%/15% ===
+
+  [gen 037] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 037] eval   6/ 30 ( 20.0%) in   10.9s
+  [gen 037] eval   9/ 30 ( 30.0%) in   17.7s
+  [gen 037] eval  12/ 30 ( 40.0%) in   24.3s
+  [gen 037] eval  15/ 30 ( 50.0%) in   29.8s
+  [gen 037] eval  18/ 30 ( 60.0%) in   33.4s
+  [gen 037] eval  21/ 30 ( 70.0%) in   40.6s
+  [gen 037] eval  24/ 30 ( 80.0%) in   45.0s
+  [gen 037] eval  27/ 30 ( 90.0%) in   51.8s
+  [gen 037] eval  30/ 30 (100.0%) in   68.2s
+
+=== gen 037 | best  2059.20 | mean   503.40 | std  659.48 | spread  1960.18 | clear 20.0% | timeout 53.3% | t -460.0 | dmg    0 | acc 25.0% | ctime  11.9 | flips   7.9 | hold   9.3 | aimstd (0.148,0.153) | aimspan (0.711,0.717) | aimdx 0.171 | hitd 90.8 | lanes L/M/R 13%/70%/16% ===
+
+  [gen 038] eval   3/ 30 ( 10.0%) in    7.0s
+  [gen 038] eval   6/ 30 ( 20.0%) in   10.9s
+  [gen 038] eval   9/ 30 ( 30.0%) in   17.7s
+  [gen 038] eval  12/ 30 ( 40.0%) in   24.3s
+  [gen 038] eval  15/ 30 ( 50.0%) in   28.7s
+  [gen 038] eval  18/ 30 ( 60.0%) in   35.1s
+  [gen 038] eval  21/ 30 ( 70.0%) in   42.6s
+  [gen 038] eval  24/ 30 ( 80.0%) in   46.6s
+  [gen 038] eval  27/ 30 ( 90.0%) in   53.1s
+  [gen 038] eval  30/ 30 (100.0%) in   60.4s
+
+=== gen 038 | best  2050.67 | mean   431.60 | std  579.69 | spread  1974.61 | clear 16.7% | timeout 76.7% | t -364.0 | dmg    0 | acc 33.3% | ctime  11.5 | flips   7.6 | hold   9.1 | aimstd (0.146,0.154) | aimspan (0.708,0.737) | aimdx 0.167 | hitd 107.5 | lanes L/M/R 11%/74%/15% ===
+
+  [gen 039] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 039] eval   6/ 30 ( 20.0%) in    9.4s
+  [gen 039] eval   9/ 30 ( 30.0%) in   16.3s
+  [gen 039] eval  12/ 30 ( 40.0%) in   17.6s
+  [gen 039] eval  15/ 30 ( 50.0%) in   19.8s
+  [gen 039] eval  18/ 30 ( 60.0%) in   24.6s
+  [gen 039] eval  21/ 30 ( 70.0%) in   30.4s
+  [gen 039] eval  24/ 30 ( 80.0%) in   37.4s
+  [gen 039] eval  27/ 30 ( 90.0%) in   40.3s
+  [gen 039] eval  30/ 30 (100.0%) in   47.9s
+
+=== gen 039 | best  2423.85 | mean   483.58 | std  780.28 | spread  2647.85 | clear 20.0% | timeout 46.7% | t -822.0 | dmg    0 | acc 50.0% | ctime   8.8 | flips   5.8 | hold   7.2 | aimstd (0.147,0.153) | aimspan (0.673,0.691) | aimdx 0.173 | hitd 98.6 | lanes L/M/R 12%/73%/16% ===
+
+  [gen 040] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 040] eval   6/ 30 ( 20.0%) in   13.6s
+  [gen 040] eval   9/ 30 ( 30.0%) in   16.5s
+  [gen 040] eval  12/ 30 ( 40.0%) in   20.7s
+  [gen 040] eval  15/ 30 ( 50.0%) in   23.0s
+  [gen 040] eval  18/ 30 ( 60.0%) in   27.2s
+  [gen 040] eval  21/ 30 ( 70.0%) in   29.8s
+  [gen 040] eval  24/ 30 ( 80.0%) in   36.5s
+  [gen 040] eval  27/ 30 ( 90.0%) in   46.3s
+  [gen 040] eval  30/ 30 (100.0%) in   57.0s
+
+=== gen 040 | best  2013.86 | mean   559.56 | std  689.74 | spread  1891.38 | clear 23.3% | timeout 56.7% | t -414.0 | dmg    0 | acc 25.0% | ctime   9.8 | flips   6.5 | hold   8.1 | aimstd (0.149,0.156) | aimspan (0.698,0.693) | aimdx 0.172 | hitd 92.0 | lanes L/M/R 14%/70%/16% ===
+
+  [gen 041] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 041] eval   6/ 30 ( 20.0%) in   10.9s
+  [gen 041] eval   9/ 30 ( 30.0%) in   17.5s
+  [gen 041] eval  12/ 30 ( 40.0%) in   21.3s
+  [gen 041] eval  15/ 30 ( 50.0%) in   27.7s
+  [gen 041] eval  18/ 30 ( 60.0%) in   29.0s
+  [gen 041] eval  21/ 30 ( 70.0%) in   35.7s
+  [gen 041] eval  24/ 30 ( 80.0%) in   41.9s
+  [gen 041] eval  27/ 30 ( 90.0%) in   48.6s
+  [gen 041] eval  30/ 30 (100.0%) in   62.9s
+
+=== gen 041 | best  1891.65 | mean   332.77 | std  512.90 | spread  2115.64 | clear 10.0% | timeout 56.7% | t -510.0 | dmg    0 | acc 27.3% | ctime   9.7 | flips   6.4 | hold   8.0 | aimstd (0.146,0.155) | aimspan (0.686,0.713) | aimdx 0.167 | hitd 99.8 | lanes L/M/R 12%/73%/15% ===
+
+  [gen 042] eval   3/ 30 ( 10.0%) in    7.3s
+  [gen 042] eval   6/ 30 ( 20.0%) in   11.8s
+  [gen 042] eval   9/ 30 ( 30.0%) in   18.0s
+  [gen 042] eval  12/ 30 ( 40.0%) in   24.7s
+  [gen 042] eval  15/ 30 ( 50.0%) in   29.0s
+  [gen 042] eval  18/ 30 ( 60.0%) in   35.8s
+  [gen 042] eval  21/ 30 ( 70.0%) in   39.7s
+  [gen 042] eval  24/ 30 ( 80.0%) in   43.2s
+  [gen 042] eval  27/ 30 ( 90.0%) in   47.8s
+  [gen 042] eval  30/ 30 (100.0%) in   50.0s
+
+=== gen 042 | best  1752.94 | mean   521.24 | std  623.89 | spread  1664.80 | clear 23.3% | timeout 53.3% | t -130.0 | dmg    0 | acc 28.6% | ctime  10.0 | flips   6.6 | hold   8.2 | aimstd (0.151,0.161) | aimspan (0.721,0.736) | aimdx 0.175 | hitd 95.3 | lanes L/M/R 14%/69%/17% ===
+
+  [gen 043] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 043] eval   6/ 30 ( 20.0%) in   13.7s
+  [gen 043] eval   9/ 30 ( 30.0%) in   19.2s
+  [gen 043] eval  12/ 30 ( 40.0%) in   22.9s
+  [gen 043] eval  15/ 30 ( 50.0%) in   28.4s
+  [gen 043] eval  18/ 30 ( 60.0%) in   32.0s
+  [gen 043] eval  21/ 30 ( 70.0%) in   33.8s
+  [gen 043] eval  24/ 30 ( 80.0%) in   38.1s
+  [gen 043] eval  27/ 30 ( 90.0%) in   39.3s
+  [gen 043] eval  30/ 30 (100.0%) in   48.8s
+
+=== gen 043 | best  2193.40 | mean   559.88 | std  709.29 | spread  2251.57 | clear 26.7% | timeout 43.3% | t -688.0 | dmg    0 | acc 37.5% | ctime   8.7 | flips   5.8 | hold   7.3 | aimstd (0.149,0.160) | aimspan (0.693,0.718) | aimdx 0.170 | hitd 90.6 | lanes L/M/R 13%/70%/17% ===
+
+  [gen 044] eval   3/ 30 ( 10.0%) in    7.7s
+  [gen 044] eval   6/ 30 ( 20.0%) in   14.0s
+  [gen 044] eval   9/ 30 ( 30.0%) in   20.2s
+  [gen 044] eval  12/ 30 ( 40.0%) in   25.1s
+  [gen 044] eval  15/ 30 ( 50.0%) in   32.1s
+  [gen 044] eval  18/ 30 ( 60.0%) in   36.0s
+  [gen 044] eval  21/ 30 ( 70.0%) in   39.6s
+  [gen 044] eval  24/ 30 ( 80.0%) in   41.8s
+  [gen 044] eval  27/ 30 ( 90.0%) in   48.5s
+  [gen 044] eval  30/ 30 (100.0%) in   59.3s
+
+=== gen 044 | best  2423.03 | mean   564.93 | std  708.49 | spread  2362.20 | clear 23.3% | timeout 50.0% | t -866.0 | dmg    0 | acc 50.0% | ctime  10.1 | flips   6.7 | hold   8.2 | aimstd (0.144,0.159) | aimspan (0.691,0.726) | aimdx 0.169 | hitd 81.1 | lanes L/M/R 13%/70%/17% ===
+
+  [gen 045] eval   3/ 30 ( 10.0%) in   10.9s
+  [gen 045] eval   6/ 30 ( 20.0%) in   13.7s
+  [gen 045] eval   9/ 30 ( 30.0%) in   20.5s
+  [gen 045] eval  12/ 30 ( 40.0%) in   21.9s
+  [gen 045] eval  15/ 30 ( 50.0%) in   31.2s
+  [gen 045] eval  18/ 30 ( 60.0%) in   35.6s
+  [gen 045] eval  21/ 30 ( 70.0%) in   42.2s
+  [gen 045] eval  24/ 30 ( 80.0%) in   45.8s
+  [gen 045] eval  27/ 30 ( 90.0%) in   54.8s
+  [gen 045] eval  30/ 30 (100.0%) in   64.6s
+
+=== gen 045 | best  1890.31 | mean   360.26 | std  510.27 | spread  2118.97 | clear 13.3% | timeout 53.3% | t -336.0 | dmg    0 | acc 25.0% | ctime  11.1 | flips   7.4 | hold   8.9 | aimstd (0.147,0.159) | aimspan (0.697,0.723) | aimdx 0.172 | hitd 99.4 | lanes L/M/R 12%/74%/14% ===
+
+  [gen 046] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 046] eval   6/ 30 ( 20.0%) in   10.5s
+  [gen 046] eval   9/ 30 ( 30.0%) in   17.1s
+  [gen 046] eval  12/ 30 ( 40.0%) in   21.3s
+  [gen 046] eval  15/ 30 ( 50.0%) in   25.6s
+  [gen 046] eval  18/ 30 ( 60.0%) in   28.4s
+  [gen 046] eval  21/ 30 ( 70.0%) in   32.3s
+  [gen 046] eval  24/ 30 ( 80.0%) in   35.5s
+  [gen 046] eval  27/ 30 ( 90.0%) in   42.8s
+  [gen 046] eval  30/ 30 (100.0%) in   57.3s
+
+=== gen 046 | best  2194.80 | mean   791.49 | std  785.63 | spread  2061.48 | clear 36.7% | timeout 36.7% | t -490.0 | dmg    0 | acc 62.5% | ctime   8.8 | flips   5.8 | hold   7.5 | aimstd (0.142,0.159) | aimspan (0.656,0.702) | aimdx 0.163 | hitd 81.3 | lanes L/M/R 11%/70%/18% ===
+
+  [gen 047] eval   3/ 30 ( 10.0%) in   10.6s
+  [gen 047] eval   6/ 30 ( 20.0%) in   15.0s
+  [gen 047] eval   9/ 30 ( 30.0%) in   19.5s
+  [gen 047] eval  12/ 30 ( 40.0%) in   26.7s
+  [gen 047] eval  15/ 30 ( 50.0%) in   29.0s
+  [gen 047] eval  18/ 30 ( 60.0%) in   35.9s
+  [gen 047] eval  21/ 30 ( 70.0%) in   39.4s
+  [gen 047] eval  24/ 30 ( 80.0%) in   45.6s
+  [gen 047] eval  27/ 30 ( 90.0%) in   53.5s
+  [gen 047] eval  30/ 30 (100.0%) in   70.5s
+
+=== gen 047 | best  2136.85 | mean   534.34 | std  663.70 | spread  2037.92 | clear 20.0% | timeout 46.7% | t -538.0 | dmg    0 | acc 25.0% | ctime  11.8 | flips   7.8 | hold   9.1 | aimstd (0.146,0.159) | aimspan (0.711,0.728) | aimdx 0.168 | hitd 93.1 | lanes L/M/R 14%/69%/17% ===
+
+  [gen 048] eval   3/ 30 ( 10.0%) in   10.5s
+  [gen 048] eval   6/ 30 ( 20.0%) in   11.2s
+  [gen 048] eval   9/ 30 ( 30.0%) in   17.4s
+  [gen 048] eval  12/ 30 ( 40.0%) in   24.3s
+  [gen 048] eval  15/ 30 ( 50.0%) in   29.7s
+  [gen 048] eval  18/ 30 ( 60.0%) in   35.4s
+  [gen 048] eval  21/ 30 ( 70.0%) in   39.0s
+  [gen 048] eval  24/ 30 ( 80.0%) in   41.8s
+  [gen 048] eval  27/ 30 ( 90.0%) in   49.6s
+  [gen 048] eval  30/ 30 (100.0%) in   57.0s
+
+=== gen 048 | best  2213.95 | mean   428.20 | std  611.73 | spread  2108.32 | clear 16.7% | timeout 60.0% | t -488.0 | dmg    0 | acc 33.3% | ctime  10.9 | flips   7.1 | hold   8.7 | aimstd (0.147,0.162) | aimspan (0.697,0.765) | aimdx 0.168 | hitd 106.9 | lanes L/M/R 13%/72%/15% ===
+
+  [gen 049] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 049] eval   6/ 30 ( 20.0%) in    9.7s
+  [gen 049] eval   9/ 30 ( 30.0%) in   13.9s
+  [gen 049] eval  12/ 30 ( 40.0%) in   20.7s
+  [gen 049] eval  15/ 30 ( 50.0%) in   23.5s
+  [gen 049] eval  18/ 30 ( 60.0%) in   31.9s
+  [gen 049] eval  21/ 30 ( 70.0%) in   34.2s
+  [gen 049] eval  24/ 30 ( 80.0%) in   41.1s
+  [gen 049] eval  27/ 30 ( 90.0%) in   47.4s
+  [gen 049] eval  30/ 30 (100.0%) in   59.1s
+
+=== gen 049 | best  1941.16 | mean   544.76 | std  699.95 | spread  1894.86 | clear 23.3% | timeout 66.7% | t -362.0 | dmg    0 | acc 25.0% | ctime  10.5 | flips   6.7 | hold   7.9 | aimstd (0.147,0.165) | aimspan (0.701,0.741) | aimdx 0.172 | hitd 100.5 | lanes L/M/R 12%/70%/18% ===
+
+  [gen 050] eval   3/ 30 ( 10.0%) in    6.7s
+  [gen 050] eval   6/ 30 ( 20.0%) in   10.4s
+  [gen 050] eval   9/ 30 ( 30.0%) in   17.6s
+  [gen 050] eval  12/ 30 ( 40.0%) in   21.6s
+  [gen 050] eval  15/ 30 ( 50.0%) in   26.7s
+  [gen 050] eval  18/ 30 ( 60.0%) in   31.5s
+  [gen 050] eval  21/ 30 ( 70.0%) in   39.9s
+  [gen 050] eval  24/ 30 ( 80.0%) in   45.8s
+  [gen 050] eval  27/ 30 ( 90.0%) in   56.3s
+  [gen 050] eval  30/ 30 (100.0%) in   67.0s
+
+=== gen 050 | best  2180.34 | mean   570.43 | std  708.21 | spread  2049.18 | clear 23.3% | timeout 66.7% | t -670.0 | dmg    0 | acc 42.9% | ctime  12.5 | flips   8.2 | hold   9.5 | aimstd (0.149,0.164) | aimspan (0.708,0.731) | aimdx 0.170 | hitd 94.4 | lanes L/M/R 14%/69%/17% ===
+
+  [gen 051] eval   3/ 30 ( 10.0%) in    6.5s
+  [gen 051] eval   6/ 30 ( 20.0%) in   11.8s
+  [gen 051] eval   9/ 30 ( 30.0%) in   17.6s
+  [gen 051] eval  12/ 30 ( 40.0%) in   22.7s
+  [gen 051] eval  15/ 30 ( 50.0%) in   26.5s
+  [gen 051] eval  18/ 30 ( 60.0%) in   33.4s
+  [gen 051] eval  21/ 30 ( 70.0%) in   40.8s
+  [gen 051] eval  24/ 30 ( 80.0%) in   42.9s
+  [gen 051] eval  27/ 30 ( 90.0%) in   47.4s
+  [gen 051] eval  30/ 30 (100.0%) in   56.4s
+
+=== gen 051 | best  1989.84 | mean   435.57 | std  596.60 | spread  2019.43 | clear 16.7% | timeout 53.3% | t -508.0 | dmg    0 | acc 40.0% | ctime  10.4 | flips   6.8 | hold   8.4 | aimstd (0.147,0.164) | aimspan (0.683,0.738) | aimdx 0.167 | hitd 101.9 | lanes L/M/R 14%/69%/18% ===
+
+  [gen 052] eval   3/ 30 ( 10.0%) in    5.2s
+  [gen 052] eval   6/ 30 ( 20.0%) in    8.8s
+  [gen 052] eval   9/ 30 ( 30.0%) in   15.5s
+  [gen 052] eval  12/ 30 ( 40.0%) in   22.0s
+  [gen 052] eval  15/ 30 ( 50.0%) in   26.5s
+  [gen 052] eval  18/ 30 ( 60.0%) in   31.2s
+  [gen 052] eval  21/ 30 ( 70.0%) in   36.5s
+  [gen 052] eval  24/ 30 ( 80.0%) in   40.3s
+  [gen 052] eval  27/ 30 ( 90.0%) in   45.3s
+  [gen 052] eval  30/ 30 (100.0%) in   52.2s
+
+=== gen 052 | best  2694.29 | mean   816.66 | std  909.77 | spread  2586.04 | clear 33.3% | timeout 50.0% | t -794.0 | dmg    0 | acc 83.3% | ctime   9.8 | flips   6.4 | hold   7.9 | aimstd (0.147,0.167) | aimspan (0.692,0.728) | aimdx 0.168 | hitd 80.8 | lanes L/M/R 11%/71%/19% ===
+
+  [gen 053] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 053] eval   6/ 30 ( 20.0%) in    9.3s
+  [gen 053] eval   9/ 30 ( 30.0%) in   12.2s
+  [gen 053] eval  12/ 30 ( 40.0%) in   15.3s
+  [gen 053] eval  15/ 30 ( 50.0%) in   22.0s
+  [gen 053] eval  18/ 30 ( 60.0%) in   28.3s
+  [gen 053] eval  21/ 30 ( 70.0%) in   29.6s
+  [gen 053] eval  24/ 30 ( 80.0%) in   33.7s
+  [gen 053] eval  27/ 30 ( 90.0%) in   39.7s
+  [gen 053] eval  30/ 30 (100.0%) in   45.1s
+
+=== gen 053 | best  2344.66 | mean   864.78 | std  896.52 | spread  2571.98 | clear 40.0% | timeout 36.7% | t -744.0 | dmg    0 | acc 50.0% | ctime   8.6 | flips   5.6 | hold   6.9 | aimstd (0.144,0.164) | aimspan (0.677,0.705) | aimdx 0.162 | hitd 87.7 | lanes L/M/R 9%/70%/21% ===
+
+  [gen 054] eval   3/ 30 ( 10.0%) in   10.8s
+  [gen 054] eval   6/ 30 ( 20.0%) in   13.4s
+  [gen 054] eval   9/ 30 ( 30.0%) in   19.2s
+  [gen 054] eval  12/ 30 ( 40.0%) in   25.1s
+  [gen 054] eval  15/ 30 ( 50.0%) in   28.6s
+  [gen 054] eval  18/ 30 ( 60.0%) in   34.0s
+  [gen 054] eval  21/ 30 ( 70.0%) in   38.5s
+  [gen 054] eval  24/ 30 ( 80.0%) in   42.9s
+  [gen 054] eval  27/ 30 ( 90.0%) in   49.0s
+  [gen 054] eval  30/ 30 (100.0%) in   60.5s
+
+=== gen 054 | best  1909.64 | mean   369.60 | std  485.12 | spread  1822.55 | clear 13.3% | timeout 63.3% | t -492.0 | dmg    0 | acc 33.3% | ctime  11.1 | flips   7.3 | hold   8.9 | aimstd (0.149,0.165) | aimspan (0.707,0.769) | aimdx 0.167 | hitd 108.8 | lanes L/M/R 14%/68%/18% ===
+
+  [gen 055] eval   3/ 30 ( 10.0%) in    6.4s
+  [gen 055] eval   6/ 30 ( 20.0%) in   11.7s
+  [gen 055] eval   9/ 30 ( 30.0%) in   15.6s
+  [gen 055] eval  12/ 30 ( 40.0%) in   18.7s
+  [gen 055] eval  15/ 30 ( 50.0%) in   25.5s
+  [gen 055] eval  18/ 30 ( 60.0%) in   31.7s
+  [gen 055] eval  21/ 30 ( 70.0%) in   32.9s
+  [gen 055] eval  24/ 30 ( 80.0%) in   43.1s
+  [gen 055] eval  27/ 30 ( 90.0%) in   50.2s
+  [gen 055] eval  30/ 30 (100.0%) in   63.5s
+
+=== gen 055 | best  2141.64 | mean   455.28 | std  656.00 | spread  2060.00 | clear 16.7% | timeout 63.3% | t -666.0 | dmg    0 | acc 37.5% | ctime  11.0 | flips   7.3 | hold   8.8 | aimstd (0.150,0.167) | aimspan (0.710,0.761) | aimdx 0.171 | hitd 101.2 | lanes L/M/R 11%/69%/20% ===
+
+  [gen 056] eval   3/ 30 ( 10.0%) in    9.2s
+  [gen 056] eval   6/ 30 ( 20.0%) in   14.1s
+  [gen 056] eval   9/ 30 ( 30.0%) in   19.9s
+  [gen 056] eval  12/ 30 ( 40.0%) in   21.6s
+  [gen 056] eval  15/ 30 ( 50.0%) in   28.3s
+  [gen 056] eval  18/ 30 ( 60.0%) in   33.5s
+  [gen 056] eval  21/ 30 ( 70.0%) in   39.1s
+  [gen 056] eval  24/ 30 ( 80.0%) in   47.1s
+  [gen 056] eval  27/ 30 ( 90.0%) in   54.0s
+  [gen 056] eval  30/ 30 (100.0%) in   60.6s
+
+=== gen 056 | best  2562.91 | mean   612.61 | std  744.43 | spread  2452.61 | clear 26.7% | timeout 50.0% | t -842.0 | dmg    0 | acc 66.7% | ctime  11.1 | flips   7.3 | hold   8.6 | aimstd (0.149,0.167) | aimspan (0.711,0.749) | aimdx 0.173 | hitd 90.0 | lanes L/M/R 13%/69%/18% ===
+
+  [gen 057] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 057] eval   6/ 30 ( 20.0%) in   10.4s
+  [gen 057] eval   9/ 30 ( 30.0%) in   14.9s
+  [gen 057] eval  12/ 30 ( 40.0%) in   18.7s
+  [gen 057] eval  15/ 30 ( 50.0%) in   25.7s
+  [gen 057] eval  18/ 30 ( 60.0%) in   32.4s
+  [gen 057] eval  21/ 30 ( 70.0%) in   35.0s
+  [gen 057] eval  24/ 30 ( 80.0%) in   42.1s
+  [gen 057] eval  27/ 30 ( 90.0%) in   49.0s
+  [gen 057] eval  30/ 30 (100.0%) in   57.0s
+
+=== gen 057 | best  2711.09 | mean   617.33 | std  818.32 | spread  2745.40 | clear 23.3% | timeout 56.7% | t -894.0 | dmg    0 | acc 80.0% | ctime  10.3 | flips   6.8 | hold   8.2 | aimstd (0.149,0.168) | aimspan (0.678,0.766) | aimdx 0.171 | hitd 92.9 | lanes L/M/R 12%/72%/16% ===
+
+  [gen 058] eval   3/ 30 ( 10.0%) in    7.0s
+  [gen 058] eval   6/ 30 ( 20.0%) in   15.8s
+  [gen 058] eval   9/ 30 ( 30.0%) in   18.4s
+  [gen 058] eval  12/ 30 ( 40.0%) in   23.7s
+  [gen 058] eval  15/ 30 ( 50.0%) in   27.8s
+  [gen 058] eval  18/ 30 ( 60.0%) in   33.1s
+  [gen 058] eval  21/ 30 ( 70.0%) in   37.4s
+  [gen 058] eval  24/ 30 ( 80.0%) in   41.0s
+  [gen 058] eval  27/ 30 ( 90.0%) in   45.7s
+  [gen 058] eval  30/ 30 (100.0%) in   52.2s
+
+=== gen 058 | best  2443.66 | mean   635.85 | std  765.14 | spread  2321.31 | clear 26.7% | timeout 46.7% | t -842.0 | dmg    0 | acc 50.0% | ctime  10.2 | flips   6.7 | hold   8.1 | aimstd (0.148,0.170) | aimspan (0.670,0.751) | aimdx 0.169 | hitd 92.7 | lanes L/M/R 13%/67%/20% ===
+
+  [gen 059] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 059] eval   6/ 30 ( 20.0%) in   12.9s
+  [gen 059] eval   9/ 30 ( 30.0%) in   15.3s
+  [gen 059] eval  12/ 30 ( 40.0%) in   24.7s
+  [gen 059] eval  15/ 30 ( 50.0%) in   27.8s
+  [gen 059] eval  18/ 30 ( 60.0%) in   33.2s
+  [gen 059] eval  21/ 30 ( 70.0%) in   34.5s
+  [gen 059] eval  24/ 30 ( 80.0%) in   41.0s
+  [gen 059] eval  27/ 30 ( 90.0%) in   44.8s
+  [gen 059] eval  30/ 30 (100.0%) in   59.6s
+
+=== gen 059 | best  2667.75 | mean   587.74 | std  781.48 | spread  2553.24 | clear 23.3% | timeout 56.7% | t -894.0 | dmg    0 | acc 66.7% | ctime  10.2 | flips   6.8 | hold   8.1 | aimstd (0.152,0.167) | aimspan (0.720,0.774) | aimdx 0.175 | hitd 105.0 | lanes L/M/R 13%/67%/20% ===
+
+  [gen 060] eval   3/ 30 ( 10.0%) in    5.6s
+  [gen 060] eval   6/ 30 ( 20.0%) in    9.3s
+  [gen 060] eval   9/ 30 ( 30.0%) in   16.2s
+  [gen 060] eval  12/ 30 ( 40.0%) in   20.0s
+  [gen 060] eval  15/ 30 ( 50.0%) in   23.9s
+  [gen 060] eval  18/ 30 ( 60.0%) in   28.1s
+  [gen 060] eval  21/ 30 ( 70.0%) in   32.2s
+  [gen 060] eval  24/ 30 ( 80.0%) in   36.9s
+  [gen 060] eval  27/ 30 ( 90.0%) in   41.7s
+  [gen 060] eval  30/ 30 (100.0%) in   52.8s
+
+=== gen 060 | best  2445.57 | mean   802.40 | std  827.24 | spread  2423.65 | clear 36.7% | timeout 40.0% | t -844.0 | dmg    0 | acc 50.0% | ctime   9.1 | flips   6.0 | hold   7.6 | aimstd (0.152,0.167) | aimspan (0.691,0.728) | aimdx 0.176 | hitd 81.0 | lanes L/M/R 12%/69%/19% ===
+
+  [gen 061] eval   3/ 30 ( 10.0%) in    8.6s
+  [gen 061] eval   6/ 30 ( 20.0%) in   10.7s
+  [gen 061] eval   9/ 30 ( 30.0%) in   18.4s
+  [gen 061] eval  12/ 30 ( 40.0%) in   24.1s
+  [gen 061] eval  15/ 30 ( 50.0%) in   30.1s
+  [gen 061] eval  18/ 30 ( 60.0%) in   32.0s
+  [gen 061] eval  21/ 30 ( 70.0%) in   38.0s
+  [gen 061] eval  24/ 30 ( 80.0%) in   41.7s
+  [gen 061] eval  27/ 30 ( 90.0%) in   48.4s
+  [gen 061] eval  30/ 30 (100.0%) in   52.1s
+
+=== gen 061 | best  1978.88 | mean   426.27 | std  580.82 | spread  1865.19 | clear 16.7% | timeout 60.0% | t -364.0 | dmg    0 | acc 25.0% | ctime  10.8 | flips   7.1 | hold   8.7 | aimstd (0.155,0.172) | aimspan (0.720,0.778) | aimdx 0.177 | hitd 113.3 | lanes L/M/R 12%/68%/20% ===
+
+  [gen 062] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 062] eval   6/ 30 ( 20.0%) in   15.9s
+  [gen 062] eval   9/ 30 ( 30.0%) in   18.1s
+  [gen 062] eval  12/ 30 ( 40.0%) in   23.0s
+  [gen 062] eval  15/ 30 ( 50.0%) in   28.9s
+  [gen 062] eval  18/ 30 ( 60.0%) in   30.7s
+  [gen 062] eval  21/ 30 ( 70.0%) in   37.6s
+  [gen 062] eval  24/ 30 ( 80.0%) in   43.9s
+  [gen 062] eval  27/ 30 ( 90.0%) in   53.2s
+  [gen 062] eval  30/ 30 (100.0%) in   59.5s
+
+=== gen 062 | best  2070.85 | mean   624.32 | std  682.88 | spread  1944.54 | clear 30.0% | timeout 63.3% | t -536.0 | dmg    0 | acc 44.4% | ctime  10.2 | flips   6.8 | hold   8.5 | aimstd (0.151,0.170) | aimspan (0.719,0.751) | aimdx 0.172 | hitd 90.7 | lanes L/M/R 12%/68%/20% ===
+
+  [gen 063] eval   3/ 30 ( 10.0%) in    6.7s
+  [gen 063] eval   6/ 30 ( 20.0%) in   12.0s
+  [gen 063] eval   9/ 30 ( 30.0%) in   16.5s
+  [gen 063] eval  12/ 30 ( 40.0%) in   22.0s
+  [gen 063] eval  15/ 30 ( 50.0%) in   27.1s
+  [gen 063] eval  18/ 30 ( 60.0%) in   29.6s
+  [gen 063] eval  21/ 30 ( 70.0%) in   38.4s
+  [gen 063] eval  24/ 30 ( 80.0%) in   42.3s
+  [gen 063] eval  27/ 30 ( 90.0%) in   44.4s
+  [gen 063] eval  30/ 30 (100.0%) in   55.1s
+
+=== gen 063 | best  2105.58 | mean   535.97 | std  738.54 | spread  2186.76 | clear 20.0% | timeout 50.0% | t -506.0 | dmg    0 | acc 25.0% | ctime  10.4 | flips   6.9 | hold   8.3 | aimstd (0.154,0.167) | aimspan (0.709,0.741) | aimdx 0.174 | hitd 100.3 | lanes L/M/R 12%/68%/20% ===
+
+  [gen 064] eval   3/ 30 ( 10.0%) in    9.3s
+  [gen 064] eval   6/ 30 ( 20.0%) in   12.1s
+  [gen 064] eval   9/ 30 ( 30.0%) in   18.0s
+  [gen 064] eval  12/ 30 ( 40.0%) in   22.9s
+  [gen 064] eval  15/ 30 ( 50.0%) in   27.4s
+  [gen 064] eval  18/ 30 ( 60.0%) in   29.7s
+  [gen 064] eval  21/ 30 ( 70.0%) in   33.8s
+  [gen 064] eval  24/ 30 ( 80.0%) in   35.5s
+  [gen 064] eval  27/ 30 ( 90.0%) in   42.3s
+  [gen 064] eval  30/ 30 (100.0%) in   53.1s
+
+=== gen 064 | best  2625.02 | mean   703.12 | std  874.92 | spread  2505.69 | clear 26.7% | timeout 56.7% | t -866.0 | dmg    0 | acc 66.7% | ctime   9.6 | flips   6.3 | hold   7.8 | aimstd (0.155,0.168) | aimspan (0.699,0.730) | aimdx 0.177 | hitd 87.4 | lanes L/M/R 12%/70%/18% ===
+
+  [gen 065] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 065] eval   6/ 30 ( 20.0%) in   13.4s
+  [gen 065] eval   9/ 30 ( 30.0%) in   14.2s
+  [gen 065] eval  12/ 30 ( 40.0%) in   20.9s
+  [gen 065] eval  15/ 30 ( 50.0%) in   26.0s
+  [gen 065] eval  18/ 30 ( 60.0%) in   31.4s
+  [gen 065] eval  21/ 30 ( 70.0%) in   37.0s
+  [gen 065] eval  24/ 30 ( 80.0%) in   43.7s
+  [gen 065] eval  27/ 30 ( 90.0%) in   47.2s
+  [gen 065] eval  30/ 30 (100.0%) in   54.1s
+
+=== gen 065 | best  2524.29 | mean   611.24 | std  799.63 | spread  2443.02 | clear 23.3% | timeout 60.0% | t -794.0 | dmg    0 | acc 60.0% | ctime  10.1 | flips   6.6 | hold   7.8 | aimstd (0.156,0.162) | aimspan (0.721,0.742) | aimdx 0.175 | hitd 105.3 | lanes L/M/R 12%/68%/20% ===
+
+  [gen 066] eval   3/ 30 ( 10.0%) in    9.4s
+  [gen 066] eval   6/ 30 ( 20.0%) in   16.1s
+  [gen 066] eval   9/ 30 ( 30.0%) in   18.1s
+  [gen 066] eval  12/ 30 ( 40.0%) in   22.6s
+  [gen 066] eval  15/ 30 ( 50.0%) in   27.1s
+  [gen 066] eval  18/ 30 ( 60.0%) in   31.8s
+  [gen 066] eval  21/ 30 ( 70.0%) in   35.5s
+  [gen 066] eval  24/ 30 ( 80.0%) in   41.5s
+  [gen 066] eval  27/ 30 ( 90.0%) in   47.6s
+  [gen 066] eval  30/ 30 (100.0%) in   59.5s
+
+=== gen 066 | best  2761.87 | mean   503.65 | std  717.53 | spread  2678.14 | clear 16.7% | timeout 70.0% | t -910.0 | dmg    0 | acc 75.0% | ctime  10.8 | flips   7.0 | hold   8.5 | aimstd (0.157,0.164) | aimspan (0.730,0.745) | aimdx 0.176 | hitd 101.3 | lanes L/M/R 11%/69%/20% ===
+
+  [gen 067] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 067] eval   6/ 30 ( 20.0%) in   10.9s
+  [gen 067] eval   9/ 30 ( 30.0%) in   15.3s
+  [gen 067] eval  12/ 30 ( 40.0%) in   19.3s
+  [gen 067] eval  15/ 30 ( 50.0%) in   26.2s
+  [gen 067] eval  18/ 30 ( 60.0%) in   28.1s
+  [gen 067] eval  21/ 30 ( 70.0%) in   34.9s
+  [gen 067] eval  24/ 30 ( 80.0%) in   41.6s
+  [gen 067] eval  27/ 30 ( 90.0%) in   48.2s
+  [gen 067] eval  30/ 30 (100.0%) in   58.9s
+
+=== gen 067 | best  2414.98 | mean   787.39 | std  807.24 | spread  2324.91 | clear 36.7% | timeout 46.7% | t -814.0 | dmg    0 | acc 50.0% | ctime  10.4 | flips   6.8 | hold   8.3 | aimstd (0.155,0.163) | aimspan (0.711,0.744) | aimdx 0.176 | hitd 85.8 | lanes L/M/R 14%/66%/20% ===
+
+  [gen 068] eval   3/ 30 ( 10.0%) in    6.8s
+  [gen 068] eval   6/ 30 ( 20.0%) in   10.9s
+  [gen 068] eval   9/ 30 ( 30.0%) in   13.9s
+  [gen 068] eval  12/ 30 ( 40.0%) in   19.2s
+  [gen 068] eval  15/ 30 ( 50.0%) in   24.7s
+  [gen 068] eval  18/ 30 ( 60.0%) in   26.1s
+  [gen 068] eval  21/ 30 ( 70.0%) in   30.3s
+  [gen 068] eval  24/ 30 ( 80.0%) in   36.2s
+  [gen 068] eval  27/ 30 ( 90.0%) in   39.5s
+  [gen 068] eval  30/ 30 (100.0%) in   57.2s
+
+=== gen 068 | best  2470.46 | mean   749.65 | std  826.12 | spread  2358.70 | clear 33.3% | timeout 46.7% | t -824.0 | dmg    0 | acc 50.0% | ctime   8.7 | flips   5.7 | hold   7.1 | aimstd (0.155,0.168) | aimspan (0.698,0.752) | aimdx 0.175 | hitd 94.5 | lanes L/M/R 12%/68%/19% ===
+
+  [gen 069] eval   3/ 30 ( 10.0%) in    6.7s
+  [gen 069] eval   6/ 30 ( 20.0%) in    9.5s
+  [gen 069] eval   9/ 30 ( 30.0%) in   17.2s
+  [gen 069] eval  12/ 30 ( 40.0%) in   20.2s
+  [gen 069] eval  15/ 30 ( 50.0%) in   25.0s
+  [gen 069] eval  18/ 30 ( 60.0%) in   29.7s
+  [gen 069] eval  21/ 30 ( 70.0%) in   33.3s
+  [gen 069] eval  24/ 30 ( 80.0%) in   40.2s
+  [gen 069] eval  27/ 30 ( 90.0%) in   45.6s
+  [gen 069] eval  30/ 30 (100.0%) in   49.2s
+
+=== gen 069 | best  2135.38 | mean   740.33 | std  790.55 | spread  2062.35 | clear 33.3% | timeout 50.0% | t -534.0 | dmg    0 | acc 25.0% | ctime  10.1 | flips   6.7 | hold   8.3 | aimstd (0.157,0.168) | aimspan (0.709,0.768) | aimdx 0.179 | hitd 84.2 | lanes L/M/R 12%/67%/21% ===
+
+  [gen 070] eval   3/ 30 ( 10.0%) in    6.7s
+  [gen 070] eval   6/ 30 ( 20.0%) in    8.9s
+  [gen 070] eval   9/ 30 ( 30.0%) in   13.8s
+  [gen 070] eval  12/ 30 ( 40.0%) in   18.5s
+  [gen 070] eval  15/ 30 ( 50.0%) in   19.5s
+  [gen 070] eval  18/ 30 ( 60.0%) in   21.5s
+  [gen 070] eval  21/ 30 ( 70.0%) in   27.9s
+  [gen 070] eval  24/ 30 ( 80.0%) in   31.5s
+  [gen 070] eval  27/ 30 ( 90.0%) in   41.5s
+  [gen 070] eval  30/ 30 (100.0%) in   54.0s
+
+=== gen 070 | best  2565.98 | mean  1014.40 | std  915.68 | spread  2477.12 | clear 46.7% | timeout 46.7% | t -894.0 | dmg    0 | acc 60.0% | ctime   8.1 | flips   5.3 | hold   6.7 | aimstd (0.155,0.170) | aimspan (0.684,0.722) | aimdx 0.173 | hitd 74.6 | lanes L/M/R 10%/67%/23% ===
+
+  [gen 071] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 071] eval   6/ 30 ( 20.0%) in    9.5s
+  [gen 071] eval   9/ 30 ( 30.0%) in   13.9s
+  [gen 071] eval  12/ 30 ( 40.0%) in   18.3s
+  [gen 071] eval  15/ 30 ( 50.0%) in   25.3s
+  [gen 071] eval  18/ 30 ( 60.0%) in   27.6s
+  [gen 071] eval  21/ 30 ( 70.0%) in   30.7s
+  [gen 071] eval  24/ 30 ( 80.0%) in   35.4s
+  [gen 071] eval  27/ 30 ( 90.0%) in   39.0s
+  [gen 071] eval  30/ 30 (100.0%) in   58.1s
+
+=== gen 071 | best  2565.98 | mean   751.24 | std  863.73 | spread  2789.96 | clear 33.3% | timeout 43.3% | t -894.0 | dmg    0 | acc 60.0% | ctime   8.6 | flips   5.7 | hold   7.1 | aimstd (0.159,0.169) | aimspan (0.708,0.754) | aimdx 0.178 | hitd 82.8 | lanes L/M/R 13%/62%/24% ===
+
+  [gen 072] eval   3/ 30 ( 10.0%) in    8.0s
+  [gen 072] eval   6/ 30 ( 20.0%) in   14.0s
+  [gen 072] eval   9/ 30 ( 30.0%) in   18.8s
+  [gen 072] eval  12/ 30 ( 40.0%) in   21.2s
+  [gen 072] eval  15/ 30 ( 50.0%) in   26.0s
+  [gen 072] eval  18/ 30 ( 60.0%) in   32.0s
+  [gen 072] eval  21/ 30 ( 70.0%) in   38.2s
+  [gen 072] eval  24/ 30 ( 80.0%) in   40.4s
+  [gen 072] eval  27/ 30 ( 90.0%) in   47.5s
+  [gen 072] eval  30/ 30 (100.0%) in   54.4s
+
+=== gen 072 | best  2523.56 | mean   636.89 | std  821.87 | spread  2481.41 | clear 23.3% | timeout 46.7% | t -792.0 | dmg    0 | acc 60.0% | ctime  10.0 | flips   6.7 | hold   8.3 | aimstd (0.161,0.171) | aimspan (0.725,0.769) | aimdx 0.181 | hitd 87.7 | lanes L/M/R 14%/67%/19% ===
+
+  [gen 073] eval   3/ 30 ( 10.0%) in    6.2s
+  [gen 073] eval   6/ 30 ( 20.0%) in    9.5s
+  [gen 073] eval   9/ 30 ( 30.0%) in   17.2s
+  [gen 073] eval  12/ 30 ( 40.0%) in   25.0s
+  [gen 073] eval  15/ 30 ( 50.0%) in   27.3s
+  [gen 073] eval  18/ 30 ( 60.0%) in   33.5s
+  [gen 073] eval  21/ 30 ( 70.0%) in   38.2s
+  [gen 073] eval  24/ 30 ( 80.0%) in   43.3s
+  [gen 073] eval  27/ 30 ( 90.0%) in   49.7s
+  [gen 073] eval  30/ 30 (100.0%) in   60.7s
+
+=== gen 073 | best  2565.98 | mean   562.94 | std  708.55 | spread  2424.19 | clear 20.0% | timeout 50.0% | t -894.0 | dmg    0 | acc 60.0% | ctime  10.8 | flips   7.1 | hold   8.9 | aimstd (0.166,0.170) | aimspan (0.747,0.773) | aimdx 0.189 | hitd 80.2 | lanes L/M/R 17%/60%/23% ===
+
+  [gen 074] eval   3/ 30 ( 10.0%) in    3.7s
+  [gen 074] eval   6/ 30 ( 20.0%) in   10.5s
+  [gen 074] eval   9/ 30 ( 30.0%) in   13.6s
+  [gen 074] eval  12/ 30 ( 40.0%) in   17.7s
+  [gen 074] eval  15/ 30 ( 50.0%) in   19.3s
+  [gen 074] eval  18/ 30 ( 60.0%) in   25.8s
+  [gen 074] eval  21/ 30 ( 70.0%) in   30.0s
+  [gen 074] eval  24/ 30 ( 80.0%) in   36.5s
+  [gen 074] eval  27/ 30 ( 90.0%) in   43.3s
+  [gen 074] eval  30/ 30 (100.0%) in   47.6s
+
+=== gen 074 | best  2473.84 | mean   751.26 | std  873.33 | spread  2440.60 | clear 33.3% | timeout 50.0% | t -862.0 | dmg    0 | acc 60.0% | ctime   9.0 | flips   5.9 | hold   7.5 | aimstd (0.159,0.172) | aimspan (0.694,0.747) | aimdx 0.183 | hitd 90.2 | lanes L/M/R 13%/66%/21% ===
+
+  [gen 075] eval   3/ 30 ( 10.0%) in    5.9s
+  [gen 075] eval   6/ 30 ( 20.0%) in   11.4s
+  [gen 075] eval   9/ 30 ( 30.0%) in   17.8s
+  [gen 075] eval  12/ 30 ( 40.0%) in   23.8s
+  [gen 075] eval  15/ 30 ( 50.0%) in   27.9s
+  [gen 075] eval  18/ 30 ( 60.0%) in   34.4s
+  [gen 075] eval  21/ 30 ( 70.0%) in   37.3s
+  [gen 075] eval  24/ 30 ( 80.0%) in   40.4s
+  [gen 075] eval  27/ 30 ( 90.0%) in   46.0s
+  [gen 075] eval  30/ 30 (100.0%) in   56.7s
+
+=== gen 075 | best  2098.08 | mean   626.49 | std  764.20 | spread  2148.70 | clear 26.7% | timeout 43.3% | t -414.0 | dmg    0 | acc 33.3% | ctime  10.5 | flips   6.9 | hold   8.2 | aimstd (0.163,0.170) | aimspan (0.723,0.735) | aimdx 0.184 | hitd 91.9 | lanes L/M/R 14%/63%/23% ===
+
+  [gen 076] eval   3/ 30 ( 10.0%) in    8.8s
+  [gen 076] eval   6/ 30 ( 20.0%) in   10.9s
+  [gen 076] eval   9/ 30 ( 30.0%) in   19.1s
+  [gen 076] eval  12/ 30 ( 40.0%) in   22.0s
+  [gen 076] eval  15/ 30 ( 50.0%) in   28.4s
+  [gen 076] eval  18/ 30 ( 60.0%) in   33.7s
+  [gen 076] eval  21/ 30 ( 70.0%) in   35.6s
+  [gen 076] eval  24/ 30 ( 80.0%) in   43.3s
+  [gen 076] eval  27/ 30 ( 90.0%) in   49.2s
+  [gen 076] eval  30/ 30 (100.0%) in   61.8s
+
+=== gen 076 | best  2457.82 | mean   575.23 | std  753.36 | spread  2347.24 | clear 20.0% | timeout 40.0% | t -864.0 | dmg    0 | acc 50.0% | ctime  10.3 | flips   6.8 | hold   8.3 | aimstd (0.160,0.167) | aimspan (0.710,0.745) | aimdx 0.181 | hitd 88.1 | lanes L/M/R 14%/64%/22% ===
+
+  [gen 077] eval   3/ 30 ( 10.0%) in    6.9s
+  [gen 077] eval   6/ 30 ( 20.0%) in    9.4s
+  [gen 077] eval   9/ 30 ( 30.0%) in   14.0s
+  [gen 077] eval  12/ 30 ( 40.0%) in   17.5s
+  [gen 077] eval  15/ 30 ( 50.0%) in   23.6s
+  [gen 077] eval  18/ 30 ( 60.0%) in   26.5s
+  [gen 077] eval  21/ 30 ( 70.0%) in   30.6s
+  [gen 077] eval  24/ 30 ( 80.0%) in   32.3s
+  [gen 077] eval  27/ 30 ( 90.0%) in   39.2s
+  [gen 077] eval  30/ 30 (100.0%) in   52.1s
+
+=== gen 077 | best  2533.84 | mean   811.78 | std  937.64 | spread  2449.06 | clear 33.3% | timeout 53.3% | t -862.0 | dmg    0 | acc 60.0% | ctime   8.5 | flips   5.5 | hold   7.1 | aimstd (0.159,0.163) | aimspan (0.684,0.707) | aimdx 0.181 | hitd 93.9 | lanes L/M/R 15%/62%/23% ===
+
+  [gen 078] eval   3/ 30 ( 10.0%) in    4.5s
+  [gen 078] eval   6/ 30 ( 20.0%) in   11.0s
+  [gen 078] eval   9/ 30 ( 30.0%) in   13.4s
+  [gen 078] eval  12/ 30 ( 40.0%) in   15.7s
+  [gen 078] eval  15/ 30 ( 50.0%) in   21.9s
+  [gen 078] eval  18/ 30 ( 60.0%) in   24.6s
+  [gen 078] eval  21/ 30 ( 70.0%) in   30.3s
+  [gen 078] eval  24/ 30 ( 80.0%) in   35.4s
+  [gen 078] eval  27/ 30 ( 90.0%) in   42.0s
+  [gen 078] eval  30/ 30 (100.0%) in   53.0s
+
+=== gen 078 | best  2460.70 | mean   929.34 | std  923.90 | spread  2544.06 | clear 40.0% | timeout 43.3% | t -860.0 | dmg    0 | acc 50.0% | ctime   9.3 | flips   6.1 | hold   7.5 | aimstd (0.163,0.167) | aimspan (0.702,0.738) | aimdx 0.185 | hitd 71.8 | lanes L/M/R 13%/64%/23% ===
+
+  [gen 079] eval   3/ 30 ( 10.0%) in    5.7s
+  [gen 079] eval   6/ 30 ( 20.0%) in   12.4s
+  [gen 079] eval   9/ 30 ( 30.0%) in   13.9s
+  [gen 079] eval  12/ 30 ( 40.0%) in   17.5s
+  [gen 079] eval  15/ 30 ( 50.0%) in   23.0s
+  [gen 079] eval  18/ 30 ( 60.0%) in   29.5s
+  [gen 079] eval  21/ 30 ( 70.0%) in   35.3s
+  [gen 079] eval  24/ 30 ( 80.0%) in   41.3s
+  [gen 079] eval  27/ 30 ( 90.0%) in   48.0s
+  [gen 079] eval  30/ 30 (100.0%) in   52.5s
+
+=== gen 079 | best  2567.12 | mean   559.74 | std  722.11 | spread  2491.77 | clear 23.3% | timeout 53.3% | t -794.0 | dmg    0 | acc 66.7% | ctime  10.4 | flips   6.8 | hold   8.3 | aimstd (0.164,0.163) | aimspan (0.722,0.745) | aimdx 0.183 | hitd 96.2 | lanes L/M/R 13%/63%/24% ===
+
+Training complete -> theta_final.npy

@@ -103,17 +103,20 @@ ALPHA       = 0.02    # learning rate
 # mean/best accuracy, mean hits) with no seed getting more than a small dip
 # worse. Set to 1 to fully disable (exact prior single-episode behavior).
 #
-# TEMP tuning for faster live iteration while debugging arc behavior
-# (2026-08-06): currently set to 1 so generations complete much faster and
-# behavior shifts become observable earlier. Once the shaping/architecture
-# direction is validated live, switch back to 3 for lower-noise ranking.
-EPISODES_PER_CANDIDATE = 1
+# Raised 1 -> 3 (2026-08-09): the live 80-gen POLICY_MODE="schedule" run at
+# EPISODES_PER_CANDIDATE=1 completed cleanly and was validated visually via
+# run_eval.py (theta_final.npy cleared the level, fitness 2465.84, 0 damage,
+# 50% accuracy) -- direction is confirmed good, so switching back to 3 for
+# lower-noise ranking (this mechanism is generic in es_train.py / not tied
+# to POLICY_MODE, previously only validated live in "mlp" mode). Per-
+# generation wall-clock roughly triples; GENERATIONS intentionally left at
+# 80 (not reduced) for this pass, so total run time will be ~3-4x the prior
+# run (several hours) rather than held constant.
+EPISODES_PER_CANDIDATE = 3
 
 # GENERATIONS raised back up for live convergence passes (2026-08-08).
-# With EPISODES_PER_CANDIDATE temporarily at 1 (fast but noisy ranking),
-# 34 generations can end before clear-rate improvements have enough update
-# steps to emerge. 80 keeps wall-clock manageable while giving ES more
-# selection cycles to exploit the newer anti-arc/anti-stall signals.
+# Left at 80 even after EPISODES_PER_CANDIDATE went back to 3 (2026-08-09)
+# -- see EPISODES_PER_CANDIDATE's comment above for the wall-clock tradeoff.
 GENERATIONS = 80
 SEED        = 10
 CHECKPOINT_EVERY = 5
