@@ -6,13 +6,13 @@ import numpy as np
 
 from config import (
     ACT_DIM, ALPHA, CHECKPOINT_EVERY, EPISODES_PER_CANDIDATE, GENERATIONS,
-    HIDDEN, HUD_ENABLED, LOG_CSV, OBS_DIM, POP_SIZE, SEED, SIGMA,
-    SHOT_PHASE_WARMSTART_ROW_STD,
+    HIDDEN, HUD_ENABLED, LOG_CSV, MAX_TICKS, OBS_DIM, POLICY_MODE, POP_SIZE,
+    SEED, SIGMA, SHOT_PHASE_WARMSTART_ROW_STD,
     STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT, STD_STAGNATION_THRESHOLD,
     VERBOSE_EPISODES,
 )
 from logger import TrainingLogger
-from policy import PARAM_COUNT
+from policy import PARAM_COUNT, SCHEDULE_PARAM_COUNT
 from worker_pool import WorkerPool
 
 
@@ -44,56 +44,71 @@ def train():
         raise ValueError("POP_SIZE must be even for mirrored sampling.")
 
     rng = np.random.default_rng(SEED)
+    param_count = SCHEDULE_PARAM_COUNT if POLICY_MODE == "schedule" else PARAM_COUNT
     # Small init -- large weights saturate tanh and kill the signal.
-    theta = rng.normal(0.0, 0.1, size=(PARAM_COUNT,)).astype(np.float64)
-    # Warm-start the shoot logit to +2 and the peek logit to +1 (asymmetric,
-    # 2026-08-04). Without some positive bias, ~50% of random seeds produce a
-    # theta whose peek output is negative for the fixed initial observation,
-    # so every perturbed candidate stays in cover and ES is stuck at std = 0
-    # on generation 0.
-    #
-    # An earlier version of this fix raised BOTH logits to +2 to guard against
-    # that "always in cover" collapse. Live training logs then showed the
-    # opposite failure mode instead: mean_peek_flips pinned at exactly 0.0 and
-    # mean_cover_time at exactly 0.0 across the *entire* population for many
-    # generations straight -- every candidate stayed exposed 100% of the time
-    # and never ducked to reload (the "mag dump" behaviour). The cause is
-    # that +2 sits far outside SIGMA's (0.1) reach: as long as the perturbed
-    # bias stays positive (which it does for all but the most extreme
-    # samples), peek is always True and behaviour never changes with it, so
-    # there is *zero* local fitness gradient telling ES to move the bias down
-    # -- it's a flat plateau, not just a slow climb. Learning to duck is then
-    # entirely dependent on the (initially near-zero) hidden-layer weights on
-    # the ammo_norm input overcoming that +2 bias, which is a much harder
-    # thing for random perturbations to stumble into than simply crossing 0
-    # from a smaller starting bias. Dropping the peek bias back to +1 keeps
-    # the original anti-"stuck in cover" guarantee while leaving duck
-    # behaviour reachable on a normal training timescale; the stagnation-kick
-    # in the loop below (not a large static bias) is what should catch a
-    # renewed collapse toward "always in cover" if SIGMA=0.1 isn't already
-    # enough on its own.
-    _b2_start = OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM
-    theta[_b2_start + 0] += 2.0  # shoot logit
-    theta[_b2_start + 1] += 1.0  # peek  logit
+    theta = rng.normal(0.0, 0.1, size=(param_count,)).astype(np.float64)
 
-    # Shot-phase port (OBS_DIM 13 -> 15): initialize ONLY the newly-added
-    # input rows (shot_phase_sin/cos) in w1 with a small configurable std.
-    # - std=0.0 reproduces strict zero-init (gen0 equals pre-port behavior).
-    # - std>0.0 injects a small early signal so the policy can start using
-    #   shot-phase features sooner, which helps break repeated clip arcs.
-    shot_phase_extra_dims = 2
-    base_obs_dim = OBS_DIM - shot_phase_extra_dims
-    if base_obs_dim > 0:
-        _w1_end = OBS_DIM * HIDDEN
-        w1 = theta[:_w1_end].reshape(OBS_DIM, HIDDEN)
-        if SHOT_PHASE_WARMSTART_ROW_STD > 0.0:
-            w1[base_obs_dim:OBS_DIM, :] = rng.normal(
-                0.0,
-                SHOT_PHASE_WARMSTART_ROW_STD,
-                size=(shot_phase_extra_dims, HIDDEN),
-            )
-        else:
-            w1[base_obs_dim:OBS_DIM, :] = 0.0
+    if POLICY_MODE == "schedule":
+        # Open-loop: theta is a flat (MAX_TICKS, 4) per-tick action table
+        # (shoot_logit, peek_logit, aim_x_bias, aim_y_bias). Mild peek-
+        # forward bias on EVERY tick's row -- same anti-"never expose"
+        # collapse rationale as the closed-loop peek-logit warm-start below,
+        # but applied per-row since there's no shared bias term here. See
+        # tests/test_simulation.py's `_theta_schedule_warm_start` / repo
+        # memory "Open-loop schedule search" for the sim-validated version
+        # of this warm-start.
+        theta = theta.reshape(MAX_TICKS, 4)
+        theta[:, 1] += 1.0
+        theta = theta.reshape(-1)
+    else:
+        # Warm-start the shoot logit to +2 and the peek logit to +1 (asymmetric,
+        # 2026-08-04). Without some positive bias, ~50% of random seeds produce a
+        # theta whose peek output is negative for the fixed initial observation,
+        # so every perturbed candidate stays in cover and ES is stuck at std = 0
+        # on generation 0.
+        #
+        # An earlier version of this fix raised BOTH logits to +2 to guard against
+        # that "always in cover" collapse. Live training logs then showed the
+        # opposite failure mode instead: mean_peek_flips pinned at exactly 0.0 and
+        # mean_cover_time at exactly 0.0 across the *entire* population for many
+        # generations straight -- every candidate stayed exposed 100% of the time
+        # and never ducked to reload (the "mag dump" behaviour). The cause is
+        # that +2 sits far outside SIGMA's (0.1) reach: as long as the perturbed
+        # bias stays positive (which it does for all but the most extreme
+        # samples), peek is always True and behaviour never changes with it, so
+        # there is *zero* local fitness gradient telling ES to move the bias down
+        # -- it's a flat plateau, not just a slow climb. Learning to duck is then
+        # entirely dependent on the (initially near-zero) hidden-layer weights on
+        # the ammo_norm input overcoming that +2 bias, which is a much harder
+        # thing for random perturbations to stumble into than simply crossing 0
+        # from a smaller starting bias. Dropping the peek bias back to +1 keeps
+        # the original anti-"stuck in cover" guarantee while leaving duck
+        # behaviour reachable on a normal training timescale; the stagnation-kick
+        # in the loop below (not a large static bias) is what should catch a
+        # renewed collapse toward "always in cover" if SIGMA=0.1 isn't already
+        # enough on its own.
+        _b2_start = OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM
+        theta[_b2_start + 0] += 2.0  # shoot logit
+        theta[_b2_start + 1] += 1.0  # peek  logit
+
+        # Shot-phase port (OBS_DIM 13 -> 15): initialize ONLY the newly-added
+        # input rows (shot_phase_sin/cos) in w1 with a small configurable std.
+        # - std=0.0 reproduces strict zero-init (gen0 equals pre-port behavior).
+        # - std>0.0 injects a small early signal so the policy can start using
+        #   shot-phase features sooner, which helps break repeated clip arcs.
+        shot_phase_extra_dims = 2
+        base_obs_dim = OBS_DIM - shot_phase_extra_dims
+        if base_obs_dim > 0:
+            _w1_end = OBS_DIM * HIDDEN
+            w1 = theta[:_w1_end].reshape(OBS_DIM, HIDDEN)
+            if SHOT_PHASE_WARMSTART_ROW_STD > 0.0:
+                w1[base_obs_dim:OBS_DIM, :] = rng.normal(
+                    0.0,
+                    SHOT_PHASE_WARMSTART_ROW_STD,
+                    size=(shot_phase_extra_dims, HIDDEN),
+                )
+            else:
+                w1[base_obs_dim:OBS_DIM, :] = 0.0
 
     pool = WorkerPool()
     pool.start()
@@ -120,7 +135,7 @@ def train():
             # --- mirrored sampling: test both +eps and -eps ---
             # Halves estimator variance for free.
             half = POP_SIZE // 2
-            eps_half = rng.normal(0.0, 1.0, size=(half, PARAM_COUNT))
+            eps_half = rng.normal(0.0, 1.0, size=(half, param_count))
             eps = np.concatenate([eps_half, -eps_half], axis=0)
             candidates = theta[None, :] + sigma_this_gen * eps
 

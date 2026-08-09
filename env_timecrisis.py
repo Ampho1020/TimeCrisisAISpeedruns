@@ -10,12 +10,12 @@ from config import (
     DRY_FIRE_PENALTY, EDGE_BAND, EDGE_SCATTER_PENALTY, FAIL_PENALTY,
     FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
     MAX_TICKS, MISS_CORRECTION_BONUS, MOVE_EPS,
-    PEEK_TRAVERSE_TICKS, PORT, RAM, RELOAD_BONUS, REPEATED_MISS_PENALTY,
+    PEEK_TRAVERSE_TICKS, POLICY_MODE, PORT, RAM, RELOAD_BONUS, REPEATED_MISS_PENALTY,
     SAME_EPS, SHOT_SLOT_DIVERSITY_BONUS, SHOT_SLOT_DIVERSITY_SCALE,
     STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
-from policy import act
+from policy import act, act_schedule
 
 
 def u16_delta(new_v: int, old_v: int) -> int:
@@ -291,13 +291,20 @@ class TimeCrisisEnv:
 
     def step(self, theta: np.ndarray):
         peek_phase = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if self.prev_peek else -1.0)
-        shoot, peek, aim_x_bias, aim_y_bias = act(
-            theta, self._build_obs(
-                self.prev, 0, 0, peek_phase, self.ammo_left,
-                self.prev_aim_x_bias, self.prev_aim_y_bias,
-                hit_delta=self.hit_delta,
+        if POLICY_MODE == "schedule":
+            # Open-loop: action is read directly from theta[self.ticks],
+            # no observation consumed for action selection. `obs` is still
+            # built via self._build_obs(...) below purely for return-value/
+            # diagnostic parity with the closed-loop path -- not used here.
+            shoot, peek, aim_x_bias, aim_y_bias = act_schedule(theta, self.ticks)
+        else:
+            shoot, peek, aim_x_bias, aim_y_bias = act(
+                theta, self._build_obs(
+                    self.prev, 0, 0, peek_phase, self.ammo_left,
+                    self.prev_aim_x_bias, self.prev_aim_y_bias,
+                    hit_delta=self.hit_delta,
+                )
             )
-        )
         # Feed this tick's aim decision back as next tick's "previous aim" obs.
         # The policy is a plain feedforward net with no recurrence of its own;
         # without this it can't tell what it last aimed at and has no signal

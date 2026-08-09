@@ -62,6 +62,23 @@ CONTINUE_SCREEN_STALE_TICKS = 3
 # -----------------------------
 # ES hyperparameters
 # -----------------------------
+
+# Which action-selection paradigm theta represents:
+#   "mlp"      -- closed-loop: theta is feedforward-net weights, action
+#                 computed from the live observation every tick (policy.act).
+#   "schedule" -- open-loop: theta is a fixed per-tick action TABLE indexed
+#                 directly by the current tick, no observation consumed for
+#                 action selection at all (policy.act_schedule). This suits
+#                 this project's actual goal (one fixed savestate/level, not
+#                 a generalist policy) -- see repo memory "Open-loop schedule
+#                 search (2026-08-09): POSITIVE result" for the sim probe
+#                 that validated it: at GENERATIONS=80 schedule search won
+#                 5/5 seeds on fitness vs the closed-loop policy above
+#                 (clear_rate 0.667 vs 0.162, final_best 3170 vs -62.9).
+#                 Only validated at probe scale (pop=12) so far, not yet at
+#                 live POP_SIZE=30 -- watch early live generations closely.
+POLICY_MODE = "schedule"
+
 POP_SIZE    = 30      # MUST be even (mirrored sampling)
 # SIGMA raised 0.05 -> 0.1 (2026-08-04): in-sim trend testing
 # (tests/test_simulation.py ExtendedMiniESTrendSuite) showed the population

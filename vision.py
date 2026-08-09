@@ -18,6 +18,13 @@ env_timecrisis.py integration.
 
 Numpy-only by design (no Pillow/OpenCV dependency), matching this repo's
 existing "numpy only" convention (requirements.txt has only numpy+matplotlib).
+
+``detect_enemy_multi``/``detect_motion_mask`` are a follow-up to the single-
+color ``detect_enemy``: real enemies each have a distinct sprite color AND
+are visibly moving, so detection can be made more selective by requiring a
+palette-color match AND (once a previous frame is available) genuine motion
+between captures -- this avoids being fooled by static same-colored scenery
+that a plain color threshold cannot distinguish from a real target.
 """
 
 import struct
@@ -102,3 +109,93 @@ def detect_enemy(
     cx = float((xs.mean() + 0.5) / w)
     cy = float((ys.mean() + 0.5) / h)
     return cx, cy
+
+
+def detect_motion_mask(
+    prev_frame: np.ndarray,
+    frame: np.ndarray,
+    threshold: int = 25,
+) -> np.ndarray:
+    """Boolean HxW mask of pixels that changed between two same-shape HxWx3(+)
+    uint8 RGB frames.
+
+    A pixel counts as "moved" when the summed absolute per-channel
+    difference (R+G+B) exceeds ``threshold``. Used to filter color-blob
+    detection down to genuinely animating/moving sprites, rather than any
+    static same-colored scenery (see ``detect_enemy_multi``).
+    """
+    if prev_frame.shape != frame.shape:
+        raise ValueError(
+            f"Frame shape mismatch: {prev_frame.shape} vs {frame.shape}"
+        )
+    diff = np.abs(
+        frame[:, :, :3].astype(np.int16) - prev_frame[:, :, :3].astype(np.int16)
+    )
+    return diff.sum(axis=-1) > threshold
+
+
+def detect_enemy_multi(
+    frame: np.ndarray,
+    palette,
+    tolerance: int = 40,
+    prev_frame: np.ndarray | None = None,
+    motion_threshold: int = 25,
+    ref_pos: tuple[float, float] | None = None,
+) -> tuple[float, float] | None:
+    """Detect the on-screen enemy nearest ``ref_pos`` using a per-enemy-type
+    color PALETTE and, when ``prev_frame`` is given, a MOTION filter.
+
+    Real Time Crisis enemies each have a roughly fixed, distinct sprite
+    color and are visibly moving/animating on screen -- a single static
+    color threshold (``detect_enemy``) can be fooled by any static
+    same-colored scenery. ``palette`` is an iterable of (r, g, b) colors,
+    one per known enemy type/costume; for each color, pixels within
+    ``tolerance`` on every channel form a candidate blob and its centroid is
+    computed independently (no cross-color mixing).
+
+    When ``prev_frame`` is provided, each color's mask is additionally
+    ANDed with ``detect_motion_mask(prev_frame, frame, motion_threshold)``
+    -- pixels that didn't change since the previous capture are excluded,
+    so a static prop sharing an enemy's color is not mistaken for a real,
+    moving target. This means a capture with no motion at all (relative to
+    ``prev_frame``) correctly reports no detection, even if a same-colored
+    static object is present. With no ``prev_frame`` (e.g. the very first
+    capture, before any motion reference exists), detection falls back to
+    color-only across the palette.
+
+    Among the resulting per-color candidate blobs, the one nearest to
+    ``ref_pos`` (typically the current cursor position) is returned as its
+    normalized [0, 1] (x, y) centroid; if ``ref_pos`` is None, the largest
+    (most pixels) candidate is returned instead. Returns None if no palette
+    color has any (post-motion-filter) matching pixels.
+    """
+    if frame.ndim != 3 or frame.shape[2] < 3:
+        raise ValueError(f"Expected HxWx3(+) frame, got shape {frame.shape}")
+
+    motion_mask = None
+    if prev_frame is not None:
+        motion_mask = detect_motion_mask(prev_frame, frame, motion_threshold)
+
+    h, w = frame.shape[:2]
+    frame_i16 = frame[:, :, :3].astype(np.int16)
+    candidates = []  # (cx, cy, pixel_count)
+    for color in palette:
+        diff = np.abs(frame_i16 - np.array(color, dtype=np.int16))
+        mask = np.all(diff <= tolerance, axis=-1)
+        if motion_mask is not None:
+            mask = mask & motion_mask
+        ys, xs = np.nonzero(mask)
+        if xs.size == 0:
+            continue
+        cx = float((xs.mean() + 0.5) / w)
+        cy = float((ys.mean() + 0.5) / h)
+        candidates.append((cx, cy, int(xs.size)))
+
+    if not candidates:
+        return None
+    if ref_pos is not None:
+        rx, ry = ref_pos
+        best = min(candidates, key=lambda c: (c[0] - rx) ** 2 + (c[1] - ry) ** 2)
+    else:
+        best = max(candidates, key=lambda c: c[2])
+    return best[0], best[1]

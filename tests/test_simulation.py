@@ -29,6 +29,7 @@ from config import (
     SIGMA as CFG_SIGMA, STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT,
     STD_STAGNATION_THRESHOLD,
 )
+import env_timecrisis
 from env_timecrisis import (
     TimeCrisisEnv,
     compute_miss_correction_metrics,
@@ -38,6 +39,18 @@ from env_timecrisis import (
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import PARAM_COUNT
+
+# This suite exercises the real TimeCrisisEnv/SimulatedGame combo end-to-end
+# with PARAM_COUNT (MLP)-shaped theta throughout, validating the closed-loop
+# policy path specifically (peek gating, dry-fire enforcement, ES trend
+# behaviour, etc.) -- all logic that is shared between POLICY_MODE="mlp" and
+# "schedule" except for the action-selection line itself. Pin this module's
+# TimeCrisisEnv instances to "mlp" regardless of config.py's live default (see
+# POLICY_MODE / repo memory "Open-loop schedule search") so these tests keep
+# validating the closed-loop path even when schedule mode is the active live
+# default. The open-loop path has its own dedicated tests (ScheduleSearchSuite,
+# below) against the sim-only TimedSpotScheduleEnv instead.
+env_timecrisis.POLICY_MODE = "mlp"
 
 
 # ---------------------------------------------------------------------------
@@ -1742,6 +1755,125 @@ class TimedSpotVisionEnv(TimedSpotBaselineEnv):
 
 
 # ---------------------------------------------------------------------------
+# Motion + multi-color detection follow-up (sim-only, Phase A vision plan)
+# ---------------------------------------------------------------------------
+#
+# TimedSpotVisionEnv's gate FAILED (see /memories/repo/TimeCrisisAISpeedruns.md
+# and /memories/session/plan.md, dated 2026-08-09) using a single static
+# target color and a single always-static background. Real Time Crisis
+# enemies (a) each have a roughly fixed but DISTINCT sprite color per enemy
+# type, and (b) are visibly moving/animating on screen -- neither property
+# was exercised by that first probe. This follow-up keeps the exact same 3
+# obs dims / cadence / warm-start / step() bookkeeping as TimedSpotVisionEnv
+# (so _SIM_VISION_OBS_DIM/_SIM_VISION_PARAM_COUNT/_theta_vision_warm_start
+# are reused unchanged) and only swaps in a richer synthetic game + a
+# richer detector (vision.detect_enemy_multi: color PALETTE + motion filter
+# + nearest-to-cursor blob selection), to test whether the ORIGINAL
+# negative result was a detection-quality artifact rather than a
+# fundamental "extra obs dims hurt ES" ceiling.
+
+class TimedSpotMotionColorGame(TimedSpotGame):
+    """Follow-up synthetic screenshot renderer: each timed spot gets a
+    distinct sprite color from a small palette (instead of one fixed color
+    for every spot), the active spot's blob visibly jitters frame-to-frame
+    (a cheap stand-in for a walking/animating enemy), and a permanently
+    static decoy prop sharing one palette color is always rendered. The
+    decoy exists specifically to test whether combining color with a
+    MOTION filter (vision.detect_enemy_multi) avoids being fooled by
+    same-colored static clutter the way a naive per-color centroid alone
+    cannot."""
+
+    _VISION_PALETTE = [
+        (220, 30, 30),    # red
+        (30, 200, 60),    # green
+        (40, 90, 220),    # blue
+        (220, 190, 30),   # yellow
+        (200, 40, 200),   # magenta
+    ]
+    _VISION_DECOY_COLOR = _VISION_PALETTE[0]
+    _VISION_DECOY_POS = (0.08, 0.08)
+    _VISION_JITTER_AMPLITUDE = 4   # pixels
+    _VISION_JITTER_PERIOD = 10     # frames per jitter cycle
+
+    def get_screenshot(self) -> np.ndarray:
+        size = self._VISION_FRAME_SIZE
+        frame = np.empty((size, size, 3), dtype=np.uint8)
+        frame[:, :] = self._VISION_BG_COLOR
+        r = self._VISION_BLOB_RADIUS
+
+        # Static decoy: shares a palette color, NEVER moves, always present
+        # (even once cleared/dead) -- like a fixed HUD icon or scenery prop
+        # that happens to be enemy-colored.
+        dx, dy = self._VISION_DECOY_POS
+        dcx, dcy = int(dx * size), int(dy * size)
+        y0, y1 = max(0, dcy - r), min(size, dcy + r + 1)
+        x0, x1 = max(0, dcx - r), min(size, dcx + r + 1)
+        frame[y0:y1, x0:x1] = self._VISION_DECOY_COLOR
+
+        if self.cleared or self.life <= 0:
+            return frame  # no active enemy once the episode is over
+
+        spot_i = self.active_spot_index()
+        tx, ty = self.spots[spot_i]
+        color = self._VISION_PALETTE[spot_i % len(self._VISION_PALETTE)]
+        phase = (self.frame_count % self._VISION_JITTER_PERIOD) / self._VISION_JITTER_PERIOD
+        jitter = int(round(self._VISION_JITTER_AMPLITUDE * np.sin(2 * np.pi * phase)))
+        cx = int(tx * size) + jitter
+        cy = int(ty * size)
+        y0, y1 = max(0, cy - r), min(size, cy + r + 1)
+        x0, x1 = max(0, cx - r), min(size, cx + r + 1)
+        frame[y0:y1, x0:x1] = color
+        return frame
+
+
+class TimedSpotVisionMotionEnv(TimedSpotVisionEnv):
+    """Follow-up to TimedSpotVisionEnv: identical 3 obs dims (enemy_dx,
+    enemy_dy, detected_flag), cadence, warm-start, and step() bookkeeping,
+    but detection uses vision.detect_enemy_multi() against
+    TimedSpotMotionColorGame's multi-color + moving-blob + static-decoy
+    frames (color PALETTE + motion filter + nearest-to-cursor selection)
+    instead of TimedSpotVisionEnv's single-color, motion-agnostic
+    vision.detect_enemy(). Only the underlying game + detection call
+    differ, so any A/B result vs. TimedSpotVisionEnv/
+    TimedSpotVisionAccuracyEnv is attributable to the improved detection
+    alone, not extra observation capacity."""
+
+    def __init__(self, seed: int = 0):
+        super().__init__(seed=seed)
+        self.client = MockBridgeClient(TimedSpotMotionColorGame(seed=seed))
+        self.prev_frame = None
+
+    def reset(self) -> np.ndarray:
+        self.prev_frame = None
+        return super().reset()
+
+    def _update_vision_state(self):
+        if self.vision_tick_counter % _VISION_CAPTURE_EVERY_N_TICKS == 0:
+            frame = self.client.get_screenshot()
+            cursor_x_norm = normalize_cursor(
+                self.prev.get("cursor_x", CURSOR_X_MIN), CURSOR_X_MIN, CURSOR_X_MAX)
+            cursor_y_norm = normalize_cursor(
+                self.prev.get("cursor_y", CURSOR_Y_MIN), CURSOR_Y_MIN, CURSOR_Y_MAX)
+            detection = vision.detect_enemy_multi(
+                frame,
+                palette=TimedSpotMotionColorGame._VISION_PALETTE,
+                prev_frame=self.prev_frame,
+                ref_pos=(cursor_x_norm, cursor_y_norm),
+            )
+            self.prev_frame = frame
+            if detection is not None:
+                ex, ey = detection
+                self.last_enemy_dx = float(np.clip(ex - cursor_x_norm, -1.0, 1.0))
+                self.last_enemy_dy = float(np.clip(ey - cursor_y_norm, -1.0, 1.0))
+                self.last_enemy_detected = 1.0
+            else:
+                self.last_enemy_dx = 0.0
+                self.last_enemy_dy = 0.0
+                self.last_enemy_detected = 0.0
+        self.vision_tick_counter += 1
+
+
+# ---------------------------------------------------------------------------
 # Accuracy-shaped fitness (sim-only experiment, not in env_timecrisis.py)
 # ---------------------------------------------------------------------------
 
@@ -1796,6 +1928,229 @@ class TimedSpotVisionAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotVisionEnv)
     direct A/B counterpart to ``TimedSpotBaselineAccuracyEnv`` where only
     the observation stack differs. See ``TimedSpotVisionEnv`` for
     motivation."""
+
+
+class TimedSpotVisionMotionAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotVisionMotionEnv):
+    """Motion+multi-color vision-feature observation stack (see
+    ``TimedSpotVisionMotionEnv``) on the timed 5-spot task, with the
+    accuracy-shaped fitness on top -- direct A/B counterpart to both
+    ``TimedSpotBaselineAccuracyEnv`` and ``TimedSpotVisionAccuracyEnv``
+    (same obs dims/param count as the latter; only detection quality
+    differs)."""
+
+
+# ---------------------------------------------------------------------------
+# Open-loop trajectory / schedule search (sim-only, TAS-style alternative to
+# the closed-loop observation-conditioned MLP policy)
+# ---------------------------------------------------------------------------
+#
+# Every closed-loop obs-augmentation probe so far (shot-index, shot-phase,
+# hotspot-bank/single-slot memory, vision x2) made ES convergence WORSE
+# within a fixed generation budget, even when the added signal was real and
+# directionally correct -- see /memories/repo/TimeCrisisAISpeedruns.md. This
+# suggests the bottleneck may be "more scalar inputs to a tiny memoryless
+# MLP trained by low-population rank-transform ES", not "the agent lacks
+# information". Since this project targets a SINGLE fixed savestate/level
+# (config.STATE_SLOT) with the explicit goal of a fast, repeatable clear
+# (a speedrun, not a generally-robust visual policy), this experiment
+# reframes the problem as an OPEN-LOOP schedule search: instead of a
+# reactive policy mapping observations -> actions every tick, `theta` is a
+# flat, per-tick action TABLE (shoot_logit, peek_logit, aim_x_bias,
+# aim_y_bias) x MAX_TICKS, indexed directly by the current tick counter --
+# no observation vector is consumed by the action decision at all. ES still
+# perturbs/ranks/updates `theta` exactly the same way; only what `theta`
+# MEANS changes (a fixed action script instead of network weights).
+#
+# This will only work well if the timed-spot task is close enough to
+# deterministic (fixed spot schedule keyed off frame_count, as it already is
+# in TimedSpotGame) that a fixed script generalizes across the handful of
+# stochastic elements (hit-probability rolls, damage rolls) -- exactly the
+# property this sim task has, and the property real Time Crisis levels
+# plausibly share as an on-rails arcade shooter, per the user's framing.
+# NOTE: this parameter space (MAX_TICKS * 4) is far WIDER than the closed-
+# loop policy's PARAM_COUNT -- but only the rows up to however long an
+# episode actually survives ever affect fitness in a given generation, so
+# the effective dimensionality being searched grows as episodes get longer,
+# rather than being flat 3600-dim from gen 0.
+
+_SCHEDULE_PARAM_COUNT = MAX_TICKS * 4
+
+
+def _schedule_action_at(theta: np.ndarray, tick: int):
+    """Decode the 4 raw values at row `tick` of the (MAX_TICKS, 4) action
+    table into (shoot, peek, aim_x_bias, aim_y_bias), using the exact same
+    nonlinearities as policy.act()/_act_with_obs_dim (threshold at 0.0 for
+    the two bools, tanh for the two aim biases)."""
+    idx = min(tick, MAX_TICKS - 1)
+    row = theta[idx * 4:idx * 4 + 4]
+    return bool(row[0] > 0.0), bool(row[1] > 0.0), float(np.tanh(row[2])), float(np.tanh(row[3]))
+
+
+def _theta_schedule_warm_start(seed: int = 42) -> np.ndarray:
+    """Small random init (matching the scale of other warm-starts, e.g.
+    _theta_memory_warm_start) with a mild peek-forward bias on every tick so
+    gen-0 episodes aren't guaranteed to sit permanently in cover -- an
+    all-zero/negative-peek schedule would never expose, giving ES zero
+    gradient signal to start from (same collapse risk documented for the
+    closed-loop policy in config.py's SIGMA-raise rationale)."""
+    rng = np.random.default_rng(seed)
+    theta = rng.normal(0.0, 0.1, _SCHEDULE_PARAM_COUNT).reshape(MAX_TICKS, 4)
+    theta[:, 1] += 1.0  # peek logit: mild bias toward exposing
+    return theta.reshape(-1)
+
+
+class TimedSpotScheduleEnv(TimedSpotBaselineEnv):
+    """Sim-only OPEN-LOOP env: `theta` is a fixed per-tick action table
+    (see module comment above), NOT policy weights -- step() ignores the
+    observation entirely for action selection and instead reads
+    theta[self.ticks]. Fitness formula and all other step() bookkeeping
+    (peek-lock, ammo, phase inference, terminal detection) are IDENTICAL to
+    TimedSpotBaselineEnv, so any A/B result vs. the closed-loop baseline is
+    attributable to the open-loop-vs-reactive paradigm alone."""
+
+    def step(self, theta: np.ndarray):
+        shoot, peek, aim_x_bias, aim_y_bias = _schedule_action_at(theta, self.ticks)
+        self.prev_aim_x_bias = float(aim_x_bias)
+        self.prev_aim_y_bias = float(aim_y_bias)
+
+        if self.ammo_left == 0:
+            peek = False
+
+        if self.peek_lock > 0:
+            peek = self.peek_locked_value
+            self.peek_lock -= 1
+        elif peek != self.prev_peek:
+            self.peek_lock = PEEK_TRAVERSE_TICKS - 1
+            self.peek_locked_value = peek
+
+        shoot_allowed = peek and self.prev_peek and self.peek_ticks >= PEEK_TRAVERSE_TICKS
+        aim_x = min(1.0, max(0.0, 0.5 + float(aim_x_bias)))
+        aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
+
+        total_fired = total_hit = total_life_loss = 0
+        cleared_guess = dead_guess = timed_out_guess = False
+        continue_screen_guess = False
+        tick_start_core = core_watchdog_snapshot(self.prev)
+        timer_at_tick_start = self.prev["timer"]
+
+        for f in range(FRAME_SKIP):
+            self.client.set_input(
+                shoot=bool(shoot and shoot_allowed and f < 2),
+                peek=peek,
+                aim_x=aim_x,
+                aim_y=aim_y,
+            )
+            pre = self.prev
+            self.client.step_frames(1)
+            post = self._read_core()
+
+            total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
+            frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
+            total_hit += frame_hits
+            if frame_hits > 0:
+                self.hit_delta = 0
+            else:
+                self.hit_delta += 1
+            life_d = u16_delta(post["life"], pre["life"])
+            if life_d < 0:
+                total_life_loss += -life_d
+
+            lethal_wrap = (
+                pre["life"] > 0
+                and life_d < 0
+                and post["life"] > pre["life"]
+                and post["life"] >= 65000
+            )
+            if post["life"] == 0 or lethal_wrap:
+                dead_guess = True
+            if u16_delta(post["timer"], self.start_timer) > 100:
+                cleared_guess = True
+            timer_step = u16_delta(post["timer"], pre["timer"])
+            if post["timer"] <= TIMEOUT_TIMER_THRESHOLD or (
+                timer_step < 0 and pre["timer"] + timer_step <= TIMEOUT_TIMER_THRESHOLD
+            ):
+                timed_out_guess = True
+
+            self.prev = post
+            if dead_guess or cleared_guess or timed_out_guess:
+                break
+
+        if (
+            not dead_guess
+            and not cleared_guess
+            and not timed_out_guess
+            and core_watchdog_snapshot(self.prev) == tick_start_core
+        ):
+            self.stale_core_ticks += 1
+        else:
+            self.stale_core_ticks = 0
+        if self.stale_core_ticks >= CONTINUE_SCREEN_STALE_TICKS:
+            timed_out_guess = True
+            continue_screen_guess = True
+
+        ammo_before_tick = self.ammo_left
+        dry_fire = bool(shoot_allowed and ammo_before_tick == 0)
+        self.ammo_left = max(0, self.ammo_left - total_fired)
+        ending_peek = (peek != self.prev_peek) and not peek
+        reload_correct = False
+        if ending_peek:
+            reload_correct = self.ammo_left == 0
+            self.ammo_left = AMMO_MAX_ROUNDS
+
+        self.ticks += 1
+
+        phase = self.phase_infer.infer(TickSignals(
+            shots_fired_delta=total_fired,
+            shots_hit_delta=total_hit,
+            life_delta=-total_life_loss,
+            timer_delta=u16_delta(self.prev["timer"], timer_at_tick_start),
+            cleared_guess=cleared_guess,
+            dead_guess=dead_guess or timed_out_guess,
+            can_fire_probe=(total_fired > 0),
+        ))
+
+        last_hit = 1 if total_hit > 0 else 0
+        last_miss = 1 if (total_fired > 0 and total_hit == 0) else 0
+        if peek == self.prev_peek:
+            self.peek_ticks = min(self.peek_ticks + 1, PEEK_TRAVERSE_TICKS)
+        else:
+            self.peek_ticks = 1
+        self.prev_peek = peek
+        peek_phase_next = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if peek else -1.0)
+        # obs is built purely for logging/diagnostics parity with the other
+        # sim envs -- step() never consumes it for action selection here.
+        obs = self._build_obs(
+            self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left,
+            self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
+        )
+
+        done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
+        info = {
+            "shots_fired_delta": total_fired,
+            "shots_hit_delta": total_hit,
+            "life_loss": total_life_loss,
+            "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
+            "dead": dead_guess,
+            "timed_out": timed_out_guess,
+            "continue_screen": continue_screen_guess,
+            "peek": bool(peek),
+            "phase": phase.name,
+            "dry_fire": dry_fire,
+            "reload_correct": reload_correct,
+            "ammo_left": self.ammo_left,
+            "hit_delta": int(self.hit_delta),
+            "aim_x": float(aim_x),
+            "aim_y": float(aim_y),
+        }
+        return obs, done, info
+
+
+class TimedSpotScheduleAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotScheduleEnv):
+    """Open-loop schedule-search arm with the accuracy-shaped fitness on
+    top -- direct A/B counterpart to TimedSpotBaselineAccuracyEnv where the
+    ENTIRE action-selection paradigm differs (fixed per-tick script vs.
+    observation-conditioned MLP), not just the observation stack."""
 
 
 def run_timed_spot_probe(env_cls, theta_init_fn, param_count: int,
@@ -2513,6 +2868,82 @@ class VisionModuleSuite(unittest.TestCase):
         self.assertAlmostEqual(cx, 7.0 / 40.0, delta=0.03)
         self.assertAlmostEqual(cy, 22.0 / 40.0, delta=0.03)
 
+    # -- detect_motion_mask / detect_enemy_multi (motion + palette follow-up) --
+
+    _PALETTE = [(220, 30, 30), (30, 200, 60), (40, 90, 220)]
+
+    def test_detect_motion_mask_flags_only_changed_pixels(self):
+        prev = np.full((20, 20, 3), 20, dtype=np.uint8)
+        frame = prev.copy()
+        frame[5:8, 5:8] = (220, 30, 30)  # only this patch changed
+
+        mask = vision.detect_motion_mask(prev, frame)
+        self.assertTrue(mask[6, 6])
+        self.assertFalse(mask[0, 0])
+        self.assertEqual(int(mask.sum()), 9)
+
+    def test_detect_enemy_multi_matches_correct_palette_color(self):
+        frame = np.full((40, 40, 3), 20, dtype=np.uint8)
+        frame[10:14, 10:14] = self._PALETTE[2]  # blue blob near (12, 12)
+
+        result = vision.detect_enemy_multi(frame, self._PALETTE)
+        self.assertIsNotNone(result)
+        cx, cy = result
+        self.assertAlmostEqual(cx, 12.0 / 40.0, delta=0.03)
+        self.assertAlmostEqual(cy, 12.0 / 40.0, delta=0.03)
+
+    def test_detect_enemy_multi_selects_nearest_to_ref_pos(self):
+        frame = np.full((40, 40, 3), 20, dtype=np.uint8)
+        frame[2:6, 2:6] = self._PALETTE[0]     # near top-left
+        frame[30:34, 30:34] = self._PALETTE[1]  # near bottom-right
+
+        near_top_left = vision.detect_enemy_multi(
+            frame, self._PALETTE, ref_pos=(0.0, 0.0))
+        near_bottom_right = vision.detect_enemy_multi(
+            frame, self._PALETTE, ref_pos=(1.0, 1.0))
+
+        self.assertLess(near_top_left[0], 0.3)
+        self.assertGreater(near_bottom_right[0], 0.7)
+
+    def test_detect_enemy_multi_motion_filter_excludes_static_same_color_blob(self):
+        # A static decoy blob (color[0]) is present in BOTH prev and current
+        # frame at the same position; a second, moving blob of the SAME
+        # color newly appears elsewhere in the current frame only. With a
+        # motion filter, only the moving blob's pixels should contribute.
+        prev = np.full((40, 40, 3), 20, dtype=np.uint8)
+        prev[2:6, 2:6] = self._PALETTE[0]  # static decoy
+
+        frame = prev.copy()
+        frame[30:34, 30:34] = self._PALETTE[0]  # newly-appeared moving blob
+
+        result = vision.detect_enemy_multi(
+            frame, self._PALETTE, prev_frame=prev)
+        self.assertIsNotNone(result)
+        cx, cy = result
+        # Should match the NEW (moving) blob near (32, 32), not the
+        # decoy near (4, 4), and not an average of the two.
+        self.assertGreater(cx, 0.7)
+        self.assertGreater(cy, 0.7)
+
+    def test_detect_enemy_multi_returns_none_when_nothing_moved(self):
+        frame = np.full((40, 40, 3), 20, dtype=np.uint8)
+        frame[2:6, 2:6] = self._PALETTE[0]
+        prev = frame.copy()  # identical -- nothing moved
+
+        result = vision.detect_enemy_multi(
+            frame, self._PALETTE, prev_frame=prev)
+        self.assertIsNone(result)
+
+    def test_detect_enemy_multi_falls_back_to_color_only_without_prev_frame(self):
+        frame = np.full((40, 40, 3), 20, dtype=np.uint8)
+        frame[2:6, 2:6] = self._PALETTE[0]
+
+        result = vision.detect_enemy_multi(frame, self._PALETTE, prev_frame=None)
+        self.assertIsNotNone(result)
+        cx, cy = result
+        self.assertAlmostEqual(cx, 4.0 / 40.0, delta=0.03)
+        self.assertAlmostEqual(cy, 4.0 / 40.0, delta=0.03)
+
 
 class VisionFeatureSuite(unittest.TestCase):
     """Regression checks for the vision-feature obs env (Phase A of the
@@ -2609,6 +3040,124 @@ class VisionFeatureSuite(unittest.TestCase):
         self.assertEqual(out_base[1], out_vision[1])  # peek
         self.assertAlmostEqual(out_base[2], out_vision[2], places=6)  # aim_x
         self.assertAlmostEqual(out_base[3], out_vision[3], places=6)  # aim_y
+
+
+class VisionMotionColorFeatureSuite(unittest.TestCase):
+    """Regression checks for TimedSpotVisionMotionEnv / TimedSpotMotionColorGame
+    (the motion+multi-color detection follow-up -- see the module comment
+    above TimedSpotMotionColorGame)."""
+
+    def test_obs_dim_and_param_count_match_the_original_vision_env(self):
+        # No new obs dims were added -- only detection quality changed --
+        # so the wider-theta machinery from the original vision probe is
+        # reused unchanged.
+        env = TimedSpotVisionMotionEnv(seed=0)
+        obs = env.reset()
+        self.assertEqual(obs.shape[0], _SIM_VISION_OBS_DIM)
+        theta = _theta_vision_warm_start(seed=42)
+        self.assertEqual(theta.shape[0], _SIM_VISION_PARAM_COUNT)
+
+    def test_first_capture_has_no_prev_frame(self):
+        env = TimedSpotVisionMotionEnv(seed=0)
+        env.reset()
+        # reset() already performed exactly one capture; prev_frame must now
+        # be cached (for the NEXT capture's motion filter), never None again.
+        self.assertIsNotNone(env.prev_frame)
+
+    def test_static_decoy_alone_is_not_detected_once_motion_reference_exists(self):
+        env = TimedSpotVisionMotionEnv(seed=0)
+        env.reset()
+        # Force "no active enemy" (only the static decoy remains on-screen)
+        # and ensure a prev_frame is already cached from a real capture.
+        env.client._game.cleared = True
+        env.vision_tick_counter = 0
+        env._update_vision_state()  # first post-cleared capture: decoy vs. real prev_frame -> no motion
+        self.assertEqual(env.last_enemy_detected, 0.0)
+        self.assertEqual(env.last_enemy_dx, 0.0)
+        self.assertEqual(env.last_enemy_dy, 0.0)
+
+    def test_detection_is_held_between_captures(self):
+        env = TimedSpotVisionMotionEnv(seed=1)
+        env.reset()
+        theta = _theta_vision_warm_start(seed=1)
+        seen = []
+        for _ in range(_VISION_CAPTURE_EVERY_N_TICKS * 3):
+            env.step(theta)
+            seen.append(
+                (env.vision_tick_counter % _VISION_CAPTURE_EVERY_N_TICKS,
+                 env.last_enemy_dx, env.last_enemy_dy)
+            )
+        for i in range(1, len(seen)):
+            prev_phase, prev_dx, prev_dy = seen[i - 1]
+            phase, dx, dy = seen[i]
+            if phase != 1:  # not immediately-after-capture
+                self.assertEqual(dx, prev_dx)
+                self.assertEqual(dy, prev_dy)
+
+
+class ScheduleSearchSuite(unittest.TestCase):
+    """Regression checks for the open-loop schedule-search env
+    (TimedSpotScheduleEnv) -- see the module comment above
+    TimedSpotScheduleEnv for motivation."""
+
+    def test_schedule_action_at_decodes_threshold_and_tanh(self):
+        theta = np.zeros(_SCHEDULE_PARAM_COUNT).reshape(MAX_TICKS, 4)
+        theta[0] = [50.0, -50.0, 0.5, -0.5]
+        theta[1] = [-50.0, 50.0, 2.0, -2.0]
+        flat = theta.reshape(-1)
+
+        shoot0, peek0, ax0, ay0 = _schedule_action_at(flat, 0)
+        self.assertTrue(shoot0)
+        self.assertFalse(peek0)
+        self.assertAlmostEqual(ax0, np.tanh(0.5))
+        self.assertAlmostEqual(ay0, np.tanh(-0.5))
+
+        shoot1, peek1, ax1, ay1 = _schedule_action_at(flat, 1)
+        self.assertFalse(shoot1)
+        self.assertTrue(peek1)
+        self.assertAlmostEqual(ax1, np.tanh(2.0))
+        self.assertAlmostEqual(ay1, np.tanh(-2.0))
+
+    def test_schedule_action_at_clips_to_last_row_past_max_ticks(self):
+        theta = np.zeros(_SCHEDULE_PARAM_COUNT).reshape(MAX_TICKS, 4)
+        theta[MAX_TICKS - 1] = [10.0, 10.0, 1.0, 1.0]
+        flat = theta.reshape(-1)
+        result_at_end = _schedule_action_at(flat, MAX_TICKS - 1)
+        result_past_end = _schedule_action_at(flat, MAX_TICKS + 5)
+        self.assertEqual(result_at_end, result_past_end)
+
+    def test_param_count_and_warm_start_shape(self):
+        self.assertEqual(_SCHEDULE_PARAM_COUNT, MAX_TICKS * 4)
+        theta = _theta_schedule_warm_start(seed=42)
+        self.assertEqual(theta.shape[0], _SCHEDULE_PARAM_COUNT)
+
+    def test_action_is_indexed_by_current_tick_not_a_shared_observation(self):
+        # Give tick 0 and tick 1 very different aim biases; confirm the
+        # env's step() picks up the DIFFERENT row on the very next tick
+        # (proving action selection reads self.ticks, not a fixed/global
+        # decision computed once).
+        theta = np.zeros(_SCHEDULE_PARAM_COUNT).reshape(MAX_TICKS, 4)
+        theta[0] = [50.0, 50.0, _aim_bias_for(0.2), _aim_bias_for(0.3)]
+        theta[1] = [50.0, 50.0, _aim_bias_for(0.7), _aim_bias_for(0.8)]
+        flat = theta.reshape(-1)
+
+        env = TimedSpotScheduleEnv(seed=0)
+        env.reset()
+        _, _, info0 = env.step(flat)
+        _, _, info1 = env.step(flat)
+
+        self.assertAlmostEqual(info0["aim_x"], 0.2, places=2)
+        self.assertAlmostEqual(info0["aim_y"], 0.3, places=2)
+        self.assertAlmostEqual(info1["aim_x"], 0.7, places=2)
+        self.assertAlmostEqual(info1["aim_y"], 0.8, places=2)
+
+    def test_episode_completes_without_error(self):
+        env = TimedSpotScheduleAccuracyEnv(seed=0)
+        theta = _theta_schedule_warm_start(seed=0)
+        fitness, metrics = env.episode_fitness(theta)
+        self.assertTrue(np.isfinite(fitness))
+        self.assertIn("cleared", metrics)
+        self.assertIn("accuracy", metrics)
 
 
 class StagnationKickProbeSuite(unittest.TestCase):
