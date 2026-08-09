@@ -21,6 +21,7 @@ import numpy as np
 # Ensure the project root is on sys.path when running this file directly.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import vision
 from config import (
     ACT_DIM, AMMO_MAX_ROUNDS, CONTINUE_SCREEN_STALE_TICKS,
     CURSOR_X_MAX, CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN, HIDDEN, OBS_DIM,
@@ -223,6 +224,14 @@ class MockBridgeClient:
     def hud(self, lines):               pass
     def hud_clear(self):                pass
 
+    def get_screenshot(self) -> np.ndarray:
+        """Sim-only stand-in for the real BridgeClient.get_screenshot()
+        (planned Phase B of the vision plan). Delegates to the underlying
+        game's own synthetic frame renderer -- games that don't implement
+        one (e.g. the original SimulatedGame/FrozenGame) simply won't be
+        used by any vision-augmented env."""
+        return self._game.get_screenshot()
+
 
 # ---------------------------------------------------------------------------
 # Simulated environment
@@ -407,6 +416,34 @@ class TimedSpotGame:
         if addr == RAM.cursor_y:
             return int(round(CURSOR_Y_MIN + self._aim_y * (CURSOR_Y_MAX - CURSOR_Y_MIN)))
         return 0
+
+    # -- synthetic screenshot (vision-feature probe stand-in) -----------
+
+    _VISION_FRAME_SIZE = 64
+    _VISION_TARGET_COLOR = (220, 30, 30)
+    _VISION_BLOB_RADIUS = 3
+    _VISION_BG_COLOR = (20, 20, 20)
+
+    def get_screenshot(self) -> np.ndarray:
+        """Render a tiny synthetic RGB frame with a colored blob at the
+        currently-active spot's position, standing in for a real BizHawk
+        ``comm.socketServerScreenShot()`` capture. Used only by
+        vision-feature sim probes (see vision.py / TimedSpotVisionEnv) --
+        NOT ground truth leakage into the policy, since the policy only ever
+        sees whatever ``vision.detect_enemy()`` recovers from this frame,
+        the same as it would from a real capture."""
+        size = self._VISION_FRAME_SIZE
+        frame = np.empty((size, size, 3), dtype=np.uint8)
+        frame[:, :] = self._VISION_BG_COLOR
+        if self.cleared or self.life <= 0:
+            return frame  # no active target once the episode is over
+        tx, ty = self.active_spot()
+        cx, cy = int(tx * size), int(ty * size)
+        r = self._VISION_BLOB_RADIUS
+        y0, y1 = max(0, cy - r), min(size, cy + r + 1)
+        x0, x1 = max(0, cx - r), min(size, cx + r + 1)
+        frame[y0:y1, x0:x1] = self._VISION_TARGET_COLOR
+        return frame
 
 
 class TimedSpotBaselineEnv(SimulatedTimeCrisisEnv):
@@ -1448,6 +1485,263 @@ class TimedSpotShotPhaseEnv(TimedSpotBaselineEnv):
 
 
 # ---------------------------------------------------------------------------
+# Engineered vision feature (sim-only probe, Phase A of the vision plan --
+# see /memories/session/plan.md)
+# ---------------------------------------------------------------------------
+#
+# Adds 3 obs dims derived from a captured frame via vision.detect_enemy():
+#   (enemy_dx, enemy_dy, detected_flag)
+# where enemy_dx/dy are the nearest-detected-enemy position MINUS the
+# current cursor position (both normalized [0, 1] screen space), and
+# detected_flag distinguishes "on target" (dx=dy=0, detected) from "no
+# detection this capture" (dx=dy=0 fallback, NOT detected) -- otherwise
+# those two cases would look identical to the policy.
+#
+# Captured at a reduced cadence (every _VISION_CAPTURE_EVERY_N_TICKS ticks,
+# holding the last detection between captures) to mirror the planned live
+# capture-cadence design (screenshot capture has real overhead on real
+# BizHawk workers -- see the plan's Phase B).
+#
+# Like TimedSpotShotPhaseEnv, the warm-start zero-initializes the new input
+# columns so gen-0 behavior is identical to the baseline warm-start; this
+# isolates whatever the A/B probe finds to the effect of the extra
+# representational capacity/signal itself, not an early perturbation.
+
+_SIM_VISION_EXTRA_DIMS = 3
+_SIM_VISION_OBS_DIM = OBS_DIM + _SIM_VISION_EXTRA_DIMS
+_SIM_VISION_PARAM_COUNT = (
+    _SIM_VISION_OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM + ACT_DIM
+)
+_SIM_VISION_B2_OFFSET = _SIM_VISION_OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM
+_VISION_CAPTURE_EVERY_N_TICKS = 3
+
+
+def _theta_vision_warm_start(seed: int = 42) -> np.ndarray:
+    """Zero-init warm-start for the vision env (see module comment above);
+    mirrors _theta_shotphase_warm_start's construction exactly."""
+    baseline_theta = _theta_warm_start(seed)
+    i = 0
+    w1_base = baseline_theta[i:i + OBS_DIM * HIDDEN].reshape(OBS_DIM, HIDDEN)
+    i += OBS_DIM * HIDDEN
+    b1 = baseline_theta[i:i + HIDDEN]
+    i += HIDDEN
+    w2 = baseline_theta[i:i + HIDDEN * ACT_DIM]
+    i += HIDDEN * ACT_DIM
+    b2 = baseline_theta[i:i + ACT_DIM]
+
+    extra_rows = np.zeros((_SIM_VISION_EXTRA_DIMS, HIDDEN), dtype=w1_base.dtype)
+    w1_wide = np.concatenate([w1_base, extra_rows], axis=0)
+
+    theta = np.concatenate([w1_wide.reshape(-1), b1, w2, b2]).astype(baseline_theta.dtype)
+    assert theta.shape[0] == _SIM_VISION_PARAM_COUNT
+    return theta
+
+
+class TimedSpotVisionEnv(TimedSpotBaselineEnv):
+    """Sim-only env: timed 5-spot game + an engineered vision feature
+    (nearest-enemy offset from the cursor, detected via color-blob
+    detection on a captured frame) appended to the observation. See the
+    module comment above for motivation, cadence, and warm-start rationale.
+    Fitness formula and step() bookkeeping are IDENTICAL to
+    ``TimedSpotBaselineEnv``; only the observation stack differs, so any
+    A/B result vs. baseline is attributable to the vision feature alone.
+    """
+
+    def __init__(self, seed: int = 0):
+        super().__init__(seed=seed)
+        self.vision_tick_counter = 0
+        self.last_enemy_dx = 0.0
+        self.last_enemy_dy = 0.0
+        self.last_enemy_detected = 0.0
+
+    def reset(self) -> np.ndarray:
+        obs = super().reset()
+        self.vision_tick_counter = 0
+        self.last_enemy_dx = 0.0
+        self.last_enemy_dy = 0.0
+        self.last_enemy_detected = 0.0
+        self._update_vision_state()
+        return self._append_vision(obs)
+
+    def _update_vision_state(self):
+        """Capture + detect only every _VISION_CAPTURE_EVERY_N_TICKS ticks;
+        hold the previous result on the ticks in between."""
+        if self.vision_tick_counter % _VISION_CAPTURE_EVERY_N_TICKS == 0:
+            frame = self.client.get_screenshot()
+            detection = vision.detect_enemy(frame)
+            cursor_x_norm = normalize_cursor(
+                self.prev.get("cursor_x", CURSOR_X_MIN), CURSOR_X_MIN, CURSOR_X_MAX)
+            cursor_y_norm = normalize_cursor(
+                self.prev.get("cursor_y", CURSOR_Y_MIN), CURSOR_Y_MIN, CURSOR_Y_MAX)
+            if detection is not None:
+                ex, ey = detection
+                self.last_enemy_dx = float(np.clip(ex - cursor_x_norm, -1.0, 1.0))
+                self.last_enemy_dy = float(np.clip(ey - cursor_y_norm, -1.0, 1.0))
+                self.last_enemy_detected = 1.0
+            else:
+                self.last_enemy_dx = 0.0
+                self.last_enemy_dy = 0.0
+                self.last_enemy_detected = 0.0
+        self.vision_tick_counter += 1
+
+    def _append_vision(self, base_obs: np.ndarray) -> np.ndarray:
+        extra = np.array(
+            [self.last_enemy_dx, self.last_enemy_dy, self.last_enemy_detected],
+            dtype=np.float32,
+        )
+        return np.concatenate([base_obs, extra], dtype=np.float32)
+
+    def step(self, theta: np.ndarray):
+        self._update_vision_state()
+        peek_phase = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if self.prev_peek else -1.0)
+        base_obs = self._build_obs(
+            self.prev, 0, 0, peek_phase, self.ammo_left,
+            self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
+        )
+        aug_obs = self._append_vision(base_obs)
+        shoot, peek, aim_x_bias, aim_y_bias = _act_with_obs_dim(
+            theta, aug_obs, _SIM_VISION_OBS_DIM,
+        )
+        self.prev_aim_x_bias = float(aim_x_bias)
+        self.prev_aim_y_bias = float(aim_y_bias)
+
+        if self.ammo_left == 0:
+            peek = False
+
+        if self.peek_lock > 0:
+            peek = self.peek_locked_value
+            self.peek_lock -= 1
+        elif peek != self.prev_peek:
+            self.peek_lock = PEEK_TRAVERSE_TICKS - 1
+            self.peek_locked_value = peek
+
+        shoot_allowed = peek and self.prev_peek and self.peek_ticks >= PEEK_TRAVERSE_TICKS
+        aim_x = min(1.0, max(0.0, 0.5 + float(aim_x_bias)))
+        aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
+
+        total_fired = total_hit = total_life_loss = 0
+        cleared_guess = dead_guess = timed_out_guess = False
+        continue_screen_guess = False
+        tick_start_core = core_watchdog_snapshot(self.prev)
+        timer_at_tick_start = self.prev["timer"]
+
+        for f in range(FRAME_SKIP):
+            self.client.set_input(
+                shoot=bool(shoot and shoot_allowed and f < 2),
+                peek=peek,
+                aim_x=aim_x,
+                aim_y=aim_y,
+            )
+            pre = self.prev
+            self.client.step_frames(1)
+            post = self._read_core()
+
+            total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
+            frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
+            total_hit += frame_hits
+            if frame_hits > 0:
+                self.hit_delta = 0
+            else:
+                self.hit_delta += 1
+            life_d       = u16_delta(post["life"], pre["life"])
+            if life_d < 0:
+                total_life_loss += -life_d
+
+            lethal_wrap = (
+                pre["life"] > 0
+                and life_d < 0
+                and post["life"] > pre["life"]
+                and post["life"] >= 65000
+            )
+            if post["life"] == 0 or lethal_wrap:
+                dead_guess = True
+            if u16_delta(post["timer"], self.start_timer) > 100:
+                cleared_guess = True
+            timer_step = u16_delta(post["timer"], pre["timer"])
+            if post["timer"] <= TIMEOUT_TIMER_THRESHOLD or (
+                timer_step < 0 and pre["timer"] + timer_step <= TIMEOUT_TIMER_THRESHOLD
+            ):
+                timed_out_guess = True
+
+            self.prev = post
+            if dead_guess or cleared_guess or timed_out_guess:
+                break
+
+        if (
+            not dead_guess
+            and not cleared_guess
+            and not timed_out_guess
+            and core_watchdog_snapshot(self.prev) == tick_start_core
+        ):
+            self.stale_core_ticks += 1
+        else:
+            self.stale_core_ticks = 0
+        if self.stale_core_ticks >= CONTINUE_SCREEN_STALE_TICKS:
+            timed_out_guess = True
+            continue_screen_guess = True
+
+        ammo_before_tick = self.ammo_left
+        dry_fire = bool(shoot_allowed and ammo_before_tick == 0)
+        self.ammo_left = max(0, self.ammo_left - total_fired)
+        ending_peek = (peek != self.prev_peek) and not peek
+        reload_correct = False
+        if ending_peek:
+            reload_correct = self.ammo_left == 0
+            self.ammo_left = AMMO_MAX_ROUNDS
+
+        self.ticks += 1
+
+        phase = self.phase_infer.infer(TickSignals(
+            shots_fired_delta=total_fired,
+            shots_hit_delta=total_hit,
+            life_delta=-total_life_loss,
+            timer_delta=u16_delta(self.prev["timer"], timer_at_tick_start),
+            cleared_guess=cleared_guess,
+            dead_guess=dead_guess or timed_out_guess,
+            can_fire_probe=(total_fired > 0),
+        ))
+
+        last_hit = 1 if total_hit > 0 else 0
+        last_miss = 1 if (total_fired > 0 and total_hit == 0) else 0
+        if peek == self.prev_peek:
+            self.peek_ticks = min(self.peek_ticks + 1, PEEK_TRAVERSE_TICKS)
+        else:
+            self.peek_ticks = 1
+        self.prev_peek = peek
+        peek_phase_next = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if peek else -1.0)
+        base_obs_next = self._build_obs(
+            self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left,
+            self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
+        )
+        obs = self._append_vision(base_obs_next)
+
+        done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
+        info = {
+            "shots_fired_delta": total_fired,
+            "shots_hit_delta": total_hit,
+            "life_loss": total_life_loss,
+            "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
+            "dead": dead_guess,
+            "timed_out": timed_out_guess,
+            "continue_screen": continue_screen_guess,
+            "peek": bool(peek),
+            "phase": phase.name,
+            "dry_fire": dry_fire,
+            "reload_correct": reload_correct,
+            "ammo_left": self.ammo_left,
+            "hit_delta": int(self.hit_delta),
+            "aim_x": float(aim_x),
+            "aim_y": float(aim_y),
+            "enemy_dx": float(self.last_enemy_dx),
+            "enemy_dy": float(self.last_enemy_dy),
+            "enemy_detected": float(self.last_enemy_detected),
+        }
+        return obs, done, info
+
+
+# ---------------------------------------------------------------------------
 # Accuracy-shaped fitness (sim-only experiment, not in env_timecrisis.py)
 # ---------------------------------------------------------------------------
 
@@ -1493,6 +1787,15 @@ class TimedSpotShotPhaseAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotShotPha
     with the accuracy-shaped fitness on top -- follow-up variant to the
     one-hot arm above, using only 2 extra obs dims + zero-init on the new
     input columns. See ``TimedSpotShotPhaseEnv`` for motivation."""
+
+
+class TimedSpotVisionAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotVisionEnv):
+    """Vision-feature observation stack (nearest-enemy cursor-relative
+    offset, engineered via vision.detect_enemy() on a captured frame) on
+    the timed 5-spot task, with the accuracy-shaped fitness on top --
+    direct A/B counterpart to ``TimedSpotBaselineAccuracyEnv`` where only
+    the observation stack differs. See ``TimedSpotVisionEnv`` for
+    motivation."""
 
 
 def run_timed_spot_probe(env_cls, theta_init_fn, param_count: int,
@@ -2130,6 +2433,182 @@ class ShotPhaseObservationSuite(unittest.TestCase):
         self.assertEqual(_SIM_SHOTPHASE_PARAM_COUNT, expected)
         theta = _theta_shotphase_warm_start(seed=42)
         self.assertEqual(theta.shape[0], _SIM_SHOTPHASE_PARAM_COUNT)
+
+
+def _make_test_bmp(pixels_rgb: np.ndarray) -> bytes:
+    """Hand-roll a minimal uncompressed 24bpp BMP byte string from an
+    HxWx3 uint8 RGB array, for round-trip testing vision.decode_bmp()
+    without any imaging library dependency (matches this repo's numpy-only
+    convention)."""
+    import struct as _struct
+
+    h, w, _ = pixels_rgb.shape
+    row_bytes = ((w * 24 + 31) // 32) * 4
+    pixel_data = bytearray(row_bytes * h)
+    # BMP is stored bottom-up, BGR per pixel.
+    for y in range(h):
+        src_row = pixels_rgb[h - 1 - y]
+        for x in range(w):
+            r, g, b = (int(v) for v in src_row[x])
+            off = y * row_bytes + x * 3
+            pixel_data[off:off + 3] = bytes([b, g, r])
+
+    pixel_offset = 54
+    file_size = pixel_offset + len(pixel_data)
+    file_header = b"BM" + _struct.pack("<IHHI", file_size, 0, 0, pixel_offset)
+    info_header = _struct.pack(
+        "<IiiHHIIiiII", 40, w, h, 1, 24, 0, len(pixel_data), 2835, 2835, 0, 0
+    )
+    return file_header + info_header + bytes(pixel_data)
+
+
+class VisionModuleSuite(unittest.TestCase):
+    """Regression checks for vision.py's decode_bmp()/detect_enemy(), in
+    isolation from any sim env (Phase A step 2 of the vision plan)."""
+
+    def test_detect_enemy_finds_centroid_of_a_color_blob(self):
+        frame = np.zeros((64, 64, 3), dtype=np.uint8)
+        frame[:, :] = (20, 20, 20)
+        frame[10:14, 30:34] = (220, 30, 30)  # 4x4 blob near (32, 12)
+
+        result = vision.detect_enemy(frame)
+        self.assertIsNotNone(result)
+        cx, cy = result
+        self.assertAlmostEqual(cx, 32.0 / 64.0, delta=0.03)
+        self.assertAlmostEqual(cy, 12.0 / 64.0, delta=0.03)
+
+    def test_detect_enemy_returns_none_when_no_match(self):
+        frame = np.full((32, 32, 3), 20, dtype=np.uint8)
+        self.assertIsNone(vision.detect_enemy(frame))
+
+    def test_detect_enemy_ignores_out_of_tolerance_colors(self):
+        frame = np.full((32, 32, 3), 20, dtype=np.uint8)
+        frame[10:14, 10:14] = (0, 0, 220)  # blue, far from the default red target
+        self.assertIsNone(vision.detect_enemy(frame))
+
+    def test_decode_bmp_round_trips_a_synthetic_frame(self):
+        rng = np.random.default_rng(0)
+        original = rng.integers(0, 255, size=(6, 8, 3), dtype=np.uint8)
+        bmp_bytes = _make_test_bmp(original)
+
+        decoded = vision.decode_bmp(bmp_bytes)
+
+        self.assertEqual(decoded.shape, original.shape)
+        np.testing.assert_array_equal(decoded, original)
+
+    def test_decode_bmp_rejects_non_bmp_bytes(self):
+        with self.assertRaises(ValueError):
+            vision.decode_bmp(b"not a bmp file at all, way too short")
+
+    def test_decode_bmp_then_detect_enemy_end_to_end(self):
+        frame = np.full((40, 40, 3), 20, dtype=np.uint8)
+        frame[20:24, 5:9] = (220, 30, 30)
+        bmp_bytes = _make_test_bmp(frame)
+
+        decoded = vision.decode_bmp(bmp_bytes)
+        result = vision.detect_enemy(decoded)
+
+        self.assertIsNotNone(result)
+        cx, cy = result
+        self.assertAlmostEqual(cx, 7.0 / 40.0, delta=0.03)
+        self.assertAlmostEqual(cy, 22.0 / 40.0, delta=0.03)
+
+
+class VisionFeatureSuite(unittest.TestCase):
+    """Regression checks for the vision-feature obs env (Phase A of the
+    vision plan -- see /memories/session/plan.md)."""
+
+    def test_reset_obs_has_three_extra_vision_dims(self):
+        env = TimedSpotVisionEnv(seed=0)
+        obs = env.reset()
+        self.assertEqual(obs.shape[0], _SIM_VISION_OBS_DIM)
+
+    def test_detection_recovers_active_spot_offset_within_tolerance(self):
+        # Pin the cursor at the center and confirm the detected enemy
+        # offset (dx, dy) matches (active_spot - 0.5, 0.5) within a coarse
+        # tolerance dictated by the 64x64 synthetic frame's discretization.
+        env = TimedSpotVisionEnv(seed=0)
+        env.reset()
+        # Cursor is centered (0.5, 0.5) by default at reset (SimulatedGame's
+        # own default _aim_x/_aim_y), and _update_vision_state() already ran
+        # once during reset() (tick_counter starts at 0), so the detection
+        # cached right now should already reflect the active spot's offset.
+        game = env.client._game
+        tx, ty = game.active_spot()
+        expected_dx = tx - 0.5
+        expected_dy = ty - 0.5
+
+        self.assertAlmostEqual(env.last_enemy_dx, expected_dx, delta=0.05)
+        self.assertAlmostEqual(env.last_enemy_dy, expected_dy, delta=0.05)
+        self.assertEqual(env.last_enemy_detected, 1.0)
+
+    def test_detection_is_held_between_captures(self):
+        env = TimedSpotVisionEnv(seed=1)
+        env.reset()
+        theta = np.zeros(_SIM_VISION_PARAM_COUNT)
+        theta[_SIM_VISION_B2_OFFSET + 0] = 50.0  # shoot logit
+        theta[_SIM_VISION_B2_OFFSET + 1] = 50.0  # peek logit
+        theta[_SIM_VISION_B2_OFFSET + 2] = _aim_bias_for(0.5)
+        theta[_SIM_VISION_B2_OFFSET + 3] = _aim_bias_for(0.5)
+        seen = []
+        for _ in range(_VISION_CAPTURE_EVERY_N_TICKS * 3):
+            env.step(theta)
+            seen.append(
+                (env.vision_tick_counter % _VISION_CAPTURE_EVERY_N_TICKS,
+                 env.last_enemy_dx, env.last_enemy_dy)
+            )
+        # On every tick that ISN'T a capture tick, the cached values must be
+        # identical to the immediately preceding tick's (held, not re-detected).
+        for i in range(1, len(seen)):
+            prev_phase, prev_dx, prev_dy = seen[i - 1]
+            phase, dx, dy = seen[i]
+            if phase != 1:  # not immediately-after-capture
+                self.assertEqual(dx, prev_dx)
+                self.assertEqual(dy, prev_dy)
+
+    def test_no_detection_zeroes_offset_and_clears_flag(self):
+        env = TimedSpotVisionEnv(seed=0)
+        env.reset()
+        # Force the underlying game's frame to render nothing detectable by
+        # marking the episode "cleared" (get_screenshot returns a blank
+        # background once cleared/dead -- see TimedSpotGame.get_screenshot).
+        env.client._game.cleared = True
+        env.vision_tick_counter = 0  # force the next _update_vision_state to capture
+        env._update_vision_state()
+        self.assertEqual(env.last_enemy_detected, 0.0)
+        self.assertEqual(env.last_enemy_dx, 0.0)
+        self.assertEqual(env.last_enemy_dy, 0.0)
+
+    def test_param_count_matches_wider_obs_dim(self):
+        expected = (
+            _SIM_VISION_OBS_DIM * HIDDEN + HIDDEN
+            + HIDDEN * ACT_DIM + ACT_DIM
+        )
+        self.assertEqual(_SIM_VISION_PARAM_COUNT, expected)
+        theta = _theta_vision_warm_start(seed=42)
+        self.assertEqual(theta.shape[0], _SIM_VISION_PARAM_COUNT)
+
+    def test_warm_start_matches_baseline_behavior_exactly_at_gen0(self):
+        # Same zero-init check as ShotPhaseObservationSuite: at gen 0 the
+        # vision env's warm-start theta must produce IDENTICAL
+        # (shoot, peek, aim_x, aim_y) as the baseline warm-start theta on
+        # the same base obs (with the 3 vision dims appended).
+        rng = np.random.default_rng(0)
+        obs_base = rng.normal(0.0, 1.0, OBS_DIM).astype(np.float32)
+        obs_vision = np.concatenate(
+            [obs_base, np.array([0.1, -0.2, 1.0], dtype=np.float32)]
+        )
+
+        theta_base = _theta_warm_start(seed=42)
+        theta_vision = _theta_vision_warm_start(seed=42)
+
+        out_base = _act_with_obs_dim(theta_base, obs_base, OBS_DIM)
+        out_vision = _act_with_obs_dim(theta_vision, obs_vision, _SIM_VISION_OBS_DIM)
+
+        self.assertEqual(out_base[0], out_vision[0])  # shoot
+        self.assertEqual(out_base[1], out_vision[1])  # peek
+        self.assertAlmostEqual(out_base[2], out_vision[2], places=6)  # aim_x
+        self.assertAlmostEqual(out_base[3], out_vision[3], places=6)  # aim_y
 
 
 class StagnationKickProbeSuite(unittest.TestCase):
