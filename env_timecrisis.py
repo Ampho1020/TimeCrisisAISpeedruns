@@ -21,6 +21,14 @@ from config import (
 from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import act, act_schedule, act_vision_schedule
 
+# Imported at module level so the vision_schedule dodge override can call it
+# without an extra import inside the hot per-tick path.
+try:
+    from detector import blob_is_grey as _blob_is_grey
+except ImportError:  # pragma: no cover -- only missing if cv2 not installed
+    def _blob_is_grey(mean_rgb, **_):  # type: ignore[misc]
+        return True  # conservative: always dodge if detector unavailable
+
 
 def u16_delta(new_v: int, old_v: int) -> int:
     """Signed delta between two u16 reads, wrap-around safe."""
@@ -240,8 +248,6 @@ class TimeCrisisEnv:
             self.detector = None
         self.last_detections: list | None = None
 
-    # -- lifecycle ------------------------------------------------------
-
     def connect(self):
         self.client.connect()
 
@@ -394,19 +400,24 @@ class TimeCrisisEnv:
             shoot, peek, aim_x_bias, aim_y_bias = act_vision_schedule(
                 theta, self.ticks, self.last_detections or [],
             )
-            # Hard dodge: if a projectile is visible in the centre band while
-            # the agent is currently exposed, force duck regardless of what
-            # the schedule says.  The schedule+vision_gain path still learns
-            # the timing in parallel; this override only fires on ticks where
-            # a real projectile is actually detected, so it's zero-cost when
-            # the screen is clear.  See config.VISION_PROJECTILE_DODGE_*.
+            # Hard dodge: if a GREY projectile (missile) is visible in the
+            # centre band while the agent is exposed, force duck.
+            # Grey = the shoulder-launched missile (fully grey, always hits).
+            # Coloured = bullets (mostly miss) or grenades (should be shot
+            # mid-air, not dodged).  The grey check prevents the old behaviour
+            # of forcing the agent into cover on every stray bullet.
+            # If mean_rgb is None (no colour info) we duck conservatively.
             if VISION_PROJECTILE_DODGE_ENABLED and peek and self.last_detections:
                 _band_lo = 0.5 - VISION_PROJECTILE_DODGE_CENTER_BAND / 2
                 _band_hi = 0.5 + VISION_PROJECTILE_DODGE_CENTER_BAND / 2
                 for _det in self.last_detections:
-                    if (int(_det.class_id) == 2  # EnemyClass.PROJECTILE
-                            and float(_det.confidence) >= VISION_PROJECTILE_DODGE_MIN_CONF
-                            and _band_lo <= float(_det.cx_norm) <= _band_hi):
+                    if (
+                        int(_det.class_id) == 2  # EnemyClass.PROJECTILE
+                        and float(_det.confidence) >= VISION_PROJECTILE_DODGE_MIN_CONF
+                        and _band_lo <= float(_det.cx_norm) <= _band_hi
+                        and (_det.mean_rgb is None
+                             or _blob_is_grey(_det.mean_rgb))
+                    ):
                         peek = False
                         break
         else:

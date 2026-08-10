@@ -133,6 +133,15 @@ VISION_ONNX_MODEL_PATH = ""
 #   as "aimed at the player".  Only projectiles with cx_norm in
 #   [0.5 - band/2, 0.5 + band/2] trigger the duck.  Projectiles near the
 #   screen edge are likely already past the player position.
+#
+# GREY-ONLY behaviour (refined 2026-08-10 after enemy analysis):
+#   The shoulder-launched missile is FULLY GREY and always hits if it lands.
+#   Random bullets are coloured and mostly miss the player.
+#   Grenades are coloured and should be SHOT mid-air, not dodged.
+#   The dodge override therefore only fires when detector.blob_is_grey() is
+#   True for the detected PROJECTILE blob -- so coloured projectiles never
+#   force the agent into cover unnecessarily.  If mean_rgb is None (ONNX
+#   backend has no colour info) the override conservatively ducks anyway.
 VISION_PROJECTILE_DODGE_ENABLED     = True
 VISION_PROJECTILE_DODGE_MIN_CONF    = 0.4
 VISION_PROJECTILE_DODGE_CENTER_BAND = 0.6

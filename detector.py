@@ -113,6 +113,13 @@ class Detection:
     confidence: float
     cx_norm: float
     cy_norm: float
+    # Mean RGB colour of the blob region sampled from the original (pre-upscale)
+    # frame, as a (R, G, B) tuple of floats in [0, 255].  Populated by
+    # ClassicalDetector; None from ONNXDetector (which has no original-frame
+    # reference after its internal resize).  Used by the projectile-dodge
+    # override in env_timecrisis to distinguish grey missiles from coloured
+    # bullets/grenades, and for inspect_vision.py annotation overlays.
+    mean_rgb: tuple | None = None
 
     @property
     def area(self) -> int:
@@ -200,6 +207,74 @@ _PRE_BLUR_KERNEL = 5
 #   before comparing against the thresholds above, so the tuning guide still
 #   applies in original-resolution pixels.  Set to 1 to disable.
 _UPSCALE_FACTOR = 2
+
+
+# ---------------------------------------------------------------------------
+# Threat-colour scoring for ENEMY confidence (no-palette / motion-only
+# ClassicalDetector uses area for classification; these colour weights let the
+# aim blend naturally prioritise the most dangerous visible enemy type without
+# changing the geometry-based class assignment.)
+# ---------------------------------------------------------------------------
+#
+# Approximate mean-RGB values for the six enemy uniform types in Time Crisis
+# Area 1, ordered highest-threat first (user-provided 2026-08-10).  All
+# values are PS1 dithered-palette estimates -- be generous with tolerances.
+# Tune against real captures via ``python inspect_vision.py``.
+#
+# Entry format: (threat_score [0-1], (R, G, B), per_channel_tolerance)
+_ENEMY_THREAT_COLORS: tuple = (
+    (1.00, (220, 200,  50), 50),  # Yellow  -- crowbar guys & grenade thrower
+    (1.00, (205,  45,  45), 45),  # Red     -- precise shooters
+    (0.85, (170, 110,  65), 50),  # Orange/rust -- claw/charge guys
+    (0.55, (145, 105,  75), 45),  # Brown jacket -- semi-precise
+    (0.20, ( 65, 105, 185), 50),  # Blue    -- inaccurate, lowest priority
+)
+# Minimum confidence multiplier for blobs whose colour doesn't match any entry.
+# Keeps unrecognised-colour enemies detectable (important for new areas / skins)
+# while ensuring known high-threat uniforms always outrank them.
+_ENEMY_COLOR_FLOOR = 0.30
+
+
+def _threat_color_score(mean_rgb: np.ndarray) -> float:
+    """Return [0, 1] threat score for an ENEMY blob based on uniform colour.
+
+    Scores each entry in ``_ENEMY_THREAT_COLORS`` with a smooth L1 match
+    (1.0 at exact colour, 0.0 at the per-channel tolerance boundary) and
+    returns the best score scaled by that entry's threat level.  Falls back
+    to ``_ENEMY_COLOR_FLOOR`` when no entry matches, so blobs of completely
+    unknown colour are still detectable -- just at lower priority.
+    """
+    r, g, b = float(mean_rgb[0]), float(mean_rgb[1]), float(mean_rgb[2])
+    best = 0.0
+    for score, (cr, cg, cb), tol in _ENEMY_THREAT_COLORS:
+        if abs(r - cr) <= tol and abs(g - cg) <= tol and abs(b - cb) <= tol:
+            dist = (abs(r - cr) + abs(g - cg) + abs(b - cb)) / max(1.0, tol * 3.0)
+            best = max(best, score * max(0.0, 1.0 - dist))
+    return best if best > 0.0 else _ENEMY_COLOR_FLOOR
+
+
+def blob_is_grey(
+    mean_rgb: tuple | np.ndarray,
+    lo: int = 70,
+    hi: int = 200,
+    max_chroma: int = 35,
+) -> bool:
+    """Return True if ``mean_rgb`` is achromatic (grey / desaturated).
+
+    Used by the projectile-dodge override in ``env_timecrisis`` to distinguish
+    the shoulder-launched missile (fully grey, always hits if not dodged) from
+    coloured projectiles (bullets rarely hit; grenades should be shot mid-air).
+
+    Public so ``env_timecrisis`` and ``inspect_vision`` can import it directly.
+    """
+    r, g, b = float(mean_rgb[0]), float(mean_rgb[1]), float(mean_rgb[2])
+    mid = (r + g + b) / 3.0
+    return (
+        lo <= mid <= hi
+        and abs(r - g) < max_chroma
+        and abs(g - b) < max_chroma
+        and abs(r - b) < max_chroma
+    )
 
 
 class ClassicalDetector:
@@ -341,7 +416,36 @@ class ClassicalDetector:
             if result is None:
                 continue
             class_id, confidence = result
-            # Centroid also scaled back to original-frame space.
+
+            # Sample mean colour from the ORIGINAL (pre-upscale/pre-blur) frame
+            # using the bbox in original-pixel space.  The blurred/upscaled
+            # version used for MOG2 would give washed-out averages; sampling
+            # from the raw PS1 output gives the truest uniform colour.
+            region = frame[
+                max(0, by) : min(h, by + bh),
+                max(0, bx) : min(w, bx + bw),
+                :3,
+            ]
+            if region.size >= 3:
+                mr = region.reshape(-1, 3).mean(axis=0)
+                mean_rgb_val: tuple | None = (
+                    float(mr[0]), float(mr[1]), float(mr[2])
+                )
+            else:
+                mean_rgb_val = None
+
+            # For ENEMY blobs: multiply area-confidence by the colour threat
+            # score so the aim blend naturally targets the most dangerous
+            # visible enemy (red/yellow > brown jacket > blue).  Unknown
+            # colours get _ENEMY_COLOR_FLOOR so they're never suppressed
+            # entirely -- just ranked below identified high-threat uniforms.
+            if class_id == int(EnemyClass.ENEMY) and mean_rgb_val is not None:
+                color_score = _threat_color_score(
+                    np.array(mean_rgb_val, dtype=np.float32)
+                )
+                confidence = float(min(1.0, confidence * color_score))
+
+            # Centroid scaled back to original-frame space.
             cx = float(centroids[i, 0]) / scale
             cy = float(centroids[i, 1]) / scale
             detections.append(
@@ -354,6 +458,7 @@ class ClassicalDetector:
                     confidence=confidence,
                     cx_norm=cx / w,
                     cy_norm=cy / h,
+                    mean_rgb=mean_rgb_val,
                 )
             )
         return detections

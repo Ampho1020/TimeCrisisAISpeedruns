@@ -24,6 +24,10 @@ from detector import (
     _MAX_BLOB_ASPECT,
     _PRE_BLUR_KERNEL,
     _UPSCALE_FACTOR,
+    _ENEMY_COLOR_FLOOR,
+    _ENEMY_THREAT_COLORS,
+    _threat_color_score,
+    blob_is_grey,
     build_detector,
 )
 
@@ -200,6 +204,45 @@ class ClassicalDetectorSuite(unittest.TestCase):
             _PRE_BLUR_KERNEL <= 1 or _PRE_BLUR_KERNEL % 2 == 1,
             msg=f"_PRE_BLUR_KERNEL must be <=1 or odd, got {_PRE_BLUR_KERNEL}",
         )
+        # Colour scoring constants.
+        self.assertGreater(len(_ENEMY_THREAT_COLORS), 0)
+        self.assertGreater(_ENEMY_COLOR_FLOOR, 0.0)
+        self.assertLess(_ENEMY_COLOR_FLOOR, 1.0)
+
+    def test_enemy_blob_gets_mean_rgb_populated(self):
+        """After detection, enemy blobs must have mean_rgb set (not None)."""
+        det = ClassicalDetector()
+        h, w = 96, 128
+        bg = np.zeros((h, w, 3), dtype=np.uint8)
+        _warmup(det, bg)
+        frame = bg.copy()
+        frame[20:36, 30:46] = (200, 50, 50)  # red-ish blob, enemy-sized
+        dets = det.detect(frame)
+        enemy = [d for d in dets if d.class_id == int(EnemyClass.ENEMY)]
+        self.assertGreater(len(enemy), 0)
+        for d in enemy:
+            self.assertIsNotNone(d.mean_rgb,
+                                 msg="ENEMY detections must have mean_rgb set")
+            r, g, b = d.mean_rgb
+            self.assertGreater(r, 0)  # red channel should be dominant
+
+    def test_high_threat_colour_boosts_confidence_above_unknown_colour(self):
+        """A red enemy blob should receive higher confidence (after colour
+        scaling) than a same-size blob of a completely unknown colour."""
+        # Red is in _ENEMY_THREAT_COLORS with threat_score=1.0.
+        red_score = _threat_color_score(np.array([205.0, 45.0, 45.0]))
+        # Pure green is not in the table -- should fall back to _ENEMY_COLOR_FLOOR.
+        green_score = _threat_color_score(np.array([30.0, 200.0, 30.0]))
+        self.assertGreater(red_score, green_score,
+                           msg="Red (high-threat) must outscore unknown green")
+        self.assertAlmostEqual(green_score, _ENEMY_COLOR_FLOOR, places=3)
+
+    def test_blob_is_grey_accepts_grey_and_rejects_coloured(self):
+        self.assertTrue(blob_is_grey((130, 135, 128)))   # grey missile
+        self.assertTrue(blob_is_grey((100, 100, 100)))   # neutral grey
+        self.assertFalse(blob_is_grey((220, 50, 50)))    # red enemy
+        self.assertFalse(blob_is_grey((50, 80, 200)))    # blue enemy
+        self.assertFalse(blob_is_grey((220, 200, 50)))   # yellow enemy
 
     def test_wide_text_banner_blob_is_rejected(self):
         """A blob with w/h > _MAX_BLOB_ASPECT must be discarded even if its
