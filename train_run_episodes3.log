@@ -197,3 +197,7 @@
   [gen 013] eval  63/ 90 ( 70.0%) in   99.3s
   [gen 013] eval  72/ 90 ( 80.0%) in  110.9s
   [gen 013] eval  81/ 90 ( 90.0%) in  154.7s
+  [gen 013] eval  90/ 90 (100.0%) in  176.5s
+
+=== gen 013 | best  2567.55 | mean   517.62 | std  744.43 | spread  2787.54 | clear 20.0% | timeout 42.2% | t -794.0 | dmg    0 | acc 66.7% | ctime   9.1 | flips   6.1 | hold   7.6 | aimstd (0.136,0.147) | aimspan (0.651,0.655) | aimdx 0.156 | hitd 93.5 | lanes L/M/R 11%/77%/11% ===
+
