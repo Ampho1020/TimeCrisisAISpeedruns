@@ -50,17 +50,29 @@
 --   load <slot> / save <slot>                     -> OK
 --   frame                                         -> OK <framecount>
 --   hud <line1|line2|...> / hud_clear             -> OK
---   screenshot                                    -> (raw BMP payload framed as "{N} <bmp_bytes>", NO trailing OK)
+--   screenshot                                    -> (image payload framed as "{N} <img_bytes>", NO trailing OK)
 --
 -- SCREENSHOT NOTE
---   comm.socketServerScreenShot() writes an uncompressed BMP (32bpp XRGB,
---   BI_RGB) straight down the socket using BizHawk's standard length-prefix
---   wire format (verified against BizHawk 2.11.1 SocketServer.cs
---   PrefixWithLength) -- i.e. "{byte_count} <bmp_bytes>", no newline, no
---   framing changes. Because that IS the reply to "screenshot", the command
---   handler returns nil below so the dispatcher does NOT append its usual
---   "OK\n" and the client's BridgeClient.get_screenshot() sees exactly one
---   framed message (the BMP) per request.
+--   comm.socketServerScreenShot() writes the current framebuffer straight
+--   down the socket using BizHawk's standard length-prefix wire format
+--   (verified against BizHawk 2.11.1 SocketServer.cs PrefixWithLength) --
+--   i.e. "{byte_count} <img_bytes>", no newline, no framing changes.
+--   Because that IS the reply to "screenshot", the command handler returns
+--   nil below so the dispatcher does NOT append its usual "OK\n" and the
+--   client's BridgeClient.get_screenshot() sees exactly one framed message
+--   (the image) per request.
+--
+--   Note on IMAGE format (2026-08-10, found by real-BizHawk test):
+--   BizHawk's NetworkingTakeScreenshot callback in MainForm.cs is
+--       (byte[]) new ImageConverter().ConvertTo(
+--                    MakeScreenshotImage().ToSysdrawingBitmap(),
+--                    typeof(byte[]))
+--   which serialises Bitmap via Bitmap.Save(stream, RawFormat). A freshly-
+--   constructed Format32bppArgb bitmap's RawFormat is ImageFormat.MemoryBmp,
+--   which .NET/Mono treats as "unspecified" and quietly falls back to PNG
+--   encoding, NOT raw BMP. The Python client therefore decodes with
+--   cv2.imdecode (format-agnostic) rather than a BMP-specific parser --
+--   see bridge_client._decode_image_bytes.
 --
 -- NOTES
 --   * Aim X/Y are now written to the Guncon axes via joypad.setanalog, so the
@@ -230,12 +242,12 @@ local function handle(line)
     return "OK\n"
 
   elseif cmd == "screenshot" then
-    -- comm.socketServerScreenShot() sends the framed BMP directly on the
+    -- comm.socketServerScreenShot() sends the framed image directly on the
     -- socket (see SCREENSHOT NOTE at the top of this file) and returns a
     -- Lua-side status string that we DISCARD -- Python doesn't see it. We
     -- return nil so the dispatcher below skips its usual OK-reply send;
     -- otherwise Python would have to read two framed messages per request
-    -- (BMP then OK) instead of one.
+    -- (image then OK) instead of one.
     local _ = comm.socketServerScreenShot()
     return nil
 
@@ -333,7 +345,7 @@ while true do
         comm.socketServerSend("ERR " .. tostring(resp) .. "\n")
       elseif resp ~= nil then
         -- resp == nil means the handler already spoke on the wire itself
-        -- (e.g. the "screenshot" command, which sent a framed BMP via
+        -- (e.g. the "screenshot" command, which sent a framed image via
         -- comm.socketServerScreenShot()). Skip our default OK-reply send in
         -- that case so exactly one framed message per request goes out.
         comm.socketServerSend(resp)

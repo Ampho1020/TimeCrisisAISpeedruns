@@ -192,6 +192,55 @@ class BridgeClientTests(unittest.TestCase):
         self.assertIsNone(fake.error)
         self.assertEqual(fake.commands, ["screenshot", "frame"])
 
+    def test_get_screenshot_accepts_png_payload_from_real_bizhawk(self):
+        """BizHawk's ``NetworkingTakeScreenshot`` callback in MainForm.cs
+        actually returns PNG-encoded bytes, not raw BMP -- see the IMAGE
+        FORMAT NOTE on ``BridgeClient.get_screenshot``. The BMP-only
+        pre-2026-08-10 decoder blew up as
+        ``ValueError("Not a BMP file (missing 'BM' magic)")`` the first
+        time it hit a real emulator. Pin the fix (cv2.imdecode auto-
+        detects the container) so it can't regress: a framed PNG payload
+        must round-trip to the same HxWx3 uint8 RGB shape+dtype as the
+        BMP round-trip above."""
+        import cv2  # local: same lazy-import contract as
+                    # bridge_client._decode_image_bytes
+
+        # Build a real PNG in-memory (blue-green-red order is BGR for cv2)
+        rgb = np.zeros((4, 8, 3), dtype=np.uint8)
+        rgb[:, :, 0] = 200  # R
+        rgb[:, :, 1] = 100  # G
+        rgb[:, :, 2] = 50   # B
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        ok, buf = cv2.imencode(".png", bgr)
+        self.assertTrue(ok)
+        png_bytes = buf.tobytes()
+        self.assertEqual(png_bytes[:4], b"\x89PNG")  # sanity: real PNG magic
+
+        host, port = "127.0.0.1", get_free_port()
+        fake = FakeBizHawk(host, port)
+        fake.screenshot_bytes = png_bytes
+        fake.start()
+
+        client = BridgeClient(host, port, timeout=2.0)
+        self.addCleanup(client.close)
+        client.connect()
+        fake.commands.clear()
+
+        frame = client.get_screenshot()
+        self.assertEqual(frame.shape, (4, 8, 3))
+        self.assertEqual(frame.dtype, np.uint8)
+        self.assertTrue(np.all(frame[:, :, 0] == 200))
+        self.assertTrue(np.all(frame[:, :, 1] == 100))
+        self.assertTrue(np.all(frame[:, :, 2] == 50))
+
+        # And ordinary text commands still work after -- same
+        # buffer-alignment invariant the BMP test above pins.
+        self.assertEqual(client.frame(), 99)
+        client.close()
+        fake.join(timeout=2.0)
+        self.assertIsNone(fake.error)
+        self.assertEqual(fake.commands, ["screenshot", "frame"])
+
 
 class PeekHoldRewardTest(unittest.TestCase):
     """Lock in that holding peek is rewarded and spamming never is."""

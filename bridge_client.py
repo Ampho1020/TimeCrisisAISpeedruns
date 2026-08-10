@@ -56,13 +56,50 @@ import socket
 import numpy as np
 
 from config import GUNCON_CALIB
-from vision import decode_bmp
 
 # How long to poll for the Lua handshake after BizHawk connects. Long, because
 # the user still has to load the game and open the Lua script.
 HANDSHAKE_TIMEOUT = 120.0
 # Per-attempt send/recv timeout while polling the handshake.
 HANDSHAKE_POLL_INTERVAL = 0.5
+
+
+def _decode_image_bytes(data: bytes) -> np.ndarray:
+    """Decode a screenshot payload (PNG or BMP -- see get_screenshot's
+    IMAGE FORMAT NOTE) into an HxWx3 uint8 RGB array.
+
+    Uses cv2.imdecode so any format BizHawk decides to encode with (PNG in
+    2.11.1's Mono build, but this could change if the C# side ever swaps
+    ImageConverter for something explicit) just works without another wire-
+    format regression. Imported lazily so this module still loads (and every
+    non-vision command still works) on machines without opencv installed --
+    only get_screenshot itself fails there, with a clearer message than
+    ImportError-at-import-time.
+    """
+    try:
+        import cv2  # type: ignore
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise RuntimeError(
+            "cv2 is required for get_screenshot() decoding. "
+            "Install opencv-python-headless (see requirements.txt)."
+        ) from exc
+
+    if not data:
+        raise ValueError("Empty screenshot payload from BizHawk")
+
+    arr = np.frombuffer(data, dtype=np.uint8)
+    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if bgr is None:
+        # Include the first bytes of the payload so the failure mode
+        # (unexpected magic) is diagnosable from the log without needing a
+        # second run to capture a dump. 16 bytes is enough for PNG/BMP/JPEG/
+        # length-prefix framing bugs to be spotted at a glance.
+        preview = data[:16].hex()
+        raise ValueError(
+            f"cv2.imdecode failed on {len(data)}-byte screenshot payload "
+            f"(first 16 bytes hex: {preview})"
+        )
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
 def apply_guncon_calibration(aim_x, aim_y):
@@ -316,20 +353,40 @@ class BridgeClient:
         """Capture the current emulator frame as an HxWx3 uint8 RGB array.
 
         Sends the ``screenshot`` command, which the Lua bridge services by
-        calling ``comm.socketServerScreenShot()``. BizHawk writes the frame as
-        an uncompressed 32bpp BI_RGB BMP straight down the socket using the
-        same length-prefix wire format as every other reply (verified against
-        BizHawk 2.11.1 SocketServer.PrefixWithLength). Unlike every other
-        command there is NO trailing ``OK`` -- the framed BMP IS the reply --
-        so we read the payload as raw bytes via ``_recv_message_bytes`` and
-        decode it through ``vision.decode_bmp`` here (never via _cmd, which
-        would try to UTF-8 decode the binary payload).
+        calling ``comm.socketServerScreenShot()``. BizHawk writes the image
+        straight down the socket using the same length-prefix wire format as
+        every other reply (verified against BizHawk 2.11.1
+        ``SocketServer.PrefixWithLength`` -> ``SocketServer.SendScreenshot``).
+        Unlike every other command there is NO trailing ``OK`` -- the framed
+        image IS the reply -- so we read the payload as raw bytes via
+        ``_recv_message_bytes`` (never via ``_cmd``, which would try to UTF-8
+        decode the binary payload).
+
+        IMAGE FORMAT NOTE:
+            BizHawk's ``NetworkingTakeScreenshot`` callback (MainForm.cs) is:
+
+                (byte[]) new ImageConverter()
+                    .ConvertTo(MakeScreenshotImage().ToSysdrawingBitmap(),
+                               typeof(byte[]))
+
+            ``ImageConverter.ConvertTo(Bitmap, typeof(byte[]))`` serialises
+            using ``Bitmap.Save(stream, RawFormat)``. A freshly-constructed
+            ``Format32bppArgb`` bitmap's ``RawFormat`` is
+            ``ImageFormat.MemoryBmp``, which .NET/Mono treats as
+            "unspecified" and quietly falls back to **PNG** encoding, NOT
+            raw BMP. The docstring / earlier code that decoded via
+            ``vision.decode_bmp`` was WRONG about the wire format; the
+            payload starts with ``\\x89PNG``, not ``BM``, and blew up as
+            ``ValueError("Not a BMP file (missing 'BM' magic)")`` the first
+            time this ran against a real BizHawk. Real fix: decode with
+            OpenCV's format-agnostic ``cv2.imdecode`` so BMP, PNG, or any
+            future format change on BizHawk's side just works.
         """
         if self.sock is None:
             raise RuntimeError("Bridge not connected. Call connect() first.")
         self._send("screenshot")
-        bmp_bytes = self._recv_message_bytes()
-        return decode_bmp(bmp_bytes)
+        img_bytes = self._recv_message_bytes()
+        return _decode_image_bytes(img_bytes)
 
     def hud(self, lines):
         safe = [str(s).replace("|", "/").replace("\n", " ") for s in lines]
