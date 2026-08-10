@@ -1,6 +1,10 @@
 """Regression tests for detector.py's Detection contract, ClassicalDetector
-warm-up + palette+MOG2 blob analysis, and the build_detector() factory
-fallback when no ONNX model is on disk."""
+warm-up + motion-only blob analysis, and the build_detector() factory
+fallback when no ONNX model is on disk.
+
+2026-08-10 redesign: ClassicalDetector no longer uses color palettes.
+All detection is purely MOG2 motion + geometry (area thresholds).
+"""
 
 import os
 import tempfile
@@ -9,22 +13,26 @@ import unittest
 import numpy as np
 
 from detector import (
-    ClassPalette,
     ClassicalDetector,
     Detection,
     EnemyClass,
     NUM_CLASSES,
+    _ENEMY_MIN_AREA,
+    _NOISE_MIN_AREA,
+    _PROJECTILE_MAX_AREA,
+    _HUD_BOTTOM_FRAC,
+    _MAX_BLOB_ASPECT,
     build_detector,
 )
 
 
 def _warmup(det: ClassicalDetector, frame: np.ndarray, n: int = 20) -> None:
-    """Feed ``n`` copies of ``frame`` into MOG2 so the model treats it as
+    """Feed ``n`` copies of ``frame`` into MOG2 so it treats the content as
     established background before real detection tests run.
 
     Necessary because the very first MOG2 output is nearly all-foreground
-    (the background model has no history yet), which would swamp the
-    per-class blob analysis with false positives on frame 1.
+    (the model has no history yet), which would swamp the blob analysis with
+    false positives on frame 1.
     """
     for _ in range(n):
         det.detect(frame)
@@ -51,121 +59,168 @@ class DetectionContractSuite(unittest.TestCase):
 
 
 class ClassicalDetectorSuite(unittest.TestCase):
-    """Behavioural tests for the classical MOG2 + palette detector.
+    """Behavioural tests for the motion-only (no-color) ClassicalDetector.
 
-    The scenarios are deliberately synthetic (solid backgrounds + solid
-    color rectangles) so the tests exercise contract shape, not pixel-
-    perfect blob accuracy on real Time Crisis frames -- that calibration
-    step is explicitly Phase 2 hand-tuning against real captures.
+    Synthetic frames: solid dark background + bright moving blob.  The
+    blob's class is determined solely by its pixel area, which makes these
+    tests resolution-independent and stable across color-scheme changes.
     """
 
-    def test_moving_red_blob_is_detected_as_enemy(self):
+    def _make_enemy_blob(self, h=96, w=128, bx=30, by=20, bw=12, bh=16):
+        """Return a frame with a large-enough blob to classify as ENEMY."""
+        frame = np.zeros((h, w, 3), dtype=np.uint8)
+        # Any color works -- detector is color-agnostic.
+        frame[by:by + bh, bx:bx + bw] = (180, 40, 60)
+        return frame
+
+    def test_large_moving_blob_is_detected_as_enemy(self):
         det = ClassicalDetector()
-        h, w = 64, 96
+        h, w = 96, 128
+        bg = np.zeros((h, w, 3), dtype=np.uint8)
+        _warmup(det, bg)
+
+        frame = self._make_enemy_blob(h=h, w=w, bx=30, by=20, bw=12, bh=16)
+        # bw*bh = 192 px  >>  _ENEMY_MIN_AREA (80 px)
+        dets = det.detect(frame)
+        enemy = [d for d in dets if d.class_id == int(EnemyClass.ENEMY)]
+        self.assertGreater(len(enemy), 0, msg=f"no ENEMY detected; all: {dets}")
+        d = enemy[0]
+        # Bounding box should contain the planted blob.
+        self.assertLessEqual(d.x, 30)
+        self.assertLessEqual(d.y, 20)
+        self.assertGreaterEqual(d.x + d.w, 30 + 12)
+        self.assertGreaterEqual(d.y + d.h, 20 + 16)
+
+    def test_small_moving_blob_is_detected_as_projectile(self):
+        det = ClassicalDetector()
+        h, w = 96, 128
         bg = np.zeros((h, w, 3), dtype=np.uint8)
         _warmup(det, bg)
 
         frame = bg.copy()
-        # 8x8 solid ENEMY-red block at pixel (30, 40).
-        frame[40:48, 30:38] = (220, 30, 30)
+        # 4x4 = 16 px, inside [_NOISE_MIN_AREA, _PROJECTILE_MAX_AREA].
+        frame[50:54, 60:64] = (255, 255, 100)
         dets = det.detect(frame)
-        # Should see exactly one detection: the red block. Class is ENEMY.
-        self.assertEqual(len(dets), 1, msg=f"unexpected detections: {dets}")
-        d = dets[0]
-        self.assertEqual(d.class_id, int(EnemyClass.ENEMY))
-        self.assertEqual((d.x, d.y, d.w, d.h), (30, 40, 8, 8))
-        # Centroid roughly at the block's center in normalized space.
-        # cv2.connectedComponentsWithStats returns pixel-INDEX centroids (a
-        # block spanning columns 30..37 inclusive has cx=33.5, not 34.5), so
-        # normalize by (start + (size-1)/2) not (start + size/2).
-        self.assertAlmostEqual(d.cx_norm, (30 + (8 - 1) / 2) / w, places=2)
-        self.assertAlmostEqual(d.cy_norm, (40 + (8 - 1) / 2) / h, places=2)
-        # Area 64, saturation_area 400 -> confidence 0.16.
-        self.assertGreater(d.confidence, 0.1)
-        self.assertLess(d.confidence, 0.5)
+        proj = [d for d in dets if d.class_id == int(EnemyClass.PROJECTILE)]
+        self.assertGreater(len(proj), 0, msg=f"no PROJECTILE detected; all: {dets}")
 
-    def test_static_scenery_does_not_produce_enemy_detections(self):
-        """MOG2 must classify persistently-unchanging same-color scenery as
-        background -- this is exactly the failure mode the memory's naive
-        multi-color probe hit with a hand-rolled frame differencer."""
+    def test_static_scenery_is_ignored_after_warmup(self):
+        """MOG2 must classify persistently-static content as background so
+        decorative objects in the game scene don't register as enemies."""
         det = ClassicalDetector()
-        h, w = 64, 96
-        # A red blob that has been present in EVERY frame including the
-        # warm-up frames -- MOG2 must learn it as background.
+        h, w = 96, 128
         static = np.zeros((h, w, 3), dtype=np.uint8)
-        static[10:14, 10:14] = (220, 30, 30)
+        # Large bright block present in every warm-up frame.
+        static[10:26, 10:30] = (200, 150, 50)
         _warmup(det, static, n=40)
 
         dets = det.detect(static)
-        enemy_dets = [d for d in dets if d.class_id == int(EnemyClass.ENEMY)]
         self.assertEqual(
-            enemy_dets, [],
+            dets, [],
             msg=(
-                "MOG2-conditioned enemy palette must not fire on a fully "
-                "static same-color patch after warm-up; got "
-                f"{enemy_dets}"
+                "Fully static foreground must NOT produce detections after "
+                f"MOG2 warm-up; got: {dets}"
             ),
         )
 
-    def test_small_speckle_below_min_blob_area_is_rejected(self):
+    def test_noise_below_min_area_is_rejected(self):
         det = ClassicalDetector()
-        h, w = 64, 96
+        h, w = 96, 128
         bg = np.zeros((h, w, 3), dtype=np.uint8)
         _warmup(det, bg)
 
         frame = bg.copy()
-        # Just 2x2 -- well below DEFAULT_PALETTES ENEMY.min_blob_area (12),
-        # AND it will additionally be eroded by the morphological open.
-        frame[10:12, 10:12] = (220, 30, 30)
+        # 3x3 = 9 px  <  _NOISE_MIN_AREA (10 px). Also eroded by morph-open.
+        frame[10:13, 10:13] = (200, 200, 200)
         dets = det.detect(frame)
-        self.assertEqual(
-            [d for d in dets if d.class_id == int(EnemyClass.ENEMY)],
-            [],
-        )
+        self.assertEqual(dets, [], msg=f"sub-noise blob must be rejected; got: {dets}")
+
+    def test_enemy_class_is_color_agnostic(self):
+        """The detection must fire for a blob of ANY color -- not just the
+        old red/blue/green palette entries."""
+        det = ClassicalDetector()
+        h, w = 96, 128
+        bg = np.zeros((h, w, 3), dtype=np.uint8)
+        _warmup(det, bg)
+
+        for color in [(80, 140, 200), (50, 200, 80), (240, 230, 10), (10, 10, 200)]:
+            det2 = ClassicalDetector()
+            _warmup(det2, bg)
+            frame = bg.copy()
+            frame[20:36, 30:46] = color  # 16x16 = 256 px  >>  ENEMY_MIN_AREA
+            dets = det2.detect(frame)
+            enemy = [d for d in dets if d.class_id == int(EnemyClass.ENEMY)]
+            self.assertGreater(
+                len(enemy), 0,
+                msg=f"color {color} should detect as ENEMY regardless of hue; got: {dets}",
+            )
 
     def test_reset_discards_learned_background(self):
         """After reset(), a previously-learned-as-background blob must be
-        detectable again (because the background model was recreated)."""
+        detectable again (the background model was recreated)."""
         det = ClassicalDetector()
-        h, w = 64, 96
+        h, w = 96, 128
         static = np.zeros((h, w, 3), dtype=np.uint8)
-        static[20:32, 20:32] = (220, 30, 30)
+        static[20:36, 20:36] = (180, 100, 60)  # 16x16 -- enemy-sized
         _warmup(det, static, n=40)
-        pre_reset = [d for d in det.detect(static) if d.class_id == 0]
-        self.assertEqual(pre_reset, [])
+        pre_reset = [d for d in det.detect(static) if d.class_id == int(EnemyClass.ENEMY)]
+        self.assertEqual(pre_reset, [], msg="should be background after warmup")
 
         det.reset()
-        # First-after-reset frame is essentially all-foreground for MOG2 --
-        # the palette-matched blob will re-detect.
-        post_reset = [d for d in det.detect(static) if d.class_id == 0]
+        post_reset = [d for d in det.detect(static) if d.class_id == int(EnemyClass.ENEMY)]
         self.assertGreater(
             len(post_reset), 0,
-            msg="reset() must clear the MOG2 background so a previously-"
-                "learned blob detects again",
+            msg="reset() must clear MOG2 so a previously-static blob detects again",
         )
 
-    def test_custom_palette_maps_a_new_color_to_the_expected_class(self):
-        # A palette with just one color under CIVILIAN so we can prove the
-        # class-id routing works end-to-end, independent of the defaults.
-        palettes = {
-            EnemyClass.CIVILIAN: ClassPalette(
-                colors=((10, 200, 250),),   # unmistakable cyan
-                tolerance=5,
-                min_blob_area=4,
-                saturation_area=100,
-            ),
-        }
-        det = ClassicalDetector(palettes=palettes)
-        h, w = 64, 96
+    def test_geometry_thresholds_are_consistent(self):
+        """Sanity check that the module-level constants form a coherent
+        partition: NOISE < PROJECTILE <= ENEMY, and HUD/aspect params are valid."""
+        self.assertLess(_NOISE_MIN_AREA, _ENEMY_MIN_AREA)
+        self.assertEqual(_PROJECTILE_MAX_AREA, _ENEMY_MIN_AREA - 1)
+        self.assertGreaterEqual(_HUD_BOTTOM_FRAC, 0.0)
+        self.assertLess(_HUD_BOTTOM_FRAC, 0.5)  # sanity: never more than half
+        self.assertGreater(_MAX_BLOB_ASPECT, 1.0)
+
+    def test_wide_text_banner_blob_is_rejected(self):
+        """A blob with w/h > _MAX_BLOB_ASPECT must be discarded even if its
+        area qualifies as ENEMY -- this is how 'Hurry up!' and 'DANGER!'
+        overlays are filtered out."""
+        det = ClassicalDetector()
+        h, w = 96, 256
         bg = np.zeros((h, w, 3), dtype=np.uint8)
         _warmup(det, bg)
 
         frame = bg.copy()
-        frame[10:20, 10:20] = (10, 200, 250)
+        # Wide banner: 200 px wide × 12 px tall = aspect 16.7 >> _MAX_BLOB_ASPECT.
+        # Area = 2400, well above _ENEMY_MIN_AREA -- area alone would classify it.
+        bw_, bh_ = 200, 12
+        frame[20:20 + bh_, 20:20 + bw_] = (200, 200, 60)
         dets = det.detect(frame)
-        civ = [d for d in dets if d.class_id == int(EnemyClass.CIVILIAN)]
-        self.assertEqual(len(civ), 1)
-        self.assertEqual(civ[0].class_id, int(EnemyClass.CIVILIAN))
+        self.assertEqual(
+            dets, [],
+            msg=f"wide text-banner blob must be filtered by aspect ratio; got: {dets}",
+        )
+
+    def test_bottom_hud_band_is_excluded(self):
+        """A moving blob entirely within the bottom _HUD_BOTTOM_FRAC of the
+        frame must not produce any detections -- this covers the ejected-shell
+        animation, timer digits, and HP counter."""
+        det = ClassicalDetector()
+        h, w = 224, 256
+        bg = np.zeros((h, w, 3), dtype=np.uint8)
+        _warmup(det, bg)
+
+        frame = bg.copy()
+        # Place a large enemy-sized blob just inside the HUD zone.
+        hud_row = h - int(h * _HUD_BOTTOM_FRAC) + 2  # 2 rows inside the band
+        bw_, bh_ = 12, 16  # 192 px, well above _ENEMY_MIN_AREA
+        frame[hud_row:hud_row + bh_, 30:30 + bw_] = (180, 40, 60)
+        dets = det.detect(frame)
+        self.assertEqual(
+            dets, [],
+            msg=f"blob inside bottom HUD band must be suppressed; got: {dets}",
+        )
 
 
 class BuildDetectorFactorySuite(unittest.TestCase):

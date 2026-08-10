@@ -7,16 +7,29 @@ outputs bounding boxes + class labels per frame.
 
 Two backends, one contract:
 
-* ``ClassicalDetector`` -- day-1 default, no learned model required. Uses
-  OpenCV's proven ``BackgroundSubtractorMOG2`` (Zivkovic 2004/2006) to
-  isolate moving foreground, then per-class color-palette masking and
-  ``cv2.connectedComponentsWithStats`` blob analysis to recover bounding
-  boxes. Classification is a two-tier lookup: (a) palette-color match
-  decides the enemy vs. civilian split, (b) heuristic size/aspect rules
-  distinguish projectiles (small, fast, off-cursor) and muzzle flashes
-  (very small, very bright, near-cursor) from full-body sprites.
-  Deterministic given a frame history -- MOG2 mutates its own state
-  across calls, so each ``TimeCrisisEnv`` owns exactly one instance.
+* ``ClassicalDetector`` -- day-1 default, no learned model required.
+
+  Uses OpenCV's proven ``BackgroundSubtractorMOG2`` (Zivkovic 2004/2006)
+  to isolate moving foreground, then **pure geometry** (blob area +
+  aspect ratio) to split blobs into ENEMY vs. PROJECTILE.  No palette /
+  color matching at all (2026-08-10 redesign -- the earlier color-AND
+  approach failed in real BizHawk captures because enemy uniforms vary
+  and share colors with background HUD elements).
+
+  Key insight (user diagnosis, 2026-08-10):
+  ``"enemies are the only things that are remotely humanoid; compared to
+  the background they should be easy to take out -- what is moving and
+  what is not"``
+  MOG2 nails the motion side; humanoid-vs-projectile is purely a blob
+  geometry decision:
+    * Large, roughly upright blob  → ENEMY (sprite body, h > w typically)
+    * Small blob                   → PROJECTILE (bullet/tracer)
+    * Very small or very round     → noise, discarded
+  CIVILIAN and MUZZLE_FLASH are NOT emitted by this backend -- they
+  require either a trained model or reliable color cues we don't have.
+  Downstream code (``act_vision_schedule`` scoring) just assigns them
+  zero weight via the softmax when their class never appears, so this is
+  a clean omission, not a silent bug.
 
 * ``ONNXDetector`` -- slot for a future fine-tuned YOLO/RT-DETR model.
   ``onnxruntime`` (CPU provider) runs the pre-trained ONNX graph and
@@ -107,144 +120,108 @@ class Detection:
 
 
 # ---------------------------------------------------------------------------
-# Default detection tuning (public: callers can override per-instance)
+# ClassicalDetector -- MOG2 + geometry (no color)
 # ---------------------------------------------------------------------------
 
+# Geometry thresholds for ``ClassicalDetector._classify_blob``.  All areas
+# are in pixels; they assume a 256×224 (or 320×240) PS1 frame. If BizHawk
+# is rendering at a higher internal resolution, multiply by the square of
+# the scale factor.
+#
+# TUNING GUIDE (use ``python inspect_vision.py`` to iterate):
+#   * If real enemies are missed → lower ENEMY_MIN_AREA.
+#   * If the crosshair / HUD badges pollute results → raise ENEMY_MIN_AREA.
+#   * If bullets are classified as ENEMY → lower PROJECTILE_MAX_AREA or
+#     raise ENEMY_MIN_AREA so they don't overlap.
+#   * If enemies are split into two blobs (top+bottom halves) → use a
+#     larger morphological close kernel (see _CLOSE_KERNEL_SIZE below).
 
-@dataclass(frozen=True)
-class ClassPalette:
-    """Per-class color palette + morphology tuning for the classical detector.
+# Minimum blob pixel area to report any detection (below = discarded as noise).
+_NOISE_MIN_AREA   = 10
+# Blobs larger than this are enemies (full humanoid body).
+_ENEMY_MIN_AREA   = 80
+# Blobs below this and above _NOISE_MIN_AREA are projectiles (bullets/tracers).
+_PROJECTILE_MAX_AREA = 79
+# Confidence saturates (= 1.0) at this area for each class.
+_ENEMY_SAT_AREA   = 1200
+_PROJ_SAT_AREA    = 40
 
-    Every entry is a tuple of representative RGB colors sampled from real
-    Time Crisis sprites. A pixel counts as a candidate for a class when it
-    falls within ``tolerance`` on every channel of at least one color in
-    the palette. Multiple colors per class handle sprite variants
-    (different enemy costumes, hit-flash frames) without needing a
-    trained classifier.
+# Morphological kernels.
+# OPEN (3×3): kill single-pixel MOG2 speckle.
+# CLOSE (5×5): bridge small gaps inside a humanoid silhouette so a walking
+#              enemy doesn't get split into a head-blob and a body-blob.
+_OPEN_KERNEL_SIZE  = (3, 3)
+_CLOSE_KERNEL_SIZE = (5, 5)
 
-    ``min_blob_area`` filters out speckle noise; ``saturation_area`` is
-    the blob size at which ``confidence`` saturates to 1.0. Both are in
-    pixels and must be tuned per FRAME RESOLUTION -- the defaults below
-    target BizHawk's ~256x224 or ~320x240 PS1 output.
-    """
+# HUD exclusion -- bottom band.
+# Time Crisis renders ALL of its HUD at the BOTTOM of the frame:
+#   * Ejected-shell animation (casing bounces after each shot)
+#   * Countdown timer digits
+#   * HP/life counter
+# MOG2 correctly detects these as motion (the timer counts down, the casing
+# animates), but we never want to aim there.  Zeroing out the bottom
+# _HUD_BOTTOM_FRAC of the foreground mask before blob analysis removes all
+# three sources of false positives deterministically without touching the
+# mid-screen enemy region at all.
+# Set to 0.0 to disable (e.g. if your savestate uses a different HUD layout).
+_HUD_BOTTOM_FRAC = 0.15
 
-    colors: tuple[tuple[int, int, int], ...]
-    tolerance: int = 40
-    min_blob_area: int = 12
-    saturation_area: int = 400
-
-
-# Default palettes are conservative placeholders -- they encode the
-# category structure the plan requires, not real per-sprite calibration.
-# Phase 2 of the plan explicitly calls out a hand-tuning pass against
-# real captures via ``run_eval.py --dump-frames`` before promoting the
-# detector to production; the values below are safe defaults for the
-# probe sim (see tests/test_simulation.py's TimedSpotMotionColorGame,
-# which uses a palette of 5 distinct spot colors we approximate here).
-DEFAULT_PALETTES: dict[EnemyClass, ClassPalette] = {
-    EnemyClass.ENEMY: ClassPalette(
-        colors=(
-            (220, 30, 30),   # sim red enemy (matches TimedSpotMotionColorGame)
-            (30, 30, 220),   # sim blue enemy
-            (30, 220, 30),   # sim green enemy
-            (220, 220, 30),  # sim yellow enemy
-            (220, 30, 220),  # sim magenta enemy
-        ),
-        tolerance=40,
-        min_blob_area=12,
-        saturation_area=400,
-    ),
-    EnemyClass.CIVILIAN: ClassPalette(
-        colors=(
-            (240, 220, 180),  # skin-toned civilian placeholder
-        ),
-        tolerance=25,
-        min_blob_area=20,   # civilians typically full-body, larger
-        saturation_area=600,
-    ),
-    EnemyClass.PROJECTILE: ClassPalette(
-        colors=(
-            (255, 240, 120),  # muzzle-lit bullet/tracer
-        ),
-        tolerance=30,
-        min_blob_area=3,    # bullets are tiny
-        saturation_area=40,
-    ),
-    EnemyClass.MUZZLE_FLASH: ClassPalette(
-        colors=(
-            (255, 255, 200),  # very bright yellow-white flash
-        ),
-        tolerance=30,
-        min_blob_area=4,
-        saturation_area=60,
-    ),
-}
-
-
-# ---------------------------------------------------------------------------
-# ClassicalDetector -- MOG2 + palette + connected components
-# ---------------------------------------------------------------------------
+# Text-overlay aspect-ratio filter.
+# Time Crisis displays full-width text banners mid-screen in two situations:
+#   "Hurry up!" -- flashes when the timer drops below ~10 s.
+#   "DANGER!"   -- flashes when the player is forced to stay in cover.
+# Both banners are MUCH wider than they are tall (aspect ratio w/h >> 1),
+# which is the opposite of a humanoid sprite (h >= w typically).  Any blob
+# whose bounding-box width-to-height ratio exceeds this threshold is assumed
+# to be a text overlay and is discarded from detection entirely.
+# Humanoid enemies rarely exceed w/h ~ 1.5 even when crouching, so 3.0
+# gives comfortable headroom while still killing the full-width banners.
+# Set to float('inf') to disable.
+_MAX_BLOB_ASPECT = 3.0
 
 
 class ClassicalDetector:
-    """Proven-algorithm baseline detector: BackgroundSubtractorMOG2 + palette.
+    """Motion-based detector: BackgroundSubtractorMOG2 + geometry classification.
 
     Runtime shape per ``detect(frame)`` call:
 
-      1. MOG2 (Zivkovic's Gaussian mixture background subtractor) is fed
-         the incoming frame and produces a foreground mask -- pixels that
-         differ meaningfully from the running background model. This
-         handles the "static scenery vs. real animating sprite" split
-         (memory's failed multi-color probe hit this limitation with a
-         hand-rolled frame differencer).
-      2. Optional morphological open (kernel 3x3) removes single-pixel
-         speckle from the mask -- cheap and standard.
-      3. For each ``EnemyClass``, the class's palette-color mask is
-         computed as a logical-OR over its palette entries, then ANDed
-         with the MOG2 foreground mask (except for MUZZLE_FLASH, which is
-         so brief MOG2 may still classify it as background -- for that
-         class we use color alone).
-      4. ``cv2.connectedComponentsWithStats`` extracts per-class blobs;
-         each blob above ``min_blob_area`` becomes a ``Detection`` with
-         confidence based on its pixel area capped at
-         ``saturation_area``.
+      1. MOG2 is fed the incoming frame and produces a foreground mask --
+         pixels that differ meaningfully from the running background model.
+         This separates static scenery from animating sprites reliably even
+         when enemy uniforms vary.
+      2. Morphological open (3×3) removes single-pixel speckle, then a
+         morphological close (5×5) bridges gaps inside humanoid bodies.
+      3. ``cv2.connectedComponentsWithStats`` extracts all moving blobs.
+      4. Blobs are classified purely by area:
+           area ≥ ENEMY_MIN_AREA               → ENEMY
+           NOISE_MIN_AREA ≤ area < ENEMY_MIN_AREA → PROJECTILE
+           area < NOISE_MIN_AREA              → discarded
+         No color test is performed.  CIVILIAN and MUZZLE_FLASH are not
+         emitted (need a trained model for reliable inference).
 
     Determinism: MOG2 mutates its internal Gaussian mixture across
     calls, so ``ClassicalDetector`` instances are stateful. Each
     ``TimeCrisisEnv`` owns exactly one instance and calls ``reset()`` on
-    it whenever the episode's savestate is reloaded (i.e. when the
-    background definitionally changes).
+    it whenever the episode's savestate is reloaded.
     """
 
     def __init__(
         self,
-        palettes: dict[EnemyClass, ClassPalette] | None = None,
         mog_history: int = 200,
         mog_var_threshold: float = 16.0,
-        motion_required: Sequence[EnemyClass] = (
-            EnemyClass.ENEMY,
-            EnemyClass.CIVILIAN,
-            EnemyClass.PROJECTILE,
-        ),
     ):
-        import cv2  # lazy import: keeps import cost off pure-data test paths
+        import cv2  # lazy import
 
         self._cv2 = cv2
-        self.palettes = palettes if palettes is not None else DEFAULT_PALETTES
-        # detectShadows=False: we do not need cv2's shadow-classification
-        # channel (grey pixels in the mask) -- it just adds a value we'd have
-        # to threshold back out. Setting False keeps the output strictly
-        # binary and slightly faster.
+        self._mog_history = mog_history
+        self._mog_var_threshold = mog_var_threshold
         self._mog = cv2.createBackgroundSubtractorMOG2(
             history=mog_history,
             varThreshold=mog_var_threshold,
             detectShadows=False,
         )
-        self._motion_required = set(motion_required)
-        # 3x3 rectangular kernel for the morphological open -- smallest
-        # value that reliably kills 1-pixel MOG2 speckle without eroding
-        # thin sprite features.
-        self._morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        self._open_kernel  = cv2.getStructuringElement(cv2.MORPH_RECT, _OPEN_KERNEL_SIZE)
+        self._close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, _CLOSE_KERNEL_SIZE)
 
     def reset(self) -> None:
         """Discard the accumulated background model.
@@ -255,18 +232,36 @@ class ClassicalDetector:
         """
         cv2 = self._cv2
         self._mog = cv2.createBackgroundSubtractorMOG2(
-            history=self._mog.getHistory(),
-            varThreshold=self._mog.getVarThreshold(),
+            history=self._mog_history,
+            varThreshold=self._mog_var_threshold,
             detectShadows=False,
         )
+
+    @staticmethod
+    def _classify_blob(area: int, bw: int, bh: int) -> tuple[int, float] | None:
+        """Return (class_id, confidence) or None if the blob should be discarded.
+
+        Two-stage filter:
+          1. Aspect-ratio check: blobs that are much wider than they are tall
+             are text banners ("Hurry up!", "DANGER!"), not sprites.
+          2. Area-based class assignment: large = ENEMY, small = PROJECTILE.
+        """
+        # Discard wide text banners -- they are never enemies.
+        if bh > 0 and (bw / bh) > _MAX_BLOB_ASPECT:
+            return None
+        if area >= _ENEMY_MIN_AREA:
+            conf = float(min(1.0, area / _ENEMY_SAT_AREA))
+            return int(EnemyClass.ENEMY), conf
+        if area >= _NOISE_MIN_AREA:
+            conf = float(min(1.0, area / _PROJ_SAT_AREA))
+            return int(EnemyClass.PROJECTILE), conf
+        return None  # discard noise
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
         """Return detected objects for one HxWx3 uint8 RGB frame.
 
-        ``frame`` must be in the SAME RGB layout that ``vision.decode_bmp``
-        produces (row 0 = top of image, channel order R,G,B), so the same
-        code path works against sim-synthesized frames and real BizHawk
-        captures.
+        ``frame`` must be in the RGB layout that ``bridge_client.get_screenshot``
+        produces (row 0 = top of image, channel order R,G,B).
         """
         if frame.ndim != 3 or frame.shape[2] < 3:
             raise ValueError(
@@ -274,56 +269,53 @@ class ClassicalDetector:
             )
         cv2 = self._cv2
         h, w = frame.shape[:2]
-        # MOG2 expects BGR by convention (uses only luma anyway, but the
-        # docs assume BGR). Convert once.
+        # MOG2 uses luma internally (accepts BGR or gray). Convert RGB→BGR once.
         bgr = frame[:, :, [2, 1, 0]].astype(np.uint8, copy=False)
         fg_mask = self._mog.apply(bgr)
-        # Morphological open to kill speckle.
-        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, self._morph_kernel)
 
-        frame_i16 = frame[:, :, :3].astype(np.int16)
+        # Clean the mask: open kills speckle, close bridges body gaps.
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN,  self._open_kernel)
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, self._close_kernel)
+
+        # Blank the bottom HUD band so the timer, HP bar, and ejected-shell
+        # animation never produce false detections.  Done AFTER morphology so
+        # close operations near the boundary don't bleed upward into play area.
+        if _HUD_BOTTOM_FRAC > 0.0:
+            hud_row = max(0, h - int(h * _HUD_BOTTOM_FRAC))
+            fg_mask[hud_row:, :] = 0
+
+        if not fg_mask.any():
+            return []
+
+        num_labels, _, stats, centroids = cv2.connectedComponentsWithStats(
+            fg_mask, connectivity=8,
+        )
         detections: list[Detection] = []
-        for class_id, palette in self.palettes.items():
-            color_mask = np.zeros((h, w), dtype=np.uint8)
-            for color in palette.colors:
-                diff = np.abs(frame_i16 - np.array(color, dtype=np.int16))
-                match = np.all(diff <= palette.tolerance, axis=-1)
-                color_mask |= match.astype(np.uint8)
-            if class_id in self._motion_required:
-                # Require BOTH the class color AND MOG2 foreground.
-                combined = color_mask & (fg_mask > 0).astype(np.uint8)
-            else:
-                combined = color_mask
-            if not combined.any():
+        # Label 0 is the background component -- skip it.
+        for i in range(1, num_labels):
+            area = int(stats[i, cv2.CC_STAT_AREA])
+            bx   = int(stats[i, cv2.CC_STAT_LEFT])
+            by   = int(stats[i, cv2.CC_STAT_TOP])
+            bw   = int(stats[i, cv2.CC_STAT_WIDTH])
+            bh   = int(stats[i, cv2.CC_STAT_HEIGHT])
+            result = ClassicalDetector._classify_blob(area, bw, bh)
+            if result is None:
                 continue
-
-            num_labels, _, stats, centroids = cv2.connectedComponentsWithStats(
-                combined, connectivity=8,
-            )
-            # Label 0 is the background component -- skip it.
-            for i in range(1, num_labels):
-                area = int(stats[i, cv2.CC_STAT_AREA])
-                if area < palette.min_blob_area:
-                    continue
-                bx = int(stats[i, cv2.CC_STAT_LEFT])
-                by = int(stats[i, cv2.CC_STAT_TOP])
-                bw = int(stats[i, cv2.CC_STAT_WIDTH])
-                bh = int(stats[i, cv2.CC_STAT_HEIGHT])
-                cx = float(centroids[i, 0])
-                cy = float(centroids[i, 1])
-                confidence = float(min(1.0, area / max(1, palette.saturation_area)))
-                detections.append(
-                    Detection(
-                        x=bx,
-                        y=by,
-                        w=bw,
-                        h=bh,
-                        class_id=int(class_id),
-                        confidence=confidence,
-                        cx_norm=cx / w,
-                        cy_norm=cy / h,
-                    )
+            class_id, confidence = result
+            cx = float(centroids[i, 0])
+            cy = float(centroids[i, 1])
+            detections.append(
+                Detection(
+                    x=bx,
+                    y=by,
+                    w=bw,
+                    h=bh,
+                    class_id=class_id,
+                    confidence=confidence,
+                    cx_norm=cx / w,
+                    cy_norm=cy / h,
                 )
+            )
         return detections
 
 
