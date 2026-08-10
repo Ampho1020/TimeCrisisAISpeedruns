@@ -134,17 +134,46 @@ VISION_ONNX_MODEL_PATH = ""
 #   [0.5 - band/2, 0.5 + band/2] trigger the duck.  Projectiles near the
 #   screen edge are likely already past the player position.
 #
-# GREY-ONLY behaviour (refined 2026-08-10 after enemy analysis):
-#   The shoulder-launched missile is FULLY GREY and always hits if it lands.
-#   Random bullets are coloured and mostly miss the player.
-#   Grenades are coloured and should be SHOT mid-air, not dodged.
-#   The dodge override therefore only fires when detector.blob_is_grey() is
-#   True for the detected PROJECTILE blob -- so coloured projectiles never
-#   force the agent into cover unnecessarily.  If mean_rgb is None (ONNX
-#   backend has no colour info) the override conservatively ducks anyway.
-VISION_PROJECTILE_DODGE_ENABLED     = True
+# STATUS (2026-08-10): DISABLED.  The grey check alone was still too
+# aggressive: the game scene contains grey concrete, grey enemy clothing,
+# and grey HUD shadows that MOG2 occasionally flags as foreground -- any
+# such artefact near screen centre triggers a dodge even with no real
+# missile present.  Use the velocity/persistence missile dodge below.
+VISION_PROJECTILE_DODGE_ENABLED     = False
 VISION_PROJECTILE_DODGE_MIN_CONF    = 0.4
 VISION_PROJECTILE_DODGE_CENTER_BAND = 0.6
+
+# Velocity + persistence missile dodge (2026-08-10).
+# The only reliable way to distinguish the shoulder-launched missile from
+# grey scenery noise and fast bullets is TRACKING across consecutive captures:
+#
+#   Scenery noise  -- same position every capture (MOG2 artefact):
+#                     displacement == 0 --> ignored.
+#   Bullets        -- faster than the 3-tick capture interval (~250 ms):
+#                     gone before the next capture, no matching blob --> ignored.
+#   Missile        -- slow enough to appear in TWO consecutive captures AND
+#                     move toward the player centre --> DODGE.
+#
+# A PROJECTILE blob in the current capture is flagged as a missile when:
+#   (a) a blob at a similar position (within MATCH_RADIUS) existed last capture,
+#   (b) displacement >= MIN_DISP (rules out static scenery artefacts),
+#   (c) the blob moved toward screen centre (abs(cx - 0.5) shrank), and
+#   (d) it is in the centre band above the confidence threshold.
+# The flag persists until the next capture so the agent stays in cover for
+# the full 3-tick interval rather than re-exposing immediately.
+#
+# VISION_MISSILE_MATCH_RADIUS  -- screen fraction: blobs within this are
+#   treated as the same object across captures.  Must be >= the missile's
+#   per-capture displacement (~0.25 for a rocket crossing half the screen
+#   in ~500 ms at a 250 ms capture interval).
+# VISION_MISSILE_MIN_DISP      -- minimum movement per capture to exclude
+#   zero-displacement scenery noise.
+# VISION_MISSILE_CENTER_BAND / MIN_CONF -- same semantics as PROJECTILE_DODGE.
+VISION_MISSILE_DODGE_ENABLED   = False  # disabled until tested; flip to True to try
+VISION_MISSILE_MATCH_RADIUS    = 0.35
+VISION_MISSILE_MIN_DISP        = 0.03
+VISION_MISSILE_CENTER_BAND     = 0.60
+VISION_MISSILE_MIN_CONF        = 0.30
 
 POP_SIZE    = 30      # MUST be even (mirrored sampling)
 # SIGMA raised 0.05 -> 0.1 (2026-08-04): in-sim trend testing

@@ -17,6 +17,11 @@ from config import (
     VISION_PROJECTILE_DODGE_CENTER_BAND,
     VISION_PROJECTILE_DODGE_ENABLED,
     VISION_PROJECTILE_DODGE_MIN_CONF,
+    VISION_MISSILE_DODGE_ENABLED,
+    VISION_MISSILE_MATCH_RADIUS,
+    VISION_MISSILE_MIN_DISP,
+    VISION_MISSILE_CENTER_BAND,
+    VISION_MISSILE_MIN_CONF,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import act, act_schedule, act_vision_schedule
@@ -224,6 +229,10 @@ class TimeCrisisEnv:
         # Multi-screen tracking (see reset() for the full comment).
         self.screens_cleared: int = 0
         self.max_timer_delta_since_start: int = 0
+        # Missile velocity tracking: previous capture's PROJECTILE centroids
+        # and the active-dodge flag (see reset() and step() for details).
+        self._prev_proj_centroids: list = []
+        self._missile_dodge_active: bool = False
         # Set to a directory path (via ``run_eval.py --dump-frames <dir>``) to
         # save one PNG per decision tick during ``episode_fitness()``. Purely
         # diagnostic / used to produce the labelling corpus for the Phase 2
@@ -358,6 +367,10 @@ class TimeCrisisEnv:
         # clear whose bonus stretches across several ticks.
         self.screens_cleared = 0
         self.max_timer_delta_since_start = 0
+        # Clear missile tracking so previous-episode projectile history
+        # doesn't bleed into the next episode.
+        self._prev_proj_centroids = []
+        self._missile_dodge_active = False
         # Vision state: discard the previous episode's background model
         # (MOG2 in ClassicalDetector accumulates its own history across
         # calls) and the cached detections. Guarded via getattr so sim
@@ -382,14 +395,12 @@ class TimeCrisisEnv:
             shoot, peek, aim_x_bias, aim_y_bias = act_schedule(theta, self.ticks)
         elif POLICY_MODE == "vision_schedule":
             # Vision-conditioned schedule: refresh detections on the capture
-            # cadence, then let policy.act_vision_schedule blend them into
-            # the base aim per this tick's learned gain. Any capture/detect
-            # failure is caught so a transient bridge hiccup can't kill the
-            # whole episode -- we simply reuse the previous cached detections
-            # (empty on the very first tick), which makes the tick behave
-            # exactly like plain schedule mode for that step.
-            if (self.last_detections is None
-                    or (self.ticks % VISION_CAPTURE_EVERY_N_TICKS) == 0):
+            # cadence, then blend into the base aim via act_vision_schedule.
+            _is_new_capture = (
+                self.last_detections is None
+                or (self.ticks % VISION_CAPTURE_EVERY_N_TICKS) == 0
+            )
+            if _is_new_capture:
                 try:
                     frame = self.client.get_screenshot()
                     self.last_detections = self.detector.detect(frame)
@@ -397,29 +408,61 @@ class TimeCrisisEnv:
                     if self.last_detections is None:
                         self.last_detections = []
                     print(f"[env] vision capture failed: {exc!r}", flush=True)
+
+                # Velocity / persistence missile tracking.
+                # Only runs on captures so we compare the NEW detections
+                # against the PREVIOUS capture's detections (not the same
+                # stale list reused between captures).
+                if VISION_MISSILE_DODGE_ENABLED:
+                    _curr_projs = [
+                        (float(d.cx_norm), float(d.cy_norm), float(d.confidence))
+                        for d in (self.last_detections or [])
+                        if int(d.class_id) == 2  # EnemyClass.PROJECTILE
+                    ]
+                    _mlo = 0.5 - VISION_MISSILE_CENTER_BAND / 2
+                    _mhi = 0.5 + VISION_MISSILE_CENTER_BAND / 2
+                    self._missile_dodge_active = False
+                    for _cx, _cy, _conf in _curr_projs:
+                        if _conf < VISION_MISSILE_MIN_CONF:
+                            continue
+                        if not (_mlo <= _cx <= _mhi):
+                            continue
+                        for _pcx, _pcy in self._prev_proj_centroids:
+                            _dist = ((_cx - _pcx) ** 2 + (_cy - _pcy) ** 2) ** 0.5
+                            if (
+                                _dist <= VISION_MISSILE_MATCH_RADIUS   # same blob
+                                and _dist >= VISION_MISSILE_MIN_DISP   # actually moved
+                                and abs(_cx - 0.5) < abs(_pcx - 0.5)  # toward centre
+                            ):
+                                self._missile_dodge_active = True
+                                break
+                        if self._missile_dodge_active:
+                            break
+                    # Store centroids for next capture's comparison.
+                    self._prev_proj_centroids = [
+                        (_cx, _cy) for _cx, _cy, _ in _curr_projs
+                    ]
+
             shoot, peek, aim_x_bias, aim_y_bias = act_vision_schedule(
                 theta, self.ticks, self.last_detections or [],
             )
-            # Hard dodge: if a GREY projectile (missile) is visible in the
-            # centre band while the agent is exposed, force duck.
-            # Grey = the shoulder-launched missile (fully grey, always hits).
-            # Coloured = bullets (mostly miss) or grenades (should be shot
-            # mid-air, not dodged).  The grey check prevents the old behaviour
-            # of forcing the agent into cover on every stray bullet.
-            # If mean_rgb is None (no colour info) we duck conservatively.
+            # Grey-only dodge (disabled -- fires on grey scenery).
             if VISION_PROJECTILE_DODGE_ENABLED and peek and self.last_detections:
-                _band_lo = 0.5 - VISION_PROJECTILE_DODGE_CENTER_BAND / 2
-                _band_hi = 0.5 + VISION_PROJECTILE_DODGE_CENTER_BAND / 2
+                _blo = 0.5 - VISION_PROJECTILE_DODGE_CENTER_BAND / 2
+                _bhi = 0.5 + VISION_PROJECTILE_DODGE_CENTER_BAND / 2
                 for _det in self.last_detections:
                     if (
-                        int(_det.class_id) == 2  # EnemyClass.PROJECTILE
+                        int(_det.class_id) == 2
                         and float(_det.confidence) >= VISION_PROJECTILE_DODGE_MIN_CONF
-                        and _band_lo <= float(_det.cx_norm) <= _band_hi
+                        and _blo <= float(_det.cx_norm) <= _bhi
                         and (_det.mean_rgb is None
                              or _blob_is_grey(_det.mean_rgb))
                     ):
                         peek = False
                         break
+            # Velocity / persistence missile dodge (also disabled until tuned).
+            if VISION_MISSILE_DODGE_ENABLED and peek and self._missile_dodge_active:
+                peek = False
         else:
             shoot, peek, aim_x_bias, aim_y_bias = act(
                 theta, self._build_obs(
