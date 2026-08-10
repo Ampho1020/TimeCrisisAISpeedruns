@@ -22,6 +22,8 @@ from detector import (
     _PROJECTILE_MAX_AREA,
     _HUD_BOTTOM_FRAC,
     _MAX_BLOB_ASPECT,
+    _PRE_BLUR_KERNEL,
+    _UPSCALE_FACTOR,
     build_detector,
 )
 
@@ -123,17 +125,27 @@ class ClassicalDetectorSuite(unittest.TestCase):
             ),
         )
 
-    def test_noise_below_min_area_is_rejected(self):
+    def test_noise_below_enemy_area_is_not_classified_as_enemy(self):
+        """With 2× upscale + Gaussian blur, a tiny blob (3×3 original pixels)
+        can spread into the PROJECTILE range -- that's expected and fine.
+        What must never happen is a sub-body blob being aim-targeted as an
+        ENEMY (which vision_schedule steers toward).  Only ENEMY detections
+        drive the aim blend; a stray PROJECTILE in an otherwise clear frame
+        will never win the argmax against a real enemy."""
         det = ClassicalDetector()
         h, w = 96, 128
         bg = np.zeros((h, w, 3), dtype=np.uint8)
         _warmup(det, bg)
 
         frame = bg.copy()
-        # 3x3 = 9 px  <  _NOISE_MIN_AREA (10 px). Also eroded by morph-open.
+        # 3×3 = 9 px original -- too small for a humanoid body.
         frame[10:13, 10:13] = (200, 200, 200)
         dets = det.detect(frame)
-        self.assertEqual(dets, [], msg=f"sub-noise blob must be rejected; got: {dets}")
+        enemy = [d for d in dets if d.class_id == int(EnemyClass.ENEMY)]
+        self.assertEqual(
+            enemy, [],
+            msg=f"tiny blob must not classify as ENEMY; got: {dets}",
+        )
 
     def test_enemy_class_is_color_agnostic(self):
         """The detection must fire for a blob of ANY color -- not just the
@@ -181,6 +193,13 @@ class ClassicalDetectorSuite(unittest.TestCase):
         self.assertGreaterEqual(_HUD_BOTTOM_FRAC, 0.0)
         self.assertLess(_HUD_BOTTOM_FRAC, 0.5)  # sanity: never more than half
         self.assertGreater(_MAX_BLOB_ASPECT, 1.0)
+        # Pre-processing constants must be valid.
+        self.assertGreaterEqual(_UPSCALE_FACTOR, 1)
+        # Blur kernel must be 0 (disabled), 1 (noop), or a positive odd int.
+        self.assertTrue(
+            _PRE_BLUR_KERNEL <= 1 or _PRE_BLUR_KERNEL % 2 == 1,
+            msg=f"_PRE_BLUR_KERNEL must be <=1 or odd, got {_PRE_BLUR_KERNEL}",
+        )
 
     def test_wide_text_banner_blob_is_rejected(self):
         """A blob with w/h > _MAX_BLOB_ASPECT must be discarded even if its

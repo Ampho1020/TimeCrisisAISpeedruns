@@ -179,6 +179,28 @@ _HUD_BOTTOM_FRAC = 0.15
 # Set to float('inf') to disable.
 _MAX_BLOB_ASPECT = 3.0
 
+# Pre-processing for pixelated PS1 frames.
+#
+# _PRE_BLUR_KERNEL: Gaussian blur applied to the BGR frame BEFORE MOG2.
+#   PS1 games use heavy dithering and palette quantisation -- neighbouring
+#   pixels on the same sprite can differ by 30-40 DN due to ordered dither
+#   patterns.  MOG2 sees each dither pixel independently, producing a
+#   speckled foreground mask instead of a solid blob.  A mild blur merges
+#   adjacent dither pixels before MOG2, making the mask far cleaner without
+#   blurring real motion edges.  Set to 0 or 1 to disable.
+_PRE_BLUR_KERNEL = 5
+
+# _UPSCALE_FACTOR: resize the frame to N× before ALL processing (blur, MOG2,
+#   morphology, blob analysis), then divide output coordinates back to
+#   original-frame pixel space before emitting Detections.
+#   At 256×224 an enemy sprite may be only 10-18 px tall -- a single missed
+#   row erases 6-10 % of the blob area and can flip classification.  At 2×,
+#   the same sprite is 20-36 px, giving morphological ops far more headroom.
+#   Area values from connectedComponentsWithStats are divided by scale²
+#   before comparing against the thresholds above, so the tuning guide still
+#   applies in original-resolution pixels.  Set to 1 to disable.
+_UPSCALE_FACTOR = 2
+
 
 class ClassicalDetector:
     """Motion-based detector: BackgroundSubtractorMOG2 + geometry classification.
@@ -269,19 +291,34 @@ class ClassicalDetector:
             )
         cv2 = self._cv2
         h, w = frame.shape[:2]
-        # MOG2 uses luma internally (accepts BGR or gray). Convert RGB→BGR once.
+        # RGB→BGR (MOG2 uses luma internally but conventionally expects BGR).
         bgr = frame[:, :, [2, 1, 0]].astype(np.uint8, copy=False)
+
+        # --- optional 2× upscale BEFORE everything else ---
+        # At 256×224 an enemy sprite can be <20 px tall; morphological ops
+        # and area thresholds have far more headroom at 2×.
+        scale = _UPSCALE_FACTOR
+        if scale > 1:
+            bgr = cv2.resize(bgr, (w * scale, h * scale),
+                             interpolation=cv2.INTER_LINEAR)
+
+        # --- Gaussian pre-blur to suppress PS1 dither noise ---
+        if _PRE_BLUR_KERNEL > 1:
+            k = _PRE_BLUR_KERNEL | 1  # ensure odd
+            bgr = cv2.GaussianBlur(bgr, (k, k), 0)
+
         fg_mask = self._mog.apply(bgr)
 
         # Clean the mask: open kills speckle, close bridges body gaps.
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN,  self._open_kernel)
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, self._close_kernel)
 
-        # Blank the bottom HUD band so the timer, HP bar, and ejected-shell
-        # animation never produce false detections.  Done AFTER morphology so
-        # close operations near the boundary don't bleed upward into play area.
+        # Blank the bottom HUD band (timer, HP, ejected-shell animation).
+        # Computed against the scaled frame height so the boundary is correct
+        # regardless of _UPSCALE_FACTOR.
         if _HUD_BOTTOM_FRAC > 0.0:
-            hud_row = max(0, h - int(h * _HUD_BOTTOM_FRAC))
+            sh = h * scale
+            hud_row = max(0, sh - int(sh * _HUD_BOTTOM_FRAC))
             fg_mask[hud_row:, :] = 0
 
         if not fg_mask.any():
@@ -293,17 +330,20 @@ class ClassicalDetector:
         detections: list[Detection] = []
         # Label 0 is the background component -- skip it.
         for i in range(1, num_labels):
-            area = int(stats[i, cv2.CC_STAT_AREA])
-            bx   = int(stats[i, cv2.CC_STAT_LEFT])
-            by   = int(stats[i, cv2.CC_STAT_TOP])
-            bw   = int(stats[i, cv2.CC_STAT_WIDTH])
-            bh   = int(stats[i, cv2.CC_STAT_HEIGHT])
+            # Divide raw area by scale² so threshold comparisons stay in
+            # original-resolution pixel units (tuning guide still applies).
+            area = int(stats[i, cv2.CC_STAT_AREA]) // max(1, scale * scale)
+            bx   = int(stats[i, cv2.CC_STAT_LEFT])    // scale
+            by   = int(stats[i, cv2.CC_STAT_TOP])     // scale
+            bw   = max(1, int(stats[i, cv2.CC_STAT_WIDTH])  // scale)
+            bh   = max(1, int(stats[i, cv2.CC_STAT_HEIGHT]) // scale)
             result = ClassicalDetector._classify_blob(area, bw, bh)
             if result is None:
                 continue
             class_id, confidence = result
-            cx = float(centroids[i, 0])
-            cy = float(centroids[i, 1])
+            # Centroid also scaled back to original-frame space.
+            cx = float(centroids[i, 0]) / scale
+            cy = float(centroids[i, 1]) / scale
             detections.append(
                 Detection(
                     x=bx,

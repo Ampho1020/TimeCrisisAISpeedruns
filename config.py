@@ -115,6 +115,28 @@ VISION_CAPTURE_EVERY_N_TICKS = 3
 # ``run_eval.py --dump-frames <dir>`` supports.
 VISION_ONNX_MODEL_PATH = ""
 
+# Projectile-triggered cover override (added 2026-08-10).
+# When ClassicalDetector sees a high-confidence PROJECTILE blob in the
+# horizontal centre band of the screen while the agent is exposed, the
+# vision_schedule step branch forces peek=False for that tick regardless of
+# what the schedule row says.  This gives an immediate hard dodge for the
+# rocket-launcher enemy whose projectile is otherwise fatal before ES has had
+# hundreds of generations to learn the exact duck timing.  The schedule+gain
+# mechanism still learns the timing in parallel -- this override only fires
+# when a real projectile is currently visible, so it has no cost on ticks
+# where the screen is clear.
+#
+# VISION_PROJECTILE_DODGE_MIN_CONF: confidence threshold.  Area-based:
+#   40 px saturates at 1.0; a ~16 px rocket round gives ~0.4.
+#   Raise to avoid dodging stray specks; lower to react to smaller rounds.
+# VISION_PROJECTILE_DODGE_CENTER_BAND: fraction of frame width that counts
+#   as "aimed at the player".  Only projectiles with cx_norm in
+#   [0.5 - band/2, 0.5 + band/2] trigger the duck.  Projectiles near the
+#   screen edge are likely already past the player position.
+VISION_PROJECTILE_DODGE_ENABLED     = True
+VISION_PROJECTILE_DODGE_MIN_CONF    = 0.4
+VISION_PROJECTILE_DODGE_CENTER_BAND = 0.6
+
 POP_SIZE    = 30      # MUST be even (mirrored sampling)
 # SIGMA raised 0.05 -> 0.1 (2026-08-04): in-sim trend testing
 # (tests/test_simulation.py ExtendedMiniESTrendSuite) showed the population

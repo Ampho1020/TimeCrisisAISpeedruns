@@ -14,6 +14,9 @@ from config import (
     SAME_EPS, SCREEN_CLEAR_TIMER_BUMP, SHOT_SLOT_DIVERSITY_BONUS,
     SHOT_SLOT_DIVERSITY_SCALE, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
     VISION_CAPTURE_EVERY_N_TICKS, VISION_ONNX_MODEL_PATH,
+    VISION_PROJECTILE_DODGE_CENTER_BAND,
+    VISION_PROJECTILE_DODGE_ENABLED,
+    VISION_PROJECTILE_DODGE_MIN_CONF,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import act, act_schedule, act_vision_schedule
@@ -391,6 +394,21 @@ class TimeCrisisEnv:
             shoot, peek, aim_x_bias, aim_y_bias = act_vision_schedule(
                 theta, self.ticks, self.last_detections or [],
             )
+            # Hard dodge: if a projectile is visible in the centre band while
+            # the agent is currently exposed, force duck regardless of what
+            # the schedule says.  The schedule+vision_gain path still learns
+            # the timing in parallel; this override only fires on ticks where
+            # a real projectile is actually detected, so it's zero-cost when
+            # the screen is clear.  See config.VISION_PROJECTILE_DODGE_*.
+            if VISION_PROJECTILE_DODGE_ENABLED and peek and self.last_detections:
+                _band_lo = 0.5 - VISION_PROJECTILE_DODGE_CENTER_BAND / 2
+                _band_hi = 0.5 + VISION_PROJECTILE_DODGE_CENTER_BAND / 2
+                for _det in self.last_detections:
+                    if (int(_det.class_id) == 2  # EnemyClass.PROJECTILE
+                            and float(_det.confidence) >= VISION_PROJECTILE_DODGE_MIN_CONF
+                            and _band_lo <= float(_det.cx_norm) <= _band_hi):
+                        peek = False
+                        break
         else:
             shoot, peek, aim_x_bias, aim_y_bias = act(
                 theta, self._build_obs(
