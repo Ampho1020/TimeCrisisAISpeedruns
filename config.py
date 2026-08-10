@@ -77,7 +77,43 @@ CONTINUE_SCREEN_STALE_TICKS = 3
 #                 (clear_rate 0.667 vs 0.162, final_best 3170 vs -62.9).
 #                 Only validated at probe scale (pop=12) so far, not yet at
 #                 live POP_SIZE=30 -- watch early live generations closely.
+#   "vision_schedule" -- open-loop schedule PLUS per-tick vision blend: theta
+#                 stores per-tick (shoot, peek, base_aim_x, base_aim_y,
+#                 vision_gain) rows AND a global class-priority vector; each
+#                 tick the env captures a frame every VISION_CAPTURE_EVERY_N_TICKS
+#                 ticks, runs detector.py's classical/ONNX detector on it,
+#                 picks the highest-priority detection, and blends the
+#                 detected centroid into the base aim according to the
+#                 tick's learned gain. See policy.act_vision_schedule and
+#                 /memories/session/plan.md (Phase 3-5) for the full
+#                 design + sim-probe gate. Vision_gain and class_priority
+#                 are zero-initialised so gen-0 behaviour is IDENTICAL to
+#                 pure "schedule" mode -- ES has to actively learn to use
+#                 the vision signal.
 POLICY_MODE = "schedule"
+
+# Class count for the vision-conditioned schedule's global class-priority
+# vector (see policy.act_vision_schedule). MUST equal detector.NUM_CLASSES
+# -- same enum backs both. If you add a class to detector.EnemyClass, bump
+# this here in the same commit or old checkpoints will silently reindex.
+NUM_ENEMY_CLASSES = 4
+
+# How often (in decision ticks) TimeCrisisEnv captures a fresh screenshot +
+# runs detection under POLICY_MODE="vision_schedule". Between captures the
+# most recent detections are re-used, matching the cadence pattern from the
+# sim's TimedSpotVisionEnv probe. 3 ticks is a compromise: cheap enough
+# that detection cost stays off the hot path (BizHawk decision loop is ~83ms
+# per tick, 20-30ms of detection every 3rd tick fits well), but frequent
+# enough that a fast-moving projectile detection doesn't get stale.
+VISION_CAPTURE_EVERY_N_TICKS = 3
+
+# Path to a fine-tuned YOLO/RT-DETR ONNX model. Empty string / non-existent
+# file -> detector.build_detector() falls back to the classical MOG2 +
+# palette + connectedComponents pipeline. No model file ships with the
+# repo -- the offline fine-tune workflow is documented at the bottom of
+# detector.py, and the "produce a labelled corpus" step is what
+# ``run_eval.py --dump-frames <dir>`` supports.
+VISION_ONNX_MODEL_PATH = ""
 
 POP_SIZE    = 30      # MUST be even (mirrored sampling)
 # SIGMA raised 0.05 -> 0.1 (2026-08-04): in-sim trend testing

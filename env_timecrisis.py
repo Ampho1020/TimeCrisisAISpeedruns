@@ -13,9 +13,10 @@ from config import (
     PEEK_TRAVERSE_TICKS, POLICY_MODE, PORT, RAM, RELOAD_BONUS, REPEATED_MISS_PENALTY,
     SAME_EPS, SHOT_SLOT_DIVERSITY_BONUS, SHOT_SLOT_DIVERSITY_SCALE,
     STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
+    VISION_CAPTURE_EVERY_N_TICKS, VISION_ONNX_MODEL_PATH,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
-from policy import act, act_schedule
+from policy import act, act_schedule, act_vision_schedule
 
 
 def u16_delta(new_v: int, old_v: int) -> int:
@@ -209,6 +210,29 @@ class TimeCrisisEnv:
         self.hit_delta: int = 0  # frames since the last confirmed hit
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
         self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
+        # Set to a directory path (via ``run_eval.py --dump-frames <dir>``) to
+        # save one PNG per decision tick during ``episode_fitness()``. Purely
+        # diagnostic / used to produce the labelling corpus for the Phase 2
+        # offline YOLO fine-tune workflow documented at the bottom of
+        # detector.py -- has NO effect on training or fitness. Default None
+        # (no capture, zero per-tick overhead).
+        self.dump_frames_dir: str | None = None
+        self._dump_frame_counter: int = 0
+        # Vision-conditioned schedule mode (POLICY_MODE="vision_schedule"):
+        # build the detector once (ONNX if VISION_ONNX_MODEL_PATH points at a
+        # real file, else the classical CV baseline -- see
+        # detector.build_detector). Every VISION_CAPTURE_EVERY_N_TICKS the
+        # env captures a fresh screenshot + refreshes ``last_detections``;
+        # between captures the cached detections are reused so we don't
+        # pay a full BMP + inference cost on every single tick. Under the
+        # other POLICY_MODEs (mlp / schedule) the detector is not built at
+        # all so the schedule/mlp code paths pay zero import/init cost.
+        if POLICY_MODE == "vision_schedule":
+            from detector import build_detector
+            self.detector = build_detector(VISION_ONNX_MODEL_PATH or None)
+        else:
+            self.detector = None
+        self.last_detections: list | None = None
 
     # -- lifecycle ------------------------------------------------------
 
@@ -223,6 +247,35 @@ class TimeCrisisEnv:
 
     def close(self):
         self.client.close()
+
+    def _dump_current_frame(self) -> None:
+        """Capture one frame via the bridge and save it as a PNG under
+        ``self.dump_frames_dir``. Guarded by a broad try/except so a
+        transient screenshot failure never aborts the surrounding episode
+        or training run (this is a diagnostic path, not a fitness input).
+
+        File name pattern: ``frame_XXXXXX.png`` (six-digit zero-padded
+        tick counter) so the natural sort matches the tick order the
+        frames were captured in.
+        """
+        try:
+            import os
+            frame = self.client.get_screenshot()
+            os.makedirs(self.dump_frames_dir, exist_ok=True)
+            path = os.path.join(
+                self.dump_frames_dir,
+                f"frame_{self._dump_frame_counter:06d}.png",
+            )
+            # cv2 expects BGR; convert once.
+            import cv2
+            bgr = frame[:, :, [2, 1, 0]]
+            cv2.imwrite(path, bgr)
+            self._dump_frame_counter += 1
+        except Exception as exc:  # pragma: no cover -- diagnostic path
+            print(
+                f"[env] frame dump failed at tick {self.ticks}: {exc!r}",
+                flush=True,
+            )
 
     # -- RAM ------------------------------------------------------------
 
@@ -283,6 +336,14 @@ class TimeCrisisEnv:
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
         self.phase_infer.reset()
+        # Vision state: discard the previous episode's background model
+        # (MOG2 in ClassicalDetector accumulates its own history across
+        # calls) and the cached detections. Guarded via getattr so sim
+        # subclasses that skip TimeCrisisEnv.__init__ still work.
+        detector = getattr(self, "detector", None)
+        if detector is not None:
+            detector.reset()
+        self.last_detections = None
         return self._build_obs(
             self.prev, 0, 0, 0.0, self.ammo_left,
             self.prev_aim_x_bias, self.prev_aim_y_bias,
@@ -297,6 +358,26 @@ class TimeCrisisEnv:
             # built via self._build_obs(...) below purely for return-value/
             # diagnostic parity with the closed-loop path -- not used here.
             shoot, peek, aim_x_bias, aim_y_bias = act_schedule(theta, self.ticks)
+        elif POLICY_MODE == "vision_schedule":
+            # Vision-conditioned schedule: refresh detections on the capture
+            # cadence, then let policy.act_vision_schedule blend them into
+            # the base aim per this tick's learned gain. Any capture/detect
+            # failure is caught so a transient bridge hiccup can't kill the
+            # whole episode -- we simply reuse the previous cached detections
+            # (empty on the very first tick), which makes the tick behave
+            # exactly like plain schedule mode for that step.
+            if (self.last_detections is None
+                    or (self.ticks % VISION_CAPTURE_EVERY_N_TICKS) == 0):
+                try:
+                    frame = self.client.get_screenshot()
+                    self.last_detections = self.detector.detect(frame)
+                except Exception as exc:  # pragma: no cover - defensive
+                    if self.last_detections is None:
+                        self.last_detections = []
+                    print(f"[env] vision capture failed: {exc!r}", flush=True)
+            shoot, peek, aim_x_bias, aim_y_bias = act_vision_schedule(
+                theta, self.ticks, self.last_detections or [],
+            )
         else:
             shoot, peek, aim_x_bias, aim_y_bias = act(
                 theta, self._build_obs(
@@ -521,6 +602,12 @@ class TimeCrisisEnv:
 
         while True:
             _, done, info = self.step(theta)
+            if getattr(self, "dump_frames_dir", None) is not None:
+                # Optional per-tick frame dump for the offline YOLO fine-tune
+                # workflow (see detector.py footer). No-op unless
+                # dump_frames_dir was set on the env; getattr fallback keeps
+                # sim subclasses that skip TimeCrisisEnv.__init__ working.
+                self._dump_current_frame()
             total_hits      += info["shots_hit_delta"]
             total_fired     += info["shots_fired_delta"]
             total_life_loss += info["life_loss"]

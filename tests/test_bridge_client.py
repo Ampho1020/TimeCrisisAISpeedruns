@@ -1,9 +1,41 @@
 import socket
+import struct
 import threading
 import time
 import unittest
 
+import numpy as np
+
 from bridge_client import BridgeClient, apply_guncon_calibration
+
+
+def _make_bmp(width: int, height: int, fill_rgb=(11, 22, 33)) -> bytes:
+    """Produce a valid uncompressed 32bpp BI_RGB BMP filled with a solid color.
+
+    Height is stored as POSITIVE (bottom-up per BMP spec, matching vision.py's
+    decode_bmp expectations). Layout mirrors what BizHawk's
+    ``comm.socketServerScreenShot`` produces (32bpp XRGB, uncompressed), so
+    FakeBizHawk can stand in for the real emulator on the receiving end.
+    """
+    row_bytes = width * 4  # already a multiple of 4 for 32bpp
+    pixel_bytes = bytearray(row_bytes * height)
+    r, g, b = fill_rgb
+    for i in range(0, len(pixel_bytes), 4):
+        pixel_bytes[i:i + 4] = bytes((b, g, r, 0))  # BGRA layout on disk
+    pixel_offset = 54
+    file_size = pixel_offset + len(pixel_bytes)
+    header = bytearray(54)
+    header[0:2] = b"BM"
+    struct.pack_into("<I", header, 2, file_size)
+    struct.pack_into("<I", header, 10, pixel_offset)
+    struct.pack_into("<I", header, 14, 40)  # DIB header size
+    struct.pack_into("<i", header, 18, width)
+    struct.pack_into("<i", header, 22, height)
+    struct.pack_into("<H", header, 26, 1)   # planes
+    struct.pack_into("<H", header, 28, 32)  # bit count
+    struct.pack_into("<I", header, 30, 0)   # BI_RGB
+    struct.pack_into("<I", header, 34, len(pixel_bytes))
+    return bytes(header) + bytes(pixel_bytes)
 
 
 def get_free_port():
@@ -31,6 +63,12 @@ class FakeBizHawk(threading.Thread):
         self.port = port
         self.commands = []
         self.error = None
+        # Optional canned screenshot response for the "screenshot" command.
+        # If set, servicing that command sends this BMP payload framed with
+        # the standard "{N} <bytes>" length prefix -- exactly mirroring
+        # BizHawk's real comm.socketServerScreenShot() behaviour (no trailing
+        # OK reply, the framed BMP IS the reply).
+        self.screenshot_bytes: bytes | None = None
 
     @staticmethod
     def _frame(payload):
@@ -75,6 +113,15 @@ class FakeBizHawk(threading.Thread):
                         reply = "OK 4660"
                     elif line == "frame":
                         reply = "OK 99"
+                    elif line == "screenshot":
+                        # Match the real bridge: send the framed BMP as the
+                        # SOLE reply (no trailing OK). If no canned bytes are
+                        # set, fall back to a tiny default so any test that
+                        # accidentally issues "screenshot" without configuring
+                        # a payload fails loudly on decode rather than hanging.
+                        payload = self.screenshot_bytes or b""
+                        sock.sendall(f"{len(payload)} ".encode("utf-8") + payload)
+                        continue
                     else:
                         reply = "OK"
                     sock.sendall(self._frame(reply))
@@ -109,6 +156,41 @@ class BridgeClientTests(unittest.TestCase):
         self.assertEqual(fake.commands[0], "read_u16 0x1234")
         self.assertEqual(fake.commands[1], "set_input 1 0 0.9700 0.2500")
         self.assertEqual(fake.commands[2], "frame")
+
+    def test_get_screenshot_reads_framed_bmp_and_decodes_to_rgb(self):
+        """BridgeClient.get_screenshot() must consume the length-prefixed BMP
+        exactly (no trailing OK reply, no double-framing) and hand it off to
+        vision.decode_bmp to produce a valid HxWx3 uint8 RGB array. This is
+        the Phase 1 round-trip gate for the vision plan -- if this passes,
+        the same wire code will handle the real BizHawk BMP."""
+        host, port = "127.0.0.1", get_free_port()
+        fake = FakeBizHawk(host, port)
+        fake.screenshot_bytes = _make_bmp(8, 4, fill_rgb=(11, 22, 33))
+        fake.start()
+
+        client = BridgeClient(host, port, timeout=2.0)
+        self.addCleanup(client.close)
+        client.connect()
+        fake.commands.clear()
+
+        frame = client.get_screenshot()
+        self.assertEqual(frame.shape, (4, 8, 3))
+        self.assertEqual(frame.dtype, np.uint8)
+        # Every pixel must decode to the (11, 22, 33) RGB fill regardless of
+        # bottom-up BMP row order -- catches any accidental BGR mix-up or
+        # payload-alignment bug in _recv_message_bytes.
+        self.assertTrue(np.all(frame[:, :, 0] == 11))
+        self.assertTrue(np.all(frame[:, :, 1] == 22))
+        self.assertTrue(np.all(frame[:, :, 2] == 33))
+
+        # After the screenshot, ordinary text commands must still work: the
+        # bytes primitive must have left the recv buffer empty and not
+        # de-synced the framing for the next text-mode reply.
+        self.assertEqual(client.frame(), 99)
+        client.close()
+        fake.join(timeout=2.0)
+        self.assertIsNone(fake.error)
+        self.assertEqual(fake.commands, ["screenshot", "frame"])
 
 
 class PeekHoldRewardTest(unittest.TestCase):

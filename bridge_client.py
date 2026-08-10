@@ -44,12 +44,19 @@ Commands (payload text, before framing):
     frame                                            -> OK <framecount>
     hud <line1|line2|...>                            -> OK
     hud_clear                                        -> OK
+    screenshot                                       -> (raw BMP bytes, length-
+                                                        prefixed just like every
+                                                        other reply; NO trailing
+                                                        OK -- see get_screenshot)
 Errors come back as: ERR <message>
 """
 
 import socket
 
+import numpy as np
+
 from config import GUNCON_CALIB
+from vision import decode_bmp
 
 # How long to poll for the Lua handshake after BizHawk connects. Long, because
 # the user still has to load the game and open the Lua script.
@@ -106,11 +113,13 @@ class BridgeClient:
             raise RuntimeError("Bridge not connected. Call connect() first.")
         self.sock.sendall(self._frame(payload))
 
-    def _recv_message(self) -> str:
-        """Read one length-prefixed message: decimal length, space, payload.
+    def _recv_message_bytes(self) -> bytes:
+        """Read one length-prefixed message and return the RAW payload bytes.
 
-        May raise socket.timeout if nothing arrives within the socket timeout.
-        Returns the decoded payload (prefix stripped).
+        Same wire format as ``_recv_message`` but skips the UTF-8 decode step
+        so binary payloads (e.g. the BMP screenshot from BizHawk's
+        ``comm.socketServerScreenShot``) round-trip byte-exact. All existing
+        text commands still go through ``_recv_message`` and decode as UTF-8.
         """
         if self.sock is None:
             raise RuntimeError("Bridge not connected. Call connect() first.")
@@ -130,10 +139,11 @@ class BridgeClient:
         except ValueError:
             raise RuntimeError(f"Malformed length prefix: {length_str!r}")
 
-        # 2. Ensure we have the full payload of n bytes.
+        # 2. Ensure we have the full payload of n bytes. Bigger recv chunk than
+        # the text path because a screenshot BMP is ~256 KB, not 100 B.
         self._recv_buf = rest
         while len(self._recv_buf) < n:
-            chunk = sock.recv(4096)
+            chunk = sock.recv(65536)
             if chunk == b"":
                 raise RuntimeError(
                     "Bridge disconnected mid-message "
@@ -143,7 +153,11 @@ class BridgeClient:
 
         payload = self._recv_buf[:n]
         self._recv_buf = self._recv_buf[n:]
-        return payload.decode("utf-8", errors="replace")
+        return payload
+
+    def _recv_message(self) -> str:
+        """Read one length-prefixed message and decode it as UTF-8 text."""
+        return self._recv_message_bytes().decode("utf-8", errors="replace")
 
     # -- lifecycle ------------------------------------------------------
 
@@ -297,6 +311,25 @@ class BridgeClient:
         if resp is None:
             raise RuntimeError("Bridge returned no value for 'frame'")
         return int(resp)
+
+    def get_screenshot(self) -> np.ndarray:
+        """Capture the current emulator frame as an HxWx3 uint8 RGB array.
+
+        Sends the ``screenshot`` command, which the Lua bridge services by
+        calling ``comm.socketServerScreenShot()``. BizHawk writes the frame as
+        an uncompressed 32bpp BI_RGB BMP straight down the socket using the
+        same length-prefix wire format as every other reply (verified against
+        BizHawk 2.11.1 SocketServer.PrefixWithLength). Unlike every other
+        command there is NO trailing ``OK`` -- the framed BMP IS the reply --
+        so we read the payload as raw bytes via ``_recv_message_bytes`` and
+        decode it through ``vision.decode_bmp`` here (never via _cmd, which
+        would try to UTF-8 decode the binary payload).
+        """
+        if self.sock is None:
+            raise RuntimeError("Bridge not connected. Call connect() first.")
+        self._send("screenshot")
+        bmp_bytes = self._recv_message_bytes()
+        return decode_bmp(bmp_bytes)
 
     def hud(self, lines):
         safe = [str(s).replace("|", "/").replace("\n", " ") for s in lines]

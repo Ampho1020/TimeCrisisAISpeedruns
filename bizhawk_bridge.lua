@@ -50,6 +50,17 @@
 --   load <slot> / save <slot>                     -> OK
 --   frame                                         -> OK <framecount>
 --   hud <line1|line2|...> / hud_clear             -> OK
+--   screenshot                                    -> (raw BMP payload framed as "{N} <bmp_bytes>", NO trailing OK)
+--
+-- SCREENSHOT NOTE
+--   comm.socketServerScreenShot() writes an uncompressed BMP (32bpp XRGB,
+--   BI_RGB) straight down the socket using BizHawk's standard length-prefix
+--   wire format (verified against BizHawk 2.11.1 SocketServer.cs
+--   PrefixWithLength) -- i.e. "{byte_count} <bmp_bytes>", no newline, no
+--   framing changes. Because that IS the reply to "screenshot", the command
+--   handler returns nil below so the dispatcher does NOT append its usual
+--   "OK\n" and the client's BridgeClient.get_screenshot() sees exactly one
+--   framed message (the BMP) per request.
 --
 -- NOTES
 --   * Aim X/Y are now written to the Guncon axes via joypad.setanalog, so the
@@ -218,6 +229,16 @@ local function handle(line)
     hud_lines = {}
     return "OK\n"
 
+  elseif cmd == "screenshot" then
+    -- comm.socketServerScreenShot() sends the framed BMP directly on the
+    -- socket (see SCREENSHOT NOTE at the top of this file) and returns a
+    -- Lua-side status string that we DISCARD -- Python doesn't see it. We
+    -- return nil so the dispatcher below skips its usual OK-reply send;
+    -- otherwise Python would have to read two framed messages per request
+    -- (BMP then OK) instead of one.
+    local _ = comm.socketServerScreenShot()
+    return nil
+
   else
     return "ERR unknown_cmd\n"
   end
@@ -308,7 +329,15 @@ while true do
     local line = comm.socketServerResponse()
     if line and line ~= "" then
       local ok, resp = pcall(handle, line)
-      comm.socketServerSend(ok and resp or ("ERR " .. tostring(resp) .. "\n"))
+      if not ok then
+        comm.socketServerSend("ERR " .. tostring(resp) .. "\n")
+      elseif resp ~= nil then
+        -- resp == nil means the handler already spoke on the wire itself
+        -- (e.g. the "screenshot" command, which sent a framed BMP via
+        -- comm.socketServerScreenShot()). Skip our default OK-reply send in
+        -- that case so exactly one framed message per request goes out.
+        comm.socketServerSend(resp)
+      end
     end
     draw_hud()
     emu.yield()

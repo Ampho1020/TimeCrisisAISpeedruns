@@ -12,7 +12,7 @@ from config import (
     VERBOSE_EPISODES,
 )
 from logger import TrainingLogger
-from policy import PARAM_COUNT, SCHEDULE_PARAM_COUNT
+from policy import PARAM_COUNT, SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_ROW_DIM
 from worker_pool import WorkerPool
 
 
@@ -44,7 +44,12 @@ def train():
         raise ValueError("POP_SIZE must be even for mirrored sampling.")
 
     rng = np.random.default_rng(SEED)
-    param_count = SCHEDULE_PARAM_COUNT if POLICY_MODE == "schedule" else PARAM_COUNT
+    if POLICY_MODE == "schedule":
+        param_count = SCHEDULE_PARAM_COUNT
+    elif POLICY_MODE == "vision_schedule":
+        param_count = VISION_SCHEDULE_PARAM_COUNT
+    else:
+        param_count = PARAM_COUNT
     # Small init -- large weights saturate tanh and kill the signal.
     theta = rng.normal(0.0, 0.1, size=(param_count,)).astype(np.float64)
 
@@ -60,6 +65,25 @@ def train():
         theta = theta.reshape(MAX_TICKS, 4)
         theta[:, 1] += 1.0
         theta = theta.reshape(-1)
+    elif POLICY_MODE == "vision_schedule":
+        # Vision-conditioned schedule: per-tick (shoot, peek, base_ax,
+        # base_ay, vision_gain) rows followed by a global class-priority
+        # vector. To keep the Phase 3 rollout risk-controlled we make gen-0
+        # behaviour BYTE-IDENTICAL to plain schedule mode:
+        #   * ``vision_gain`` column (col 4) zero-init -> tanh(0)=0 collapses
+        #     the vision blend to the base aim regardless of what the
+        #     detector returns.
+        #   * class-priority tail zero-init -> softmax is uniform, no bias
+        #     toward any particular EnemyClass.
+        # ES must then actively LEARN a non-zero gain / class priority to
+        # improve over the schedule baseline -- if it can't, we lose
+        # nothing (see /memories/session/plan.md Phase 4 gate).
+        per_tick = MAX_TICKS * VISION_SCHEDULE_ROW_DIM
+        grid = theta[:per_tick].reshape(MAX_TICKS, VISION_SCHEDULE_ROW_DIM)
+        grid[:, 1] += 1.0   # peek-forward bias (same as schedule mode)
+        grid[:, 4] = 0.0    # vision_gain -> disabled at gen 0
+        theta[:per_tick] = grid.reshape(-1)
+        theta[per_tick:] = 0.0  # class-priority tail -> uniform softmax
     else:
         # Warm-start the shoot logit to +2 and the peek logit to +1 (asymmetric,
         # 2026-08-04). Without some positive bias, ~50% of random seeds produce a
