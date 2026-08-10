@@ -90,7 +90,7 @@ CONTINUE_SCREEN_STALE_TICKS = 3
 #                 are zero-initialised so gen-0 behaviour is IDENTICAL to
 #                 pure "schedule" mode -- ES has to actively learn to use
 #                 the vision signal.
-POLICY_MODE = "schedule"
+POLICY_MODE = "vision_schedule"
 
 # Class count for the vision-conditioned schedule's global class-priority
 # vector (see policy.act_vision_schedule). MUST equal detector.NUM_CLASSES

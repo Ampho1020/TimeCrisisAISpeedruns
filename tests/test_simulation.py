@@ -2153,6 +2153,315 @@ class TimedSpotScheduleAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotSchedule
     observation-conditioned MLP), not just the observation stack."""
 
 
+# ---------------------------------------------------------------------------
+# Vision-conditioned open-loop schedule (Phase 3 sim probe)
+# ---------------------------------------------------------------------------
+#
+# Same open-loop paradigm as TimedSpotScheduleEnv (theta is a per-tick
+# action TABLE indexed by self.ticks, no observation consumed for action
+# SELECTION), but with ONE extra row entry per tick -- ``vision_gain`` --
+# and a small global ``class_priority`` vector at the tail. Each tick, the
+# env captures a frame (every N ticks, per config.VISION_CAPTURE_EVERY_N_TICKS),
+# runs detector.py's ClassicalDetector on it, picks the highest-priority
+# detection, and blends the detected centroid into the base aim according
+# to the tick's learned ``vision_gain``. This directly mirrors the Phase 3
+# ``env_timecrisis.py`` + ``policy.act_vision_schedule`` production path,
+# so any A/B result here vs. TimedSpotScheduleAccuracyEnv is attributable
+# to the vision-blend mechanism alone.
+
+_VISION_SCHEDULE_ROW_DIM = 5
+_VISION_SCHEDULE_NUM_CLASSES = 4  # must match detector.NUM_CLASSES / config.NUM_ENEMY_CLASSES
+_VISION_SCHEDULE_PARAM_COUNT = (
+    MAX_TICKS * _VISION_SCHEDULE_ROW_DIM + _VISION_SCHEDULE_NUM_CLASSES
+)
+
+
+def _theta_vision_schedule_warm_start(seed: int = 42) -> np.ndarray:
+    """Match es_train.py's Phase 3 vision_schedule warm-start EXACTLY: mild
+    peek-forward bias on every tick, zero-init the vision_gain column so
+    ``tanh(0) == 0`` collapses the blend to the base aim, and zero-init the
+    class_priority tail so softmax is uniform. This makes gen-0 behaviour
+    byte-identical to plain schedule mode -- the whole point of the A/B is
+    whether ES can then LEARN a non-zero gain / class priority that
+    improves on that baseline."""
+    rng = np.random.default_rng(seed)
+    theta = rng.normal(0.0, 0.1, _VISION_SCHEDULE_PARAM_COUNT)
+    per_tick = MAX_TICKS * _VISION_SCHEDULE_ROW_DIM
+    grid = theta[:per_tick].reshape(MAX_TICKS, _VISION_SCHEDULE_ROW_DIM)
+    grid[:, 1] += 1.0   # peek logit -- same as _theta_schedule_warm_start
+    grid[:, 4] = 0.0    # vision_gain -- disabled at gen 0
+    theta[:per_tick] = grid.reshape(-1)
+    theta[per_tick:] = 0.0  # class-priority tail -- uniform softmax
+    return theta
+
+
+def _softmax_1d(x: np.ndarray) -> np.ndarray:
+    shifted = x - float(np.max(x))
+    exp = np.exp(shifted)
+    total = float(exp.sum())
+    if total <= 0.0:
+        return np.full_like(x, 1.0 / len(x))
+    return exp / total
+
+
+def _vision_schedule_action_at(theta: np.ndarray, tick: int, detections):
+    """Sim-side mirror of ``policy.act_vision_schedule`` -- kept as a local
+    helper (rather than importing) so the sim can be re-run at a different
+    NUM_CLASSES/ROW_DIM in probe experiments without patching production
+    code. Must stay behaviourally identical to policy.act_vision_schedule.
+    """
+    idx = min(int(tick), MAX_TICKS - 1)
+    row_start = idx * _VISION_SCHEDULE_ROW_DIM
+    row = theta[row_start:row_start + _VISION_SCHEDULE_ROW_DIM]
+    shoot = bool(row[0] > 0.0)
+    peek = bool(row[1] > 0.0)
+    base_ax_bias = float(np.tanh(row[2]))
+    base_ay_bias = float(np.tanh(row[3]))
+    gain = float(np.tanh(row[4]))
+
+    if not detections:
+        return shoot, peek, base_ax_bias, base_ay_bias
+
+    priority_raw = theta[MAX_TICKS * _VISION_SCHEDULE_ROW_DIM:
+                         MAX_TICKS * _VISION_SCHEDULE_ROW_DIM
+                         + _VISION_SCHEDULE_NUM_CLASSES]
+    priority = _softmax_1d(np.asarray(priority_raw, dtype=np.float64))
+    best_det = None
+    best_score = -np.inf
+    for det in detections:
+        cid = int(det.class_id)
+        if cid < 0 or cid >= _VISION_SCHEDULE_NUM_CLASSES:
+            continue
+        score = float(det.confidence) * float(priority[cid])
+        if score > best_score:
+            best_score = score
+            best_det = det
+    if best_det is None:
+        return shoot, peek, base_ax_bias, base_ay_bias
+
+    base_x_01 = min(1.0, max(0.0, 0.5 + base_ax_bias))
+    base_y_01 = min(1.0, max(0.0, 0.5 + base_ay_bias))
+    blended_x_01 = min(
+        1.0, max(0.0, base_x_01 + gain * (float(best_det.cx_norm) - base_x_01)),
+    )
+    blended_y_01 = min(
+        1.0, max(0.0, base_y_01 + gain * (float(best_det.cy_norm) - base_y_01)),
+    )
+    return shoot, peek, blended_x_01 - 0.5, blended_y_01 - 0.5
+
+
+class TimedSpotVisionScheduleEnv(TimedSpotScheduleEnv):
+    """Sim-only vision-conditioned open-loop schedule env: same open-loop
+    paradigm as TimedSpotScheduleEnv, but every VISION_CAPTURE_EVERY_N_TICKS
+    the env captures a frame from TimedSpotMotionColorGame (multi-color
+    palette + jittering active blob + static decoy), runs
+    ClassicalDetector, and blends the top-scoring detection into the base
+    aim via the tick's learned vision_gain. Fitness formula and all other
+    step() bookkeeping (peek-lock, ammo, phase inference, terminal
+    detection) are IDENTICAL to TimedSpotScheduleEnv -- ONLY the action-
+    selection line and the per-tick vision-capture side effect differ, so
+    any A/B result vs. TimedSpotScheduleAccuracyEnv is attributable to the
+    vision-blend mechanism alone.
+    """
+
+    _CAPTURE_EVERY_N_TICKS = 3  # mirrors config.VISION_CAPTURE_EVERY_N_TICKS
+
+    def __init__(self, seed: int = 0):
+        # Skip the TimedSpotBaselineEnv wiring (which builds a plain
+        # TimedSpotGame + MockBridgeClient) so we can substitute the
+        # multi-color+jitter+decoy game the detector actually needs.
+        game = TimedSpotMotionColorGame(seed=seed)
+        self.client             = MockBridgeClient(game)
+        self.state_slot         = 1
+        self.phase_infer        = PhaseInferer(vote_window=3)
+        self.prev: dict         = {}
+        self.start_timer        = 0
+        self.ticks              = 0
+        self.prev_peek          = False
+        self.peek_ticks         = 0
+        self.peek_lock          = 0
+        self.peek_locked_value  = False
+        self.stale_core_ticks   = 0
+        self.ammo_left          = AMMO_MAX_ROUNDS
+        self.hit_delta          = 0
+        self.prev_aim_x_bias    = 0.0
+        self.prev_aim_y_bias    = 0.0
+
+        # Detector: import lazily so the module still loads on systems
+        # without opencv installed (only this suite's tests will fail).
+        from detector import ClassicalDetector
+        self.detector = ClassicalDetector()
+        self.last_detections: list | None = None
+
+    def reset(self) -> np.ndarray:
+        self.detector.reset()
+        self.last_detections = None
+        return super().reset()
+
+    def step(self, theta: np.ndarray):
+        # Refresh the cached detections on the capture cadence. First tick
+        # ALWAYS captures so that we don't accidentally test a stale None on
+        # the very first step. Any capture failure falls back to reusing
+        # the cached list (empty on first tick), matching the production
+        # env's defensive behaviour.
+        if (self.last_detections is None
+                or (self.ticks % self._CAPTURE_EVERY_N_TICKS) == 0):
+            try:
+                frame = self.client.get_screenshot()
+                self.last_detections = self.detector.detect(frame)
+            except Exception:
+                if self.last_detections is None:
+                    self.last_detections = []
+
+        shoot, peek, aim_x_bias, aim_y_bias = _vision_schedule_action_at(
+            theta, self.ticks, self.last_detections or [],
+        )
+        self.prev_aim_x_bias = float(aim_x_bias)
+        self.prev_aim_y_bias = float(aim_y_bias)
+
+        if self.ammo_left == 0:
+            peek = False
+
+        if self.peek_lock > 0:
+            peek = self.peek_locked_value
+            self.peek_lock -= 1
+        elif peek != self.prev_peek:
+            self.peek_lock = PEEK_TRAVERSE_TICKS - 1
+            self.peek_locked_value = peek
+
+        shoot_allowed = peek and self.prev_peek and self.peek_ticks >= PEEK_TRAVERSE_TICKS
+        aim_x = min(1.0, max(0.0, 0.5 + float(aim_x_bias)))
+        aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
+
+        total_fired = total_hit = total_life_loss = 0
+        cleared_guess = dead_guess = timed_out_guess = False
+        continue_screen_guess = False
+        tick_start_core = core_watchdog_snapshot(self.prev)
+        timer_at_tick_start = self.prev["timer"]
+
+        for f in range(FRAME_SKIP):
+            self.client.set_input(
+                shoot=bool(shoot and shoot_allowed and f < 2),
+                peek=peek,
+                aim_x=aim_x,
+                aim_y=aim_y,
+            )
+            pre = self.prev
+            self.client.step_frames(1)
+            post = self._read_core()
+
+            total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
+            frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
+            total_hit += frame_hits
+            if frame_hits > 0:
+                self.hit_delta = 0
+            else:
+                self.hit_delta += 1
+            life_d = u16_delta(post["life"], pre["life"])
+            if life_d < 0:
+                total_life_loss += -life_d
+
+            lethal_wrap = (
+                pre["life"] > 0
+                and life_d < 0
+                and post["life"] > pre["life"]
+                and post["life"] >= 65000
+            )
+            if post["life"] == 0 or lethal_wrap:
+                dead_guess = True
+            if u16_delta(post["timer"], self.start_timer) > 100:
+                cleared_guess = True
+            timer_step = u16_delta(post["timer"], pre["timer"])
+            if post["timer"] <= TIMEOUT_TIMER_THRESHOLD or (
+                timer_step < 0 and pre["timer"] + timer_step <= TIMEOUT_TIMER_THRESHOLD
+            ):
+                timed_out_guess = True
+
+            self.prev = post
+            if dead_guess or cleared_guess or timed_out_guess:
+                break
+
+        if (
+            not dead_guess
+            and not cleared_guess
+            and not timed_out_guess
+            and core_watchdog_snapshot(self.prev) == tick_start_core
+        ):
+            self.stale_core_ticks += 1
+        else:
+            self.stale_core_ticks = 0
+        if self.stale_core_ticks >= CONTINUE_SCREEN_STALE_TICKS:
+            timed_out_guess = True
+            continue_screen_guess = True
+
+        ammo_before_tick = self.ammo_left
+        dry_fire = bool(shoot_allowed and ammo_before_tick == 0)
+        self.ammo_left = max(0, self.ammo_left - total_fired)
+        ending_peek = (peek != self.prev_peek) and not peek
+        reload_correct = False
+        if ending_peek:
+            reload_correct = self.ammo_left == 0
+            self.ammo_left = AMMO_MAX_ROUNDS
+
+        self.ticks += 1
+
+        phase = self.phase_infer.infer(TickSignals(
+            shots_fired_delta=total_fired,
+            shots_hit_delta=total_hit,
+            life_delta=-total_life_loss,
+            timer_delta=u16_delta(self.prev["timer"], timer_at_tick_start),
+            cleared_guess=cleared_guess,
+            dead_guess=dead_guess or timed_out_guess,
+            can_fire_probe=(total_fired > 0),
+        ))
+
+        last_hit = 1 if total_hit > 0 else 0
+        last_miss = 1 if (total_fired > 0 and total_hit == 0) else 0
+        if peek == self.prev_peek:
+            self.peek_ticks = min(self.peek_ticks + 1, PEEK_TRAVERSE_TICKS)
+        else:
+            self.peek_ticks = 1
+        self.prev_peek = peek
+        peek_phase_next = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if peek else -1.0)
+        obs = self._build_obs(
+            self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left,
+            self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
+        )
+
+        done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
+        info = {
+            "shots_fired_delta": total_fired,
+            "shots_hit_delta": total_hit,
+            "life_loss": total_life_loss,
+            "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
+            "dead": dead_guess,
+            "timed_out": timed_out_guess,
+            "continue_screen": continue_screen_guess,
+            "peek": bool(peek),
+            "phase": phase.name,
+            "dry_fire": dry_fire,
+            "reload_correct": reload_correct,
+            "ammo_left": self.ammo_left,
+            "hit_delta": int(self.hit_delta),
+            "aim_x": float(aim_x),
+            "aim_y": float(aim_y),
+        }
+        return obs, done, info
+
+
+class TimedSpotVisionScheduleAccuracyEnv(
+    AccuracyShapedFitnessMixin, TimedSpotVisionScheduleEnv,
+):
+    """Vision-conditioned open-loop schedule with the accuracy-shaped
+    fitness on top -- direct A/B counterpart to
+    TimedSpotScheduleAccuracyEnv (identical fitness formula + game family),
+    where ONLY the action-selection paradigm differs (blind schedule vs.
+    schedule+vision blend). Any delta in clear_rate / mean_acc /
+    final_best between the two under the same probe budget is attributable
+    to the vision blend alone."""
+
+
 def run_timed_spot_probe(env_cls, theta_init_fn, param_count: int,
                          seed: int = 0, gens: int = 25, pop: int = 12,
                          sigma: float = 0.1, alpha: float = 0.02,
@@ -3154,6 +3463,154 @@ class ScheduleSearchSuite(unittest.TestCase):
     def test_episode_completes_without_error(self):
         env = TimedSpotScheduleAccuracyEnv(seed=0)
         theta = _theta_schedule_warm_start(seed=0)
+        fitness, metrics = env.episode_fitness(theta)
+        self.assertTrue(np.isfinite(fitness))
+        self.assertIn("cleared", metrics)
+        self.assertIn("accuracy", metrics)
+
+
+class VisionScheduleSearchSuite(unittest.TestCase):
+    """Regression checks for the vision-conditioned open-loop schedule env
+    (TimedSpotVisionScheduleEnv) -- the Phase 3 sim mirror of
+    ``env_timecrisis.py``'s ``POLICY_MODE='vision_schedule'`` code path and
+    ``policy.act_vision_schedule``. Any behavioural drift between the
+    sim-side ``_vision_schedule_action_at`` here and
+    ``policy.act_vision_schedule`` in production would silently invalidate
+    the Phase 4 A/B probe result, so these tests pin the contract."""
+
+    def test_param_count_and_warm_start_shape(self):
+        self.assertEqual(
+            _VISION_SCHEDULE_PARAM_COUNT,
+            MAX_TICKS * _VISION_SCHEDULE_ROW_DIM + _VISION_SCHEDULE_NUM_CLASSES,
+        )
+        theta = _theta_vision_schedule_warm_start(seed=42)
+        self.assertEqual(theta.shape[0], _VISION_SCHEDULE_PARAM_COUNT)
+
+    def test_matches_policy_act_vision_schedule_at_gen0(self):
+        """Sim helper ``_vision_schedule_action_at`` must produce IDENTICAL
+        actions to the production ``policy.act_vision_schedule`` on the
+        same theta + detections -- otherwise the sim probe wouldn't tell
+        us anything about the live path."""
+        from detector import Detection
+        from policy import act_vision_schedule
+
+        theta = _theta_vision_schedule_warm_start(seed=1)
+        # Non-trivial detections list including a "wrong-class" entry to
+        # exercise the class-priority scoring branch too.
+        dets = [
+            Detection(x=10, y=20, w=8, h=8, class_id=0, confidence=0.9,
+                      cx_norm=0.3, cy_norm=0.7),
+            Detection(x=40, y=10, w=6, h=6, class_id=1, confidence=0.5,
+                      cx_norm=0.8, cy_norm=0.2),
+        ]
+        for tick in (0, 5, 25, MAX_TICKS - 1):
+            sim = _vision_schedule_action_at(theta, tick, dets)
+            prod = act_vision_schedule(theta, tick, dets)
+            self.assertEqual(sim[0], prod[0])
+            self.assertEqual(sim[1], prod[1])
+            self.assertAlmostEqual(sim[2], prod[2], places=10)
+            self.assertAlmostEqual(sim[3], prod[3], places=10)
+
+    def test_gain_zero_collapses_to_schedule_mode(self):
+        """The whole warm-start rationale rests on this: with vision_gain=0
+        AND class_priority=0, ``_vision_schedule_action_at`` must produce
+        the SAME (shoot, peek, aim_x_bias, aim_y_bias) as
+        ``_schedule_action_at`` on the equivalent 4-col theta, regardless
+        of what the detector returns."""
+        from detector import Detection
+
+        # Build a paired (5-col-with-gain-zero) / (4-col) theta from the
+        # same underlying random seed, so any behavioural difference is
+        # attributable to the extra column alone.
+        rng = np.random.default_rng(7)
+        theta_v = rng.normal(0.0, 0.1, _VISION_SCHEDULE_PARAM_COUNT)
+        per_tick = MAX_TICKS * _VISION_SCHEDULE_ROW_DIM
+        grid = theta_v[:per_tick].reshape(MAX_TICKS, _VISION_SCHEDULE_ROW_DIM)
+        grid[:, 1] += 1.0
+        grid[:, 4] = 0.0
+        theta_v[:per_tick] = grid.reshape(-1)
+        theta_v[per_tick:] = 0.0
+        theta_s = grid[:, :4].reshape(-1).copy()
+
+        dets = [Detection(x=10, y=20, w=8, h=8, class_id=0, confidence=0.9,
+                          cx_norm=0.9, cy_norm=0.1)]
+        for tick in (0, 10, 50, MAX_TICKS - 1):
+            s = _schedule_action_at(theta_s, tick)
+            v_nd = _vision_schedule_action_at(theta_v, tick, [])
+            v_d = _vision_schedule_action_at(theta_v, tick, dets)
+            self.assertEqual(s[0], v_nd[0])
+            self.assertEqual(s[1], v_nd[1])
+            self.assertAlmostEqual(s[2], v_nd[2], places=10)
+            self.assertAlmostEqual(s[3], v_nd[3], places=10)
+            # With gain=0, the detection MUST NOT influence the output.
+            self.assertEqual(s[0], v_d[0])
+            self.assertEqual(s[1], v_d[1])
+            self.assertAlmostEqual(s[2], v_d[2], places=10)
+            self.assertAlmostEqual(s[3], v_d[3], places=10)
+
+    def test_nonzero_gain_pulls_aim_toward_top_scoring_detection(self):
+        """With gain=+1 and a single detection, the blended aim should
+        collapse to the detection's centroid."""
+        from detector import Detection
+
+        theta = np.zeros(_VISION_SCHEDULE_PARAM_COUNT)
+        # Force base aim to CENTER (row[2]=row[3]=0 -> tanh=0 -> aim=0.5)
+        # and gain -> ~+1 by setting row[4] to a large positive value.
+        for t in range(MAX_TICKS):
+            theta[t * _VISION_SCHEDULE_ROW_DIM + 0] = 5.0     # shoot on
+            theta[t * _VISION_SCHEDULE_ROW_DIM + 1] = 5.0     # peek on
+            theta[t * _VISION_SCHEDULE_ROW_DIM + 4] = 5.0     # gain ~ +1
+        dets = [Detection(x=0, y=0, w=1, h=1, class_id=0, confidence=1.0,
+                          cx_norm=0.25, cy_norm=0.75)]
+        _, _, ax_bias, ay_bias = _vision_schedule_action_at(theta, 0, dets)
+        # env decode: aim = 0.5 + bias -- so a target of (0.25, 0.75)
+        # requires biases of (-0.25, +0.25) once gain saturates near +1.
+        self.assertAlmostEqual(ax_bias, -0.25, places=2)
+        self.assertAlmostEqual(ay_bias, +0.25, places=2)
+
+    def test_class_priority_routes_target_selection(self):
+        """When two detections are present with different classes, the
+        top-priority class should win the argmax and drive the blend."""
+        from detector import Detection
+
+        theta = np.zeros(_VISION_SCHEDULE_PARAM_COUNT)
+        # Base aim centered, gain saturated at +1 so the winning
+        # detection's centroid dominates the output.
+        for t in range(MAX_TICKS):
+            theta[t * _VISION_SCHEDULE_ROW_DIM + 0] = 5.0
+            theta[t * _VISION_SCHEDULE_ROW_DIM + 1] = 5.0
+            theta[t * _VISION_SCHEDULE_ROW_DIM + 4] = 5.0
+        priority_slot = MAX_TICKS * _VISION_SCHEDULE_ROW_DIM
+        # Route the argmax to class 2 (PROJECTILE by detector.EnemyClass).
+        theta[priority_slot + 2] = 10.0
+
+        dets = [
+            Detection(x=0, y=0, w=1, h=1, class_id=0, confidence=0.9,
+                      cx_norm=0.2, cy_norm=0.2),
+            Detection(x=0, y=0, w=1, h=1, class_id=2, confidence=0.5,
+                      cx_norm=0.8, cy_norm=0.8),
+        ]
+        _, _, ax_bias, ay_bias = _vision_schedule_action_at(theta, 0, dets)
+        # Even though class 0's raw confidence (0.9) beats class 2's (0.5),
+        # the huge softmax weight on class 2 must dominate -- aim should
+        # land near the class-2 detection at (0.8, 0.8), not (0.2, 0.2).
+        self.assertGreater(ax_bias, 0.2)
+        self.assertGreater(ay_bias, 0.2)
+
+    def test_first_step_captures_a_frame_and_populates_detections(self):
+        env = TimedSpotVisionScheduleEnv(seed=0)
+        env.reset()
+        self.assertIsNone(env.last_detections)
+        theta = _theta_vision_schedule_warm_start(seed=0)
+        env.step(theta)
+        # After exactly one step, the capture cadence should have fired and
+        # the detector state should be a list (possibly empty on the very
+        # first MOG2 pass, but not None).
+        self.assertIsInstance(env.last_detections, list)
+
+    def test_episode_completes_without_error(self):
+        env = TimedSpotVisionScheduleAccuracyEnv(seed=0)
+        theta = _theta_vision_schedule_warm_start(seed=0)
         fitness, metrics = env.episode_fitness(theta)
         self.assertTrue(np.isfinite(fitness))
         self.assertIn("cleared", metrics)
