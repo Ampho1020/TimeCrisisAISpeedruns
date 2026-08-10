@@ -103,20 +103,23 @@ ALPHA       = 0.02    # learning rate
 # mean/best accuracy, mean hits) with no seed getting more than a small dip
 # worse. Set to 1 to fully disable (exact prior single-episode behavior).
 #
-# Raised 1 -> 3 (2026-08-09): the live 80-gen POLICY_MODE="schedule" run at
-# EPISODES_PER_CANDIDATE=1 completed cleanly and was validated visually via
-# run_eval.py (theta_final.npy cleared the level, fitness 2465.84, 0 damage,
-# 50% accuracy) -- direction is confirmed good, so switching back to 3 for
-# lower-noise ranking (this mechanism is generic in es_train.py / not tied
-# to POLICY_MODE, previously only validated live in "mlp" mode). Per-
-# generation wall-clock roughly triples; GENERATIONS intentionally left at
-# 80 (not reduced) for this pass, so total run time will be ~3-4x the prior
-# run (several hours) rather than held constant.
-EPISODES_PER_CANDIDATE = 3
+# Reverted 3 -> 1 for schedule mode (2026-08-10): ran a full live 80-gen
+# EPISODES_PER_CANDIDATE=3 pass and then directly re-evaluated the resulting
+# theta_final.npy for 16 real BizHawk episodes -- fitness/clear/damage/acc
+# were BIT-IDENTICAL across all 16 (std=0.0 exactly). Schedule mode's
+# open-loop action table is indexed only by tick count (never reacts to
+# observations), and the emulator is deterministic from a fixed savestate,
+# so a fixed schedule-mode theta has ZERO episode-to-episode variance.
+# EPISODES_PER_CANDIDATE's whole purpose is averaging out per-episode
+# stochastic noise for a FIXED candidate -- with zero variance to average
+# out, it was pure wasted compute (3x wall-clock) for schedule mode. That
+# rationale (repo memory's "Multi-episode fitness averaging probe") was
+# validated for "mlp" (closed-loop, reactive) mode, which may still have
+# real timing/observation jitter -- raise this again if POLICY_MODE is
+# switched back to "mlp".
+EPISODES_PER_CANDIDATE = 1
 
 # GENERATIONS raised back up for live convergence passes (2026-08-08).
-# Left at 80 even after EPISODES_PER_CANDIDATE went back to 3 (2026-08-09)
-# -- see EPISODES_PER_CANDIDATE's comment above for the wall-clock tradeoff.
 GENERATIONS = 80
 SEED        = 10
 CHECKPOINT_EVERY = 5

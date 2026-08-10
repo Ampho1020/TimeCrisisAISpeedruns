@@ -13,6 +13,7 @@ class TrainingLogger:
         "mean_aim_dx", "mean_hit_delta",
         "mean_shot_left_frac", "mean_shot_mid_frac", "mean_shot_right_frac",
         "sigma_used",
+        "theta_fitness", "theta_clear", "theta_time", "theta_damage", "theta_acc",
     ]
 
     def __init__(self, path: str):

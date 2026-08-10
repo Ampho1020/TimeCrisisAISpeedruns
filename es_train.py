@@ -182,6 +182,21 @@ def train():
             gradient = (eps.T @ shaped) / (POP_SIZE * sigma_this_gen)
             theta = theta + ALPHA * gradient
 
+            # --- evaluate the actual (unperturbed) center theta itself ---
+            # The population stats below (best/mean/clear_rate/etc.) describe
+            # the 30 PERTURBED candidates (theta +/- sigma*eps) used only to
+            # estimate the gradient -- they are neighborhood diagnostics, not
+            # a measurement of the policy this generation actually produces.
+            # For schedule mode this gap can look alarming (e.g. a 3600-dim
+            # raw action table is very perturbation-sensitive, so population
+            # clear_rate can sit at ~30-40% while the center theta itself
+            # clears every time -- confirmed empirically 2026-08-10: 16/16
+            # real BizHawk replays of one center theta were bit-identical,
+            # std=0.0, since schedule mode is a fixed open-loop action table
+            # replayed deterministically from a fixed savestate). One extra
+            # episode/gen is negligible next to the population's evals.
+            theta_fitness, theta_info = pool.evaluate(theta[None, :])[0]
+
             # --- diagnostics ---
             best_i = int(np.argmax(fitnesses))
             best = infos[best_i]
@@ -216,7 +231,9 @@ def train():
                 f"| aimspan ({mean_aim_span_x:.3f},{mean_aim_span_y:.3f}) "
                 f"| aimdx {mean_aim_dx:.3f} "
                 f"| hitd {mean_hit_delta:.1f} "
-                f"| lanes L/M/R {mean_shot_left_frac:.0%}/{mean_shot_mid_frac:.0%}/{mean_shot_right_frac:.0%} ===\n",
+                f"| lanes L/M/R {mean_shot_left_frac:.0%}/{mean_shot_mid_frac:.0%}/{mean_shot_right_frac:.0%} ===\n"
+                f"    [center theta] fit {theta_fitness:8.2f} | clear {'YES' if theta_info['cleared'] >= 1.0 else 'no '} "
+                f"| t {theta_info['elapsed']:6.1f} | dmg {theta_info['damage']:4.0f} | acc {theta_info['accuracy']:5.1%}\n",
                 flush=True,
             )
 
@@ -259,6 +276,11 @@ def train():
                 "mean_shot_mid_frac": mean_shot_mid_frac,
                 "mean_shot_right_frac": mean_shot_right_frac,
                 "sigma_used": sigma_this_gen,
+                "theta_fitness": theta_fitness,
+                "theta_clear": theta_info["cleared"],
+                "theta_time": theta_info["elapsed"],
+                "theta_damage": theta_info["damage"],
+                "theta_acc": theta_info["accuracy"],
             })
 
             if gen % CHECKPOINT_EVERY == 0:
