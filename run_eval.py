@@ -44,6 +44,7 @@ def main():
         print(f"checkpoint : {args.checkpoint}")
         print(f"fitness    : {fitness:.2f}")
         print(f"cleared    : {info['cleared']}")
+        print(f"screens    : {info.get('screens_cleared', 0)}")
         print(f"elapsed    : {info['elapsed']:.1f}")
         print(f"damage     : {info['damage']:.0f}")
         print(f"accuracy   : {info['accuracy']:.1%} "

@@ -232,6 +232,15 @@ def train():
             clear_rate = float(np.mean([x["cleared"] for x in infos]))
             timeout_rate = float(np.mean([x["timed_out"] for x in infos]))
             mean_acc = float(np.mean([x["accuracy"] for x in infos]))
+            # Multi-screen diagnostics (added 2026-08-10 alongside the
+            # MULTI_CLEAR_BONUS quadratic in env_timecrisis.py). mean_screens
+            # is the population-average number of screens cleared per
+            # episode; max_screens is the single best candidate this
+            # generation. Both should trend UP if ES is genuinely learning
+            # to chain screens (as opposed to just improving accuracy on
+            # the fixed first screen).
+            mean_screens = float(np.mean([x.get("screens_cleared", 0) for x in infos]))
+            max_screens = float(np.max([x.get("screens_cleared", 0) for x in infos]))
             mean_flips      = float(np.mean([x["peek_flips"]      for x in infos]))
             mean_hold       = float(np.mean([x["peek_hold_score"] for x in infos]))
             mean_cover_time = float(np.mean([x["cover_time"]       for x in infos]))
@@ -250,6 +259,7 @@ def train():
                 f"| mean {fitnesses.mean():8.2f} | std {std:7.2f} | spread {spread:8.2f} "
                 f"| clear {clear_rate:5.1%} | timeout {timeout_rate:5.1%} | t {best['elapsed']:6.1f} "
                 f"| dmg {best['damage']:4.0f} | acc {best['accuracy']:5.1%} "
+                f"| screens mean {mean_screens:4.2f} max {max_screens:2.0f} "
                 f"| ctime {mean_cover_time:5.1f} | flips {mean_flips:5.1f} | hold {mean_hold:5.1f} "
                 f"| aimstd ({mean_aim_x_std:.3f},{mean_aim_y_std:.3f}) "
                 f"| aimspan ({mean_aim_span_x:.3f},{mean_aim_span_y:.3f}) "
@@ -257,6 +267,7 @@ def train():
                 f"| hitd {mean_hit_delta:.1f} "
                 f"| lanes L/M/R {mean_shot_left_frac:.0%}/{mean_shot_mid_frac:.0%}/{mean_shot_right_frac:.0%} ===\n"
                 f"    [center theta] fit {theta_fitness:8.2f} | clear {'YES' if theta_info['cleared'] >= 1.0 else 'no '} "
+                f"| screens {theta_info.get('screens_cleared', 0):2.0f} "
                 f"| t {theta_info['elapsed']:6.1f} | dmg {theta_info['damage']:4.0f} | acc {theta_info['accuracy']:5.1%}\n",
                 flush=True,
             )
@@ -305,6 +316,9 @@ def train():
                 "theta_time": theta_info["elapsed"],
                 "theta_damage": theta_info["damage"],
                 "theta_acc": theta_info["accuracy"],
+                "mean_screens_cleared": mean_screens,
+                "max_screens_cleared": max_screens,
+                "theta_screens_cleared": float(theta_info.get("screens_cleared", 0)),
             })
 
             if gen % CHECKPOINT_EVERY == 0:

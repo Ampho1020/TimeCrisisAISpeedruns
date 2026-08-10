@@ -231,6 +231,39 @@ DAMAGE_PENALTY     = 300.0   # deliberately harsh: a hit is never worth it
 HIT_REWARD         = 5.0     # per confirmed hit, all episodes; teaches aim
 FAIL_PENALTY       = 200.0
 
+# Multi-screen fitness (added 2026-08-10 alongside vision_schedule).
+# Time Crisis' Area 1 has SEVERAL discrete "screens" (cover swaps); before
+# this change the episode terminated on the FIRST screen clear (phase_infer
+# treats cleared_guess=True as absorbing TERMINAL), so fitness was
+# effectively binary "did this ONE screen clear or not". The user hit the
+# ceiling of that early -- vision was clearly seeing enemies but couldn't
+# translate that into more reward, because there was no more reward to earn
+# once one screen fell. We now:
+#   (1) do NOT feed cleared_guess into phase_infer (episode keeps running
+#       to death / timeout / MAX_TICKS regardless of clears), and
+#   (2) count screen-clear events per-frame via monotonic-timer-peak
+#       tracking (see TimeCrisisEnv step()), and
+#   (3) add a QUADRATIC bonus so each additional screen is worth strictly
+#       more than the last -- exactly the "richly reward more screens than
+#       the previous" curve the user asked for.
+#
+# MULTI_CLEAR_BONUS * screens_cleared ** 2 lands at:
+#   1 screen: +1000  (roughly matches the existing single-clear CLEAR_BONUS)
+#   2 screens: +4000 (each extra worth 3000, dwarfs any accuracy dip from
+#                    encountering unfamiliar screen 2 enemies)
+#   3 screens: +9000
+#   4 screens: +16000
+# The gap between (N) and (N-1) is 2N-1 * MULTI_CLEAR_BONUS, so ES has a
+# strictly INCREASING marginal incentive to push for one more screen -- the
+# reward is genuinely "richer" per extra screen, not just larger absolute.
+#
+# Any per-frame timer bump larger than SCREEN_CLEAR_TIMER_BUMP is treated as
+# a new screen clear event. Time Crisis' timer counts DOWN at 1 unit/frame in
+# normal play and jumps up by hundreds on a clear, so ~30 is well above
+# natural noise and well below a real clear's bonus roll.
+MULTI_CLEAR_BONUS = 1000.0
+SCREEN_CLEAR_TIMER_BUMP = 30
+
 # Peeking out is a HOLD, not a tap: the ~0.2s (~12-frame) in/out traverse only
 # completes if the button is held through it. PEEK_TRAVERSE_TICKS is a game-
 # mechanics constant (minimum hold lock so a transition can't be reversed

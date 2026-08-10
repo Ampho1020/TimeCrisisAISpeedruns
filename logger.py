@@ -14,6 +14,11 @@ class TrainingLogger:
         "mean_shot_left_frac", "mean_shot_mid_frac", "mean_shot_right_frac",
         "sigma_used",
         "theta_fitness", "theta_clear", "theta_time", "theta_damage", "theta_acc",
+        # Multi-screen tracking (added 2026-08-10 alongside MULTI_CLEAR_BONUS
+        # in config.py). mean_screens_cleared / max_screens_cleared aggregate
+        # across the population per generation; theta_screens_cleared is the
+        # current mean-theta's single-episode count.
+        "mean_screens_cleared", "max_screens_cleared", "theta_screens_cleared",
     ]
 
     def __init__(self, path: str):

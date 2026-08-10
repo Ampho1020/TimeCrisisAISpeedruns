@@ -9,10 +9,10 @@ from config import (
     CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN, DAMAGE_PENALTY,
     DRY_FIRE_PENALTY, EDGE_BAND, EDGE_SCATTER_PENALTY, FAIL_PENALTY,
     FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
-    MAX_TICKS, MISS_CORRECTION_BONUS, MOVE_EPS,
+    MAX_TICKS, MISS_CORRECTION_BONUS, MOVE_EPS, MULTI_CLEAR_BONUS,
     PEEK_TRAVERSE_TICKS, POLICY_MODE, PORT, RAM, RELOAD_BONUS, REPEATED_MISS_PENALTY,
-    SAME_EPS, SHOT_SLOT_DIVERSITY_BONUS, SHOT_SLOT_DIVERSITY_SCALE,
-    STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
+    SAME_EPS, SCREEN_CLEAR_TIMER_BUMP, SHOT_SLOT_DIVERSITY_BONUS,
+    SHOT_SLOT_DIVERSITY_SCALE, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
     VISION_CAPTURE_EVERY_N_TICKS, VISION_ONNX_MODEL_PATH,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
@@ -210,6 +210,9 @@ class TimeCrisisEnv:
         self.hit_delta: int = 0  # frames since the last confirmed hit
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
         self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
+        # Multi-screen tracking (see reset() for the full comment).
+        self.screens_cleared: int = 0
+        self.max_timer_delta_since_start: int = 0
         # Set to a directory path (via ``run_eval.py --dump-frames <dir>``) to
         # save one PNG per decision tick during ``episode_fitness()``. Purely
         # diagnostic / used to produce the labelling corpus for the Phase 2
@@ -336,6 +339,16 @@ class TimeCrisisEnv:
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
         self.phase_infer.reset()
+        # Multi-screen tracking (added 2026-08-10). We count DISTINCT
+        # screen-clear events across the episode via a monotonic peak
+        # tracker: any per-frame timer-vs-start jump exceeding the running
+        # peak by SCREEN_CLEAR_TIMER_BUMP is a new clear. Timer counts
+        # down 1/frame in normal play, and jumps up by hundreds on a real
+        # clear, so this is well above natural noise and distinguishes N
+        # separate clears (each pushes the peak by another chunk) from ONE
+        # clear whose bonus stretches across several ticks.
+        self.screens_cleared = 0
+        self.max_timer_delta_since_start = 0
         # Vision state: discard the previous episode's background model
         # (MOG2 in ClassicalDetector accumulates its own history across
         # calls) and the cached detections. Guarded via getattr so sim
@@ -480,10 +493,32 @@ class TimeCrisisEnv:
             )
             if post["life"] == 0 or lethal_wrap:
                 dead_guess = True
-            # Heuristic clear detection: timer jumps discontinuously upward.
-            # Replace with a real flag if you ever find one.
-            if u16_delta(post["timer"], self.start_timer) > 100:
+            # Heuristic clear detection: timer jumps discontinuously upward
+            # (screen-clear bonus roll -- no explicit "screen cleared" RAM
+            # flag has been found). ``cleared_guess`` here is a boolean "at
+            # LEAST one screen has been cleared this episode" flag kept for
+            # the original single-clear fitness branch below; the actual
+            # PER-SCREEN COUNT lives in ``self.screens_cleared`` and is
+            # incremented by the monotonic-peak tracker immediately below.
+            timer_delta_from_start = u16_delta(post["timer"], self.start_timer)
+            if timer_delta_from_start > 100:
                 cleared_guess = True
+            # Monotonic-peak screen-clear counter (added 2026-08-10 alongside
+            # vision_schedule + MULTI_CLEAR_BONUS). Time Crisis' timer only
+            # ever counts DOWN in normal play, and jumps UP by hundreds on a
+            # screen clear. We track the running peak of (timer -
+            # start_timer); each time that peak is pushed up by more than
+            # SCREEN_CLEAR_TIMER_BUMP, that's a new clear event. Between
+            # clears, the timer counts back down, so the peak stays flat --
+            # we cannot double-count a single clear whose cutscene stretches
+            # across several ticks. See config.py's MULTI_CLEAR_BONUS block
+            # for why this counter is what makes multi-screen learning
+            # possible at all.
+            if timer_delta_from_start > (
+                self.max_timer_delta_since_start + SCREEN_CLEAR_TIMER_BUMP
+            ):
+                self.screens_cleared += 1
+                self.max_timer_delta_since_start = timer_delta_from_start
             # Timeout: the countdown reached zero -> "continue?" screen. Detect
             # the zero-cross here (a large downward step across the tick also
             # counts, in case the timer skips the exact zero sample).
@@ -494,7 +529,12 @@ class TimeCrisisEnv:
                 timed_out_guess = True
 
             self.prev = post
-            if dead_guess or cleared_guess or timed_out_guess:
+            # Only bail out of the inner frame loop for TERMINAL outcomes
+            # (death or timeout). A clear no longer breaks: we want the
+            # remaining frames to run so the game can start rendering the
+            # NEXT screen this same tick, giving vision a fresh frame to
+            # capture next tick.
+            if dead_guess or timed_out_guess:
                 break
 
         # Fallback continue/menu watchdog: if all core counters were frozen
@@ -543,7 +583,13 @@ class TimeCrisisEnv:
             shots_hit_delta=total_hit,
             life_delta=-total_life_loss,
             timer_delta=u16_delta(self.prev["timer"], timer_at_tick_start),
-            cleared_guess=cleared_guess,
+            # Multi-screen: a clear no longer forces Phase.TERMINAL (which is
+            # absorbing) -- we want the episode to keep running so ES can
+            # LEARN to chain screens for the quadratic MULTI_CLEAR_BONUS.
+            # Only death/timeout still end the episode; the "was there any
+            # clear" signal is captured by ``cleared_guess`` above and by
+            # ``self.screens_cleared`` for the fitness formula.
+            cleared_guess=False,
             dead_guess=dead_guess or timed_out_guess,
             can_fire_probe=(total_fired > 0),
         ))
@@ -568,6 +614,11 @@ class TimeCrisisEnv:
             "shots_hit_delta": total_hit,
             "life_loss": total_life_loss,
             "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
+            # Cumulative screen-clear count so far this episode (see reset()
+            # for the monotonic-peak counter). ``cleared`` above is the
+            # backward-compatible "at least one screen" boolean; this is the
+            # actual number MULTI_CLEAR_BONUS is computed from.
+            "screens_cleared": int(self.screens_cleared),
             "dead": dead_guess,
             "timed_out": timed_out_guess,
             "continue_screen": continue_screen_guess,
@@ -633,11 +684,23 @@ class TimeCrisisEnv:
                 break
 
         elapsed = u16_delta(self.start_timer, self.prev["timer"])
+        # Read the cumulative screen-clear count from the env itself (not
+        # accumulated across ticks) -- self.screens_cleared is monotone within
+        # an episode and info["screens_cleared"] on the LAST tick already
+        # holds the final total.
+        screens_cleared = int(getattr(self, "screens_cleared", 0))
 
-        if cleared:
+        if cleared or screens_cleared > 0:
             fitness = CLEAR_BONUS - elapsed - DAMAGE_PENALTY * total_life_loss
         else:
             fitness = -FAIL_PENALTY
+        # QUADRATIC multi-screen bonus (added 2026-08-10 alongside
+        # vision_schedule). Rewards clearing more screens strictly-more per
+        # extra screen: gap between (N+1)-clear and N-clear fitness is
+        # (2N+1) * MULTI_CLEAR_BONUS -- so ES has an increasing marginal
+        # incentive to push for one more screen every time. See MULTI_CLEAR_BONUS
+        # in config.py for the full "why quadratic" rationale.
+        fitness += MULTI_CLEAR_BONUS * screens_cleared * screens_cleared
         # Diagnostics only (NOT added to fitness): peek_hold_score, peek_flips
         # and ticks_in_cover used to feed reward shaping (COVER_HOLD_REWARD,
         # COVER_FLIP_PENALTY, COVER_TIME_PENALTY); that noisy shaping was
@@ -735,6 +798,7 @@ class TimeCrisisEnv:
 
         return float(fitness), {
             "cleared": cleared,
+            "screens_cleared": screens_cleared,
             "timed_out": bool(timed_out),
             "dead": bool(dead),
             "elapsed": float(elapsed),
