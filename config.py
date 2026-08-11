@@ -94,9 +94,9 @@ POLICY_MODE = "vision_schedule"
 
 # Class count for the vision-conditioned schedule's global class-priority
 # vector (see policy.act_vision_schedule). MUST equal detector.NUM_CLASSES
-# -- same enum backs both. If you add a class to detector.EnemyClass, bump
-# this here in the same commit or old checkpoints will silently reindex.
-NUM_ENEMY_CLASSES = 4
+# -- same enum backs both. If you change this, existing checkpoints become
+# incompatible because theta dimensionality changes.
+NUM_ENEMY_CLASSES = 3
 
 # How often (in decision ticks) TimeCrisisEnv captures a fresh screenshot +
 # runs detection under POLICY_MODE="vision_schedule". Between captures the

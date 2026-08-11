@@ -2170,7 +2170,7 @@ class TimedSpotScheduleAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotSchedule
 # to the vision-blend mechanism alone.
 
 _VISION_SCHEDULE_ROW_DIM = 5
-_VISION_SCHEDULE_NUM_CLASSES = 4  # must match detector.NUM_CLASSES / config.NUM_ENEMY_CLASSES
+_VISION_SCHEDULE_NUM_CLASSES = 3  # must match detector.NUM_CLASSES / config.NUM_ENEMY_CLASSES
 _VISION_SCHEDULE_PARAM_COUNT = (
     MAX_TICKS * _VISION_SCHEDULE_ROW_DIM + _VISION_SCHEDULE_NUM_CLASSES
 )

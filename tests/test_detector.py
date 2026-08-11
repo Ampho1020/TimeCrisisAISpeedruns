@@ -50,10 +50,9 @@ class DetectionContractSuite(unittest.TestCase):
 
     def test_class_ids_are_stable_ints_in_expected_order(self):
         self.assertEqual(int(EnemyClass.ENEMY), 0)
-        self.assertEqual(int(EnemyClass.CIVILIAN), 1)
+        self.assertEqual(int(EnemyClass.GRENADE), 1)
         self.assertEqual(int(EnemyClass.PROJECTILE), 2)
-        self.assertEqual(int(EnemyClass.MUZZLE_FLASH), 3)
-        self.assertEqual(NUM_CLASSES, 4)
+        self.assertEqual(NUM_CLASSES, 3)
 
     def test_detection_area_is_wxh(self):
         det = Detection(

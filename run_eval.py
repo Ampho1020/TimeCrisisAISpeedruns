@@ -15,7 +15,17 @@ import sys
 
 import numpy as np
 
+from config import POLICY_MODE
 from env_timecrisis import TimeCrisisEnv
+from policy import PARAM_COUNT, SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_PARAM_COUNT
+
+
+def _expected_theta_size() -> int:
+    if POLICY_MODE == "schedule":
+        return SCHEDULE_PARAM_COUNT
+    if POLICY_MODE == "vision_schedule":
+        return VISION_SCHEDULE_PARAM_COUNT
+    return PARAM_COUNT
 
 
 def main():
@@ -33,7 +43,15 @@ def main():
         help="Save one PNG per decision tick under DIR (for offline labelling).",
     )
     args = parser.parse_args()
-    theta = np.load(args.checkpoint)
+    theta = np.asarray(np.load(args.checkpoint), dtype=np.float64).reshape(-1)
+    expected = _expected_theta_size()
+    if theta.size != expected:
+        raise ValueError(
+            f"Checkpoint parameter count mismatch for POLICY_MODE='{POLICY_MODE}': "
+            f"loaded {theta.size}, expected {expected}. "
+            "This is expected after class-schema changes; regenerate checkpoints "
+            "with the current config."
+        )
 
     env = TimeCrisisEnv()
     if args.dump_frames:

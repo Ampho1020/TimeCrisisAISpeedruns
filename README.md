@@ -9,6 +9,17 @@ Evolution Strategies (ES) agent that learns to clear Time Crisis (PS1) quickly a
 - **Signal source:** RAM counters found via BizHawk RAM Search, not screen scraping.
 - **Fitness:** clear time, with a deliberately harsh penalty on any damage taken (a hit costs ~2.5s of frozen input, which is never worth staying out of cover).
 
+## Vision class taxonomy
+
+- Detector/vision-schedule class IDs are now a 3-class schema:
+   - `0 = ENEMY`
+   - `1 = GRENADE`
+   - `2 = PROJECTILE`
+- This is a breaking change for `vision_schedule` checkpoints because the
+   class-priority tail in theta changed dimensionality.
+- Existing `.npy` checkpoints from the old 4-class schema are not compatible
+   with the current config and should be regenerated.
+
 ## RAM map (BizHawk `MainRAM` domain, all u16)
 
 | Value | Offset |

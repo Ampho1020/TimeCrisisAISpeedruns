@@ -25,11 +25,10 @@ Two backends, one contract:
     * Large, roughly upright blob  → ENEMY (sprite body, h > w typically)
     * Small blob                   → PROJECTILE (bullet/tracer)
     * Very small or very round     → noise, discarded
-  CIVILIAN and MUZZLE_FLASH are NOT emitted by this backend -- they
-  require either a trained model or reliable color cues we don't have.
-  Downstream code (``act_vision_schedule`` scoring) just assigns them
-  zero weight via the softmax when their class never appears, so this is
-  a clean omission, not a silent bug.
+    GRENADE is a distinct class in the global schema, but this backend still
+    emits PROJECTILE for all small moving blobs (bullets, tracers, grenades)
+    because geometry alone cannot reliably separate grenade sprites from other
+    projectile-sized motion.
 
 * ``ONNXDetector`` -- slot for a future fine-tuned YOLO/RT-DETR model.
   ``onnxruntime`` (CPU provider) runs the pre-trained ONNX graph and
@@ -76,9 +75,8 @@ class EnemyClass(IntEnum):
     """
 
     ENEMY = 0
-    CIVILIAN = 1
+    GRENADE = 1
     PROJECTILE = 2
-    MUZZLE_FLASH = 3
 
 
 NUM_CLASSES = len(EnemyClass)
@@ -289,12 +287,12 @@ class ClassicalDetector:
       2. Morphological open (3×3) removes single-pixel speckle, then a
          morphological close (5×5) bridges gaps inside humanoid bodies.
       3. ``cv2.connectedComponentsWithStats`` extracts all moving blobs.
-      4. Blobs are classified purely by area:
+        4. Blobs are classified purely by area:
            area ≥ ENEMY_MIN_AREA               → ENEMY
            NOISE_MIN_AREA ≤ area < ENEMY_MIN_AREA → PROJECTILE
            area < NOISE_MIN_AREA              → discarded
-         No color test is performed.  CIVILIAN and MUZZLE_FLASH are not
-         emitted (need a trained model for reliable inference).
+            No color test is performed. GRENADE is not emitted by this backend
+            (it needs a trained model or stronger cues than geometry alone).
 
     Determinism: MOG2 mutates its internal Gaussian mixture across
     calls, so ``ClassicalDetector`` instances are stateful. Each
@@ -630,8 +628,7 @@ def build_detector(onnx_model_path: str | None = None):
 #      Dumps one PNG per decision tick during evaluation.
 #   2. Label a small set (~200-500 frames) with your labelling tool of
 #      choice (e.g. Label Studio, LabelImg). Class IDs MUST match
-#      EnemyClass above (0=enemy, 1=civilian, 2=projectile,
-#      3=muzzle_flash).
+#      EnemyClass above (0=enemy, 1=grenade, 2=projectile).
 #   3. Fine-tune yolov8n on your labels (offline, in a separate
 #      environment): `yolo detect train data=timecrisis.yaml
 #      model=yolov8n.pt imgsz=320 epochs=100`.

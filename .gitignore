@@ -5,3 +5,5 @@ __pycache__/
 training_log.csv
 *.State
 *.bk2
+.vscode/
+.vscode/settings.json

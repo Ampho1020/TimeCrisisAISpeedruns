@@ -1,4 +1,4 @@
-"""Scalar-only environment wrapper (v1: no vision yet)."""
+
 
 import numpy as np
 

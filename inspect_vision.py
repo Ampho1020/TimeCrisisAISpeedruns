@@ -16,9 +16,8 @@ Two modes:
 Each saved PNG has:
   * A coloured bounding box per detection, colour-coded by class:
       ENEMY       = red
-      CIVILIAN    = blue
+            GRENADE     = orange
       PROJECTILE  = yellow
-      MUZZLE_FLASH= white
   * A label showing   CLASS  conf=0.83   e.g. "ENEMY  conf=0.83"
   * A small green cross-hair at the detector centroid (cx_norm, cy_norm)
   * A header bar at the top listing all detections in text form so you can
@@ -53,11 +52,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 # ---------------------------------------------------------------------------
 _CLASS_BGR = {
     0: (0,   0,   255),   # ENEMY        -- red
-    1: (255, 50,  50),    # CIVILIAN     -- blue
+    1: (210, 210, 210),   # GRENADE      -- light grey
     2: (0,   230, 230),   # PROJECTILE   -- yellow
-    3: (255, 255, 255),   # MUZZLE_FLASH -- white
 }
-_CLASS_NAMES = {0: "ENEMY", 1: "CIVILIAN", 2: "PROJECTILE", 3: "MUZZLE_FLASH"}
+_CLASS_NAMES = {0: "ENEMY", 1: "GRENADE", 2: "PROJECTILE"}
 
 
 def _annotate(frame_rgb: np.ndarray, detections, frame_idx: int) -> np.ndarray:

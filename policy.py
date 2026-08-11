@@ -110,8 +110,7 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
     Returning the biases in [-1, 1] keeps the contract identical to
     ``act()`` / ``act_schedule()`` so ``env_timecrisis.step`` doesn't need a
     special case for aim conversion. Negative gain lets ES also learn to
-    AVOID a detected point (useful e.g. for civilians when their priority
-    remains low but the detector still fires on them).
+    avoid a detected point when that class has low task priority.
 
     Returns (shoot: bool, peek: bool, aim_x_bias: float in [-1, 1], aim_y_bias: float in [-1, 1])
     """
