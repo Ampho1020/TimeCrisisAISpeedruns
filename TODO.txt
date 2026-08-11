@@ -1,0 +1,23 @@
+Best sequence now:
+
+Collect and inspect frames first.
+Use run_eval.py with dumping, then review overlays in inspect_vision.py. This confirms your grenade growth cue is visible and consistently captured.
+
+Label a small pilot set before full dataset.
+Label about 200 to 400 frames with your new 3 classes from detector.py: ENEMY, GRENADE, PROJECTILE. If labels are noisy, training quality will be noisy no matter what model you use.
+
+Run a short YOLO pilot training.
+Do a quick low-cost run to validate signal quality, confusion patterns, and whether GRENADE is separable from PROJECTILE in your captures.
+
+Only then scale up to full training.
+If pilot metrics and visual predictions look good, increase data and epochs.
+
+Why this order:
+
+It derisks everything cheaply.
+It verifies your key hypothesis now: grenade size growth across captures is a learnable temporal/appearance cue.
+It avoids spending time on a full train with bad labels or bad frame mix.
+Practical checkpoint:
+
+If pilot inference on held-out dumps clearly finds grenades and reduces your current false positives, proceed to full YOLO.
+If not, improve labeling consistency and sample diversity first (especially near ambiguous projectile frames).
