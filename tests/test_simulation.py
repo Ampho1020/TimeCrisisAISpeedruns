@@ -2159,39 +2159,44 @@ class TimedSpotScheduleAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotSchedule
 #
 # Same open-loop paradigm as TimedSpotScheduleEnv (theta is a per-tick
 # action TABLE indexed by self.ticks, no observation consumed for action
-# SELECTION), but with ONE extra row entry per tick -- ``vision_gain`` --
-# and a small global ``class_priority`` vector at the tail. Each tick, the
-# env captures a frame (every N ticks, per config.VISION_CAPTURE_EVERY_N_TICKS),
-# runs detector.py's ClassicalDetector on it, picks the highest-priority
-# detection, and blends the detected centroid into the base aim according
-# to the tick's learned ``vision_gain``. This directly mirrors the Phase 3
+# SELECTION), but with a small global ``class_priority`` vector and a
+# single global ``vision_gain`` scalar appended at the tail (shared across
+# every tick -- NOT a per-tick column; see policy.py's 2026-08-15 note on
+# why a shared scalar converges far better than 900 independent per-tick
+# values). Each tick, the env captures a frame (every N ticks, per
+# config.VISION_CAPTURE_EVERY_N_TICKS), runs detector.py's ClassicalDetector
+# on it, picks the highest-priority detection, and blends the detected
+# centroid into the base aim according to the shared learned
+# ``vision_gain``. This directly mirrors the Phase 3
 # ``env_timecrisis.py`` + ``policy.act_vision_schedule`` production path,
 # so any A/B result here vs. TimedSpotScheduleAccuracyEnv is attributable
 # to the vision-blend mechanism alone.
 
-_VISION_SCHEDULE_ROW_DIM = 5
+_VISION_SCHEDULE_ROW_DIM = 4
 _VISION_SCHEDULE_NUM_CLASSES = 3  # must match detector.NUM_CLASSES / config.NUM_ENEMY_CLASSES
 _VISION_SCHEDULE_PARAM_COUNT = (
-    MAX_TICKS * _VISION_SCHEDULE_ROW_DIM + _VISION_SCHEDULE_NUM_CLASSES
+    MAX_TICKS * _VISION_SCHEDULE_ROW_DIM + _VISION_SCHEDULE_NUM_CLASSES + 1
 )
+# Index of the single global vision_gain_logit scalar -- the last entry.
+_VISION_SCHEDULE_GAIN_IDX = _VISION_SCHEDULE_PARAM_COUNT - 1
 
 
 def _theta_vision_schedule_warm_start(seed: int = 42) -> np.ndarray:
     """Match es_train.py's Phase 3 vision_schedule warm-start EXACTLY: mild
-    peek-forward bias on every tick, zero-init the vision_gain column so
-    ``tanh(0) == 0`` collapses the blend to the base aim, and zero-init the
-    class_priority tail so softmax is uniform. This makes gen-0 behaviour
-    byte-identical to plain schedule mode -- the whole point of the A/B is
-    whether ES can then LEARN a non-zero gain / class priority that
-    improves on that baseline."""
+    peek-forward bias on every tick, zero-init the global vision_gain scalar
+    so ``tanh(0) == 0`` collapses the blend to the base aim, and zero-init
+    the class_priority tail so softmax is uniform. This makes gen-0
+    behaviour byte-identical to plain schedule mode -- the whole point of
+    the A/B is whether ES can then LEARN a non-zero gain / class priority
+    that improves on that baseline."""
     rng = np.random.default_rng(seed)
     theta = rng.normal(0.0, 0.1, _VISION_SCHEDULE_PARAM_COUNT)
     per_tick = MAX_TICKS * _VISION_SCHEDULE_ROW_DIM
     grid = theta[:per_tick].reshape(MAX_TICKS, _VISION_SCHEDULE_ROW_DIM)
     grid[:, 1] += 1.0   # peek logit -- same as _theta_schedule_warm_start
-    grid[:, 4] = 0.0    # vision_gain -- disabled at gen 0
     theta[:per_tick] = grid.reshape(-1)
-    theta[per_tick:] = 0.0  # class-priority tail -- uniform softmax
+    theta[per_tick:_VISION_SCHEDULE_GAIN_IDX] = 0.0  # class-priority tail -- uniform softmax
+    theta[_VISION_SCHEDULE_GAIN_IDX] = 0.0    # vision_gain -- disabled at gen 0
     return theta
 
 
@@ -2217,14 +2222,13 @@ def _vision_schedule_action_at(theta: np.ndarray, tick: int, detections):
     peek = bool(row[1] > 0.0)
     base_ax_bias = float(np.tanh(row[2]))
     base_ay_bias = float(np.tanh(row[3]))
-    gain = float(np.tanh(row[4]))
+    gain = float(np.tanh(theta[_VISION_SCHEDULE_GAIN_IDX]))
 
     if not detections:
         return shoot, peek, base_ax_bias, base_ay_bias
 
-    priority_raw = theta[MAX_TICKS * _VISION_SCHEDULE_ROW_DIM:
-                         MAX_TICKS * _VISION_SCHEDULE_ROW_DIM
-                         + _VISION_SCHEDULE_NUM_CLASSES]
+    priority_start = MAX_TICKS * _VISION_SCHEDULE_ROW_DIM
+    priority_raw = theta[priority_start:priority_start + _VISION_SCHEDULE_NUM_CLASSES]
     priority = _softmax_1d(np.asarray(priority_raw, dtype=np.float64))
     best_det = None
     best_score = -np.inf
@@ -3481,7 +3485,7 @@ class VisionScheduleSearchSuite(unittest.TestCase):
     def test_param_count_and_warm_start_shape(self):
         self.assertEqual(
             _VISION_SCHEDULE_PARAM_COUNT,
-            MAX_TICKS * _VISION_SCHEDULE_ROW_DIM + _VISION_SCHEDULE_NUM_CLASSES,
+            MAX_TICKS * _VISION_SCHEDULE_ROW_DIM + _VISION_SCHEDULE_NUM_CLASSES + 1,
         )
         theta = _theta_vision_schedule_warm_start(seed=42)
         self.assertEqual(theta.shape[0], _VISION_SCHEDULE_PARAM_COUNT)
@@ -3519,17 +3523,17 @@ class VisionScheduleSearchSuite(unittest.TestCase):
         of what the detector returns."""
         from detector import Detection
 
-        # Build a paired (5-col-with-gain-zero) / (4-col) theta from the
-        # same underlying random seed, so any behavioural difference is
-        # attributable to the extra column alone.
+        # Build a paired (theta-with-gain-zero) / (4-col schedule-only)
+        # theta from the same underlying random seed, so any behavioural
+        # difference is attributable to the vision-blend machinery alone.
         rng = np.random.default_rng(7)
         theta_v = rng.normal(0.0, 0.1, _VISION_SCHEDULE_PARAM_COUNT)
         per_tick = MAX_TICKS * _VISION_SCHEDULE_ROW_DIM
         grid = theta_v[:per_tick].reshape(MAX_TICKS, _VISION_SCHEDULE_ROW_DIM)
         grid[:, 1] += 1.0
-        grid[:, 4] = 0.0
         theta_v[:per_tick] = grid.reshape(-1)
-        theta_v[per_tick:] = 0.0
+        theta_v[per_tick:_VISION_SCHEDULE_GAIN_IDX] = 0.0
+        theta_v[_VISION_SCHEDULE_GAIN_IDX] = 0.0
         theta_s = grid[:, :4].reshape(-1).copy()
 
         dets = [Detection(x=10, y=20, w=8, h=8, class_id=0, confidence=0.9,
@@ -3555,11 +3559,11 @@ class VisionScheduleSearchSuite(unittest.TestCase):
 
         theta = np.zeros(_VISION_SCHEDULE_PARAM_COUNT)
         # Force base aim to CENTER (row[2]=row[3]=0 -> tanh=0 -> aim=0.5)
-        # and gain -> ~+1 by setting row[4] to a large positive value.
+        # and gain -> ~+1 via the single shared vision_gain scalar.
         for t in range(MAX_TICKS):
             theta[t * _VISION_SCHEDULE_ROW_DIM + 0] = 5.0     # shoot on
             theta[t * _VISION_SCHEDULE_ROW_DIM + 1] = 5.0     # peek on
-            theta[t * _VISION_SCHEDULE_ROW_DIM + 4] = 5.0     # gain ~ +1
+        theta[_VISION_SCHEDULE_GAIN_IDX] = 5.0     # gain ~ +1
         dets = [Detection(x=0, y=0, w=1, h=1, class_id=0, confidence=1.0,
                           cx_norm=0.25, cy_norm=0.75)]
         _, _, ax_bias, ay_bias = _vision_schedule_action_at(theta, 0, dets)
@@ -3574,12 +3578,12 @@ class VisionScheduleSearchSuite(unittest.TestCase):
         from detector import Detection
 
         theta = np.zeros(_VISION_SCHEDULE_PARAM_COUNT)
-        # Base aim centered, gain saturated at +1 so the winning
-        # detection's centroid dominates the output.
+        # Base aim centered, gain saturated at +1 (shared scalar) so the
+        # winning detection's centroid dominates the output.
         for t in range(MAX_TICKS):
             theta[t * _VISION_SCHEDULE_ROW_DIM + 0] = 5.0
             theta[t * _VISION_SCHEDULE_ROW_DIM + 1] = 5.0
-            theta[t * _VISION_SCHEDULE_ROW_DIM + 4] = 5.0
+        theta[_VISION_SCHEDULE_GAIN_IDX] = 5.0
         priority_slot = MAX_TICKS * _VISION_SCHEDULE_ROW_DIM
         # Route the argmax to class 2 (PROJECTILE by detector.EnemyClass).
         theta[priority_slot + 2] = 10.0

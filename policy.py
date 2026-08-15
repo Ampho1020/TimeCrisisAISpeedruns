@@ -14,19 +14,36 @@ PARAM_COUNT = OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM + ACT_DIM
 # memory "Open-loop schedule search (2026-08-09): POSITIVE result".
 SCHEDULE_PARAM_COUNT = MAX_TICKS * 4
 
-# Vision-conditioned schedule: per-tick 5-tuple table (shoot_logit,
-# peek_logit, base_aim_x_bias, base_aim_y_bias, vision_gain_logit) PLUS a
-# global NUM_ENEMY_CLASSES-vector at the end holding class priorities that
-# feed a softmax over detector.EnemyClass. See act_vision_schedule for how
-# these are consumed. This layout was chosen (over per-tick class priorities,
-# which would add MAX_TICKS*NUM_ENEMY_CLASSES more params) because "which
-# enemy type is the highest-value shot" is roughly stable across a savestate
-# -- letting ES tune it once globally, rather than per tick, keeps the
-# parameter count comparable to the plain schedule mode instead of ballooning
-# it (see repo memory: shot-index-one-hot probe hit exactly this parameter-
-# blowup problem).
-VISION_SCHEDULE_ROW_DIM = 5
-VISION_SCHEDULE_PARAM_COUNT = MAX_TICKS * VISION_SCHEDULE_ROW_DIM + NUM_ENEMY_CLASSES
+# Vision-conditioned schedule: per-tick 4-tuple table (shoot_logit,
+# peek_logit, base_aim_x_bias, base_aim_y_bias) PLUS a global
+# NUM_ENEMY_CLASSES-vector holding class priorities that feed a softmax over
+# detector.EnemyClass, PLUS one single global vision_gain_logit scalar at
+# the very end. See act_vision_schedule for how these are consumed.
+#
+# vision_gain used to be a 5th per-tick column (one independent value per
+# of the MAX_TICKS rows). That was changed to a single shared scalar
+# (2026-08-15) because "how much do I trust vision over my base aim" is a
+# stable question across the whole episode -- unlike aim position, which
+# legitimately differs tick to tick since enemies differ tick to tick.
+# Splitting it 900 ways meant each generation's gradient estimate for
+# vision_gain was diluted across 900 nearly-independent parameters instead
+# of pooling all 900 ticks' fitness signal into one number -- confirmed
+# empirically: population MEAN vision_gain sat flat for 20 generations
+# while the per-tick values underneath had actually moved substantially
+# (many rows shifted by >0.01, std growing 5x), because roughly half moved
+# up and half moved down and cancelled out in the aggregate. A single
+# shared scalar makes that signal directly visible and should converge far
+# faster. Class priorities stay global for the same "roughly stable across
+# a savestate" reason (see repo memory: shot-index-one-hot probe hit the
+# analogous parameter-blowup problem when tried per-tick).
+#
+# NOTE: this is a breaking layout change -- existing theta_*.npy checkpoints
+# saved under the old 5-column-per-tick layout are NOT compatible and must
+# be discarded/retrained.
+VISION_SCHEDULE_ROW_DIM = 4
+VISION_SCHEDULE_PARAM_COUNT = MAX_TICKS * VISION_SCHEDULE_ROW_DIM + NUM_ENEMY_CLASSES + 1
+# Index of the single global vision_gain_logit scalar -- the last entry.
+VISION_SCHEDULE_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 1
 
 
 def _unpack(theta: np.ndarray):
@@ -87,10 +104,12 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
     """Vision-conditioned open-loop action selection.
 
     Theta layout (see ``VISION_SCHEDULE_PARAM_COUNT`` above):
-      * first ``MAX_TICKS * 5`` entries: (shoot, peek, base_aim_x_bias,
-        base_aim_y_bias, vision_gain_logit) rows indexed by ``tick``.
-      * final ``NUM_ENEMY_CLASSES`` entries: raw class priority scores
+      * first ``MAX_TICKS * 4`` entries: (shoot, peek, base_aim_x_bias,
+        base_aim_y_bias) rows indexed by ``tick``.
+      * next ``NUM_ENEMY_CLASSES`` entries: raw class priority scores
         (softmax'd here before use).
+      * final single entry (``VISION_SCHEDULE_GAIN_IDX``): one shared
+        ``vision_gain_logit`` scalar used for every tick.
 
     ``detections`` is a list of ``detector.Detection`` objects (may be
     empty). If empty, this returns the base action untouched -- so a
@@ -121,14 +140,14 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
     peek = bool(row[1] > 0.0)
     base_ax_bias = float(np.tanh(row[2]))
     base_ay_bias = float(np.tanh(row[3]))
-    gain = float(np.tanh(row[4]))
+    gain = float(np.tanh(theta[VISION_SCHEDULE_GAIN_IDX]))
 
     if not detections:
         # Vision blend has no target this tick -- fall back to base aim.
         return shoot, peek, base_ax_bias, base_ay_bias
 
-    priority_raw = theta[MAX_TICKS * VISION_SCHEDULE_ROW_DIM:
-                         MAX_TICKS * VISION_SCHEDULE_ROW_DIM + NUM_ENEMY_CLASSES]
+    priority_start = MAX_TICKS * VISION_SCHEDULE_ROW_DIM
+    priority_raw = theta[priority_start:priority_start + NUM_ENEMY_CLASSES]
     priority = _softmax(np.asarray(priority_raw, dtype=np.float64))
     # Score each detection; ignore any with class_id outside the priority
     # range so a misconfigured detector can never index-out-of-range here

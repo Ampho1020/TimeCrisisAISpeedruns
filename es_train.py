@@ -13,7 +13,10 @@ from config import (
     VERBOSE_EPISODES, VISION_GAIN_WARMSTART,
 )
 from logger import TrainingLogger
-from policy import PARAM_COUNT, SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_ROW_DIM
+from policy import (
+    PARAM_COUNT, SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_GAIN_IDX,
+    VISION_SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_ROW_DIM,
+)
 from worker_pool import WorkerPool
 
 
@@ -41,9 +44,12 @@ def _average_episode_infos(infos: list) -> dict:
 
 
 def _mean_vision_gain(theta_batch: np.ndarray) -> float:
-    """Mean tanh(vision_gain_logit) across all MAX_TICKS rows -- and, for a
-    2D batch, across every candidate too. Returns 0.0 outside
-    POLICY_MODE == "vision_schedule" (no such column exists elsewhere).
+    """Mean tanh(vision_gain_logit) across every candidate in the batch.
+    Returns 0.0 outside POLICY_MODE == "vision_schedule" (no such scalar
+    exists elsewhere). vision_gain is a single SHARED scalar (not a
+    per-tick column -- see policy.py's 2026-08-15 note), so this is now a
+    genuine population-mean-of-one-parameter, not an average over 900
+    independent per-tick values that can cancel out in aggregate.
     Used to log whether ES is keeping vision meaningfully in the aim blend
     (see VISION_GAIN_WARMSTART in config.py) rather than collapsing it
     toward 0.
@@ -51,9 +57,7 @@ def _mean_vision_gain(theta_batch: np.ndarray) -> float:
     if POLICY_MODE != "vision_schedule":
         return 0.0
     batch = theta_batch if theta_batch.ndim > 1 else theta_batch[None, :]
-    per_tick = MAX_TICKS * VISION_SCHEDULE_ROW_DIM
-    grids = batch[:, :per_tick].reshape(-1, MAX_TICKS, VISION_SCHEDULE_ROW_DIM)
-    return float(np.tanh(grids[:, :, 4]).mean())
+    return float(np.tanh(batch[:, VISION_SCHEDULE_GAIN_IDX]).mean())
 
 
 def train():
@@ -84,23 +88,24 @@ def train():
         theta = theta.reshape(-1)
     elif POLICY_MODE == "vision_schedule":
         # Vision-conditioned schedule: per-tick (shoot, peek, base_ax,
-        # base_ay, vision_gain) rows followed by a global class-priority
-        # vector.
-        #   * ``vision_gain`` column (col 4) warm-starts to
-        #     VISION_GAIN_WARMSTART (config.py) instead of 0 -- a real
-        #     trained YOLO model is wired in now, so vision should be an
-        #     active part of the aim blend from gen 0 rather than something
-        #     ES has to discover from scratch. Set VISION_GAIN_WARMSTART=0.0
-        #     to restore the old byte-identical-to-schedule-mode rollout.
+        # base_ay) rows, followed by a global class-priority vector, followed
+        # by one single global vision_gain_logit scalar (see policy.py's
+        # 2026-08-15 note on why vision_gain is shared rather than per-tick).
+        #   * ``vision_gain`` warm-starts to VISION_GAIN_WARMSTART (config.py)
+        #     instead of 0 -- a real trained YOLO model is wired in now, so
+        #     vision should be an active part of the aim blend from gen 0
+        #     rather than something ES has to discover from scratch. Set
+        #     VISION_GAIN_WARMSTART=0.0 to restore the old byte-identical-to-
+        #     schedule-mode rollout.
         #   * class-priority tail zero-init -> softmax is uniform, no bias
         #     toward any particular EnemyClass; ES still has to learn which
         #     class to prioritize.
         per_tick = MAX_TICKS * VISION_SCHEDULE_ROW_DIM
         grid = theta[:per_tick].reshape(MAX_TICKS, VISION_SCHEDULE_ROW_DIM)
         grid[:, 1] += 1.0   # peek-forward bias (same as schedule mode)
-        grid[:, 4] = VISION_GAIN_WARMSTART   # vision_gain -> active from gen 0
         theta[:per_tick] = grid.reshape(-1)
-        theta[per_tick:] = 0.0  # class-priority tail -> uniform softmax
+        theta[per_tick:VISION_SCHEDULE_GAIN_IDX] = 0.0  # class-priority tail -> uniform softmax
+        theta[VISION_SCHEDULE_GAIN_IDX] = VISION_GAIN_WARMSTART  # vision_gain -> active from gen 0
     else:
         # Warm-start the shoot logit to +2 and the peek logit to +1 (asymmetric,
         # 2026-08-04). Without some positive bias, ~50% of random seeds produce a

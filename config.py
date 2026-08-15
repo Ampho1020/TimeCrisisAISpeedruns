@@ -94,24 +94,32 @@ CONTINUE_SCREEN_FALLBACK_TICKS = 45
 #                 (clear_rate 0.667 vs 0.162, final_best 3170 vs -62.9).
 #                 Only validated at probe scale (pop=12) so far, not yet at
 #                 live POP_SIZE=30 -- watch early live generations closely.
-#   "vision_schedule" -- open-loop schedule PLUS per-tick vision blend: theta
-#                 stores per-tick (shoot, peek, base_aim_x, base_aim_y,
-#                 vision_gain) rows AND a global class-priority vector; each
-#                 tick the env captures a frame every VISION_CAPTURE_EVERY_N_TICKS
-#                 ticks, runs detector.py's classical/ONNX detector on it,
-#                 picks the highest-priority detection, and blends the
-#                 detected centroid into the base aim according to the
-#                 tick's learned gain. See policy.act_vision_schedule and
-#                 /memories/session/plan.md (Phase 3-5) for the full
-#                 design + sim-probe gate. Vision_gain was originally
-#                 zero-initialised so gen-0 behaviour matched pure "schedule"
-#                 mode exactly (a risk-controlled rollout while the detector
-#                 was unproven). Now that a real trained YOLO model is wired
-#                 in (see VISION_ONNX_MODEL_PATH), gen-0 warm-starts
-#                 vision_gain to VISION_GAIN_WARMSTART instead of 0 so vision
-#                 is actively part of the aim blend from generation 0 rather
-#                 than something ES has to discover from scratch -- ES can
-#                 still perturb it up/down/negative as usual.
+#   "vision_schedule" -- open-loop schedule PLUS a vision blend: theta
+#                 stores per-tick (shoot, peek, base_aim_x, base_aim_y) rows,
+#                 a global class-priority vector, AND one single global
+#                 vision_gain scalar shared across every tick (NOT a
+#                 per-tick column -- see policy.py's 2026-08-15 note for
+#                 why: "how much do I trust vision" is stable across an
+#                 episode, unlike aim position, and splitting it 900 ways
+#                 diluted ES's gradient signal for it so badly that the
+#                 population-mean metric looked flat for 20 generations
+#                 even though the underlying per-tick values had genuinely
+#                 moved). Each tick the env captures a frame every
+#                 VISION_CAPTURE_EVERY_N_TICKS ticks, runs detector.py's
+#                 classical/ONNX detector on it, picks the highest-priority
+#                 detection, and blends the detected centroid into the base
+#                 aim according to the shared learned gain. See
+#                 policy.act_vision_schedule and /memories/session/plan.md
+#                 (Phase 3-5) for the full design + sim-probe gate.
+#                 Vision_gain was originally zero-initialised so gen-0
+#                 behaviour matched pure "schedule" mode exactly (a
+#                 risk-controlled rollout while the detector was unproven).
+#                 Now that a real trained YOLO model is wired in (see
+#                 VISION_ONNX_MODEL_PATH), gen-0 warm-starts vision_gain to
+#                 VISION_GAIN_WARMSTART instead of 0 so vision is actively
+#                 part of the aim blend from generation 0 rather than
+#                 something ES has to discover from scratch -- ES can still
+#                 perturb it up/down/negative as usual.
 POLICY_MODE = "vision_schedule"
 
 # Class count for the vision-conditioned schedule's global class-priority
@@ -250,12 +258,13 @@ BIZHAWK_LAUNCH_STAGGER_SECONDS = 3.0
 # discover/use those dims from pure perturbation noise.
 SHOT_PHASE_WARMSTART_ROW_STD = 0.08
 
-# Warm-start value for vision_schedule mode's per-tick vision_gain_logit
-# column (see POLICY_MODE comment above). tanh(1.0) ~= 0.76, i.e. gen-0
-# blends the base aim ~76% of the way toward the top-priority detection's
-# centroid rather than 0% -- meaningful vision usage from the start, while
-# still small enough for SIGMA=0.1 perturbations to push it higher, lower,
-# or negative if ES finds that better. Set to 0.0 to restore the old
+# Warm-start value for vision_schedule mode's single global
+# vision_gain_logit scalar (see POLICY_MODE comment above; shared across
+# every tick, not a per-tick column). tanh(1.0) ~= 0.76, i.e. gen-0 blends
+# the base aim ~76% of the way toward the top-priority detection's centroid
+# rather than 0% -- meaningful vision usage from the start, while still
+# small enough for SIGMA=0.1 perturbations to push it higher, lower, or
+# negative if ES finds that better. Set to 0.0 to restore the old
 # byte-identical-to-schedule-mode gen-0 behavior.
 VISION_GAIN_WARMSTART = 1.0
 
