@@ -61,7 +61,7 @@ def main():
     def has_col(k):
         return any(r.get(k, "") != "" for r in rows)
 
-    fig, ax = plt.subplots(4, 2, figsize=(12, 13))
+    fig, ax = plt.subplots(6, 2, figsize=(12, 19))
 
     ax[0][0].plot(gens, col("best"), label="best")
     ax[0][0].plot(gens, col("mean"), label="mean")
@@ -129,6 +129,66 @@ def main():
         ax[3][1].text(0.5, 0.5, "no lane-telemetry data yet",
                       ha="center", va="center", transform=ax[3][1].transAxes)
         ax[3][1].set_title("shot lane distribution % (L/M/R)")
+
+    # --- multi-screen progress (added 2026-08-10 alongside MULTI_CLEAR_BONUS) ---
+    if has_col("mean_screens_cleared"):
+        ax[4][0].plot(col_gens("mean_screens_cleared"), col("mean_screens_cleared"), label="pop mean")
+        if has_col("max_screens_cleared"):
+            ax[4][0].plot(col_gens("max_screens_cleared"), col("max_screens_cleared"), label="pop max")
+        if has_col("theta_screens_cleared"):
+            ax[4][0].plot(col_gens("theta_screens_cleared"), col("theta_screens_cleared"),
+                          label="center theta", linestyle="--")
+        ax[4][0].set_title("screens cleared per episode   (\u2191 = chaining more screens)")
+        ax[4][0].legend(fontsize=8)
+    else:
+        ax[4][0].text(0.5, 0.5, "no screens-cleared data yet",
+                      ha="center", va="center", transform=ax[4][0].transAxes)
+        ax[4][0].set_title("screens cleared per episode")
+
+    # --- vision-gain tracking (added 2026-08-15 alongside VISION_GAIN_WARMSTART) ---
+    if has_col("mean_vision_gain"):
+        ax[4][1].plot(col_gens("mean_vision_gain"), col("mean_vision_gain"), label="pop mean")
+        if has_col("theta_vision_gain"):
+            ax[4][1].plot(col_gens("theta_vision_gain"), col("theta_vision_gain"),
+                          label="center theta", linestyle="--")
+        ax[4][1].axhline(y=0.0, color="grey", linestyle=":", linewidth=0.8)
+        ax[4][1].set_title("vision_gain = tanh(vision_gain_logit)   (\u2193 near 0 = ignoring vision)")
+        ax[4][1].legend(fontsize=8)
+    else:
+        ax[4][1].text(0.5, 0.5, "no vision_gain data yet",
+                      ha="center", va="center", transform=ax[4][1].transAxes)
+        ax[4][1].set_title("vision_gain")
+
+    # --- accuracy (population mean/best vs. center theta) ---
+    if has_col("mean_acc"):
+        ax[5][0].plot(col_gens("mean_acc"), [100 * v for v in col("mean_acc")], label="pop mean")
+        if has_col("best_acc"):
+            ax[5][0].plot(col_gens("best_acc"), [100 * v for v in col("best_acc")], label="pop best")
+        if has_col("theta_acc"):
+            ax[5][0].plot(col_gens("theta_acc"), [100 * v for v in col("theta_acc")],
+                          label="center theta", linestyle="--")
+        ax[5][0].set_ylim(-5, 105)
+        ax[5][0].set_title("accuracy %")
+        ax[5][0].legend(fontsize=8)
+    else:
+        ax[5][0].text(0.5, 0.5, "no accuracy data yet",
+                      ha="center", va="center", transform=ax[5][0].transAxes)
+        ax[5][0].set_title("accuracy %")
+
+    # --- ES step size + center-theta fitness vs. population ---
+    if has_col("sigma_used"):
+        ax[5][1].plot(col_gens("sigma_used"), col("sigma_used"), color="tab:brown", label="sigma")
+        ax[5][1].set_ylabel("sigma")
+        ax[5][1].set_title("ES mutation step size (sigma) / center-theta fitness")
+        ax[5][1].legend(fontsize=8, loc="upper left")
+        if has_col("theta_fitness"):
+            ax2 = ax[5][1].twinx()
+            ax2.plot(col_gens("theta_fitness"), col("theta_fitness"), color="tab:pink", label="theta fitness")
+            ax2.legend(fontsize=8, loc="upper right")
+    else:
+        ax[5][1].text(0.5, 0.5, "no sigma data yet",
+                      ha="center", va="center", transform=ax[5][1].transAxes)
+        ax[5][1].set_title("ES mutation step size (sigma)")
 
     for row in ax:
         for a in row:
