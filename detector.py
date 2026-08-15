@@ -251,30 +251,6 @@ def _threat_color_score(mean_rgb: np.ndarray) -> float:
     return best if best > 0.0 else _ENEMY_COLOR_FLOOR
 
 
-def blob_is_grey(
-    mean_rgb: tuple | np.ndarray,
-    lo: int = 70,
-    hi: int = 200,
-    max_chroma: int = 35,
-) -> bool:
-    """Return True if ``mean_rgb`` is achromatic (grey / desaturated).
-
-    Used by the projectile-dodge override in ``env_timecrisis`` to distinguish
-    the shoulder-launched missile (fully grey, always hits if not dodged) from
-    coloured projectiles (bullets rarely hit; grenades should be shot mid-air).
-
-    Public so ``env_timecrisis`` and ``inspect_vision`` can import it directly.
-    """
-    r, g, b = float(mean_rgb[0]), float(mean_rgb[1]), float(mean_rgb[2])
-    mid = (r + g + b) / 3.0
-    return (
-        lo <= mid <= hi
-        and abs(r - g) < max_chroma
-        and abs(g - b) < max_chroma
-        and abs(r - b) < max_chroma
-    )
-
-
 class ClassicalDetector:
     """Motion-based detector: BackgroundSubtractorMOG2 + geometry classification.
 
@@ -470,12 +446,23 @@ class ClassicalDetector:
 class ONNXDetector:
     """CPU ONNX inference wrapper matching the ``Detection`` contract.
 
-    Assumes a YOLOv8-style ONNX export (single float32 input tensor
-    named 'images' of shape (1, 3, H, W) in [0, 1], single output tensor
-    of shape (1, 4 + NUM_CLASSES, N_ANCHORS) with per-anchor
-    (cx, cy, w, h, score_class0, score_class1, ...)). If your fine-tune
-    exports a different layout, wrap the decode logic here rather than
-    changing the callers.
+    Single float32 input tensor of shape (1, 3, H, W) in [0, 1]. Supports
+    TWO possible output layouts, auto-detected from the output tensor's
+    shape (no config flag needed -- ``yolo export`` picks the layout based
+    on the source model architecture, not a flag we control here):
+
+    * Legacy raw head (YOLOv8/v11 style): shape (1, 4 + NUM_CLASSES, N)
+      with per-anchor (cx, cy, w, h, score_class0, score_class1, ...) in
+      model-input pixel space. Requires ``cv2.dnn.NMSBoxes`` here since
+      the graph doesn't do its own NMS.
+    * End-to-end (YOLOv10 / YOLO26 style): shape (1, N, 6) where each row
+      is an ALREADY NMS'd, ALREADY decoded detection
+      (x1, y1, x2, y2, confidence, class_id) in model-input pixel space,
+      sorted by confidence descending. No further NMS is applied.
+
+    The two are distinguished by the size-6 axis: 4 + NUM_CLASSES == 7
+    for this repo's 3-class schema, so it never collides with the
+    fixed width-6 end-to-end row layout.
 
     NOTE: no Time Crisis-specific fine-tuned model ships with the repo.
     Producing one is an offline workflow (see the module footer). This
@@ -530,8 +517,17 @@ class ONNXDetector:
         blob = blob[np.newaxis, ...]
 
         raw = self._session.run(None, {self._input_name: blob})[0]
-        # Expected shape (1, 4 + NUM_CLASSES, N). Squeeze batch.
+        # Squeeze batch. Two possible shapes -- see class docstring.
         arr = np.squeeze(raw, axis=0)
+
+        if arr.ndim == 2 and arr.shape[1] == 6:
+            # End-to-end (YOLOv10 / YOLO26-style) export: rows are already
+            # decoded + NMS'd (x1, y1, x2, y2, confidence, class_id) in
+            # model-input pixel space. No further NMS needed. Safe to
+            # distinguish from the legacy raw-head layout because
+            # 4 + NUM_CLASSES == 7 for this repo's 3-class schema.
+            return self._decode_end2end(arr, src_w, src_h, in_w, in_h)
+
         if arr.shape[0] < 4 + NUM_CLASSES:
             raise RuntimeError(
                 f"ONNX model output has too few channels: got shape "
@@ -596,6 +592,39 @@ class ONNXDetector:
             )
         return detections
 
+    def _decode_end2end(
+        self, arr: np.ndarray, src_w: int, src_h: int, in_w: int, in_h: int,
+    ) -> list[Detection]:
+        """Decode a (N, 6) end-to-end output: rows are already NMS'd
+        (x1, y1, x2, y2, confidence, class_id) in model-input pixel space.
+        """
+        scale_x = src_w / in_w
+        scale_y = src_h / in_h
+        detections: list[Detection] = []
+        for x1, y1, x2, y2, conf, cls in arr:
+            conf = float(conf)
+            if conf < self.confidence_threshold:
+                continue
+            bx = max(0, int(x1 * scale_x))
+            by = max(0, int(y1 * scale_y))
+            bw = max(1, int((x2 - x1) * scale_x))
+            bh = max(1, int((y2 - y1) * scale_y))
+            cx = float((x1 + x2) / 2.0 * scale_x)
+            cy = float((y1 + y2) / 2.0 * scale_y)
+            detections.append(
+                Detection(
+                    x=bx,
+                    y=by,
+                    w=bw,
+                    h=bh,
+                    class_id=int(cls),
+                    confidence=conf,
+                    cx_norm=cx / src_w,
+                    cy_norm=cy / src_h,
+                )
+            )
+        return detections
+
 
 # ---------------------------------------------------------------------------
 # Factory + selection helper
@@ -610,9 +639,39 @@ def build_detector(onnx_model_path: str | None = None):
     fall back to the classical detector rather than raising -- day-1
     production has no ONNX model, and forcing a crash on absent-model
     would prevent training from starting.
+
+    Always prints which backend it picked (and, for ONNX, the resolved
+    absolute path + file size/mtime) so a real training run's console/log
+    output makes it unmistakable whether the trained model is actually
+    loaded, rather than silently falling back to the classical baseline on
+    a bad path/typo. Every worker process prints this once at startup.
     """
-    if onnx_model_path and os.path.isfile(onnx_model_path):
-        return ONNXDetector(onnx_model_path)
+    if onnx_model_path:
+        abs_path = os.path.abspath(onnx_model_path)
+        if os.path.isfile(abs_path):
+            import datetime as _dt
+            size_mb = os.path.getsize(abs_path) / (1024 * 1024)
+            mtime = _dt.datetime.fromtimestamp(
+                os.path.getmtime(abs_path)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+            print(
+                f"[detector] Using ONNXDetector: {abs_path} "
+                f"({size_mb:.1f} MB, modified {mtime})",
+                flush=True,
+            )
+            return ONNXDetector(abs_path)
+        print(
+            f"[detector] WARNING: onnx_model_path={abs_path!r} does not exist "
+            f"-- falling back to ClassicalDetector (basic MOG2 baseline, NOT "
+            f"your trained model). Check config.VISION_ONNX_MODEL_PATH.",
+            flush=True,
+        )
+    else:
+        print(
+            "[detector] No ONNX model path configured -- using ClassicalDetector "
+            "(basic MOG2 baseline, NOT a trained model).",
+            flush=True,
+        )
     return ClassicalDetector()
 
 

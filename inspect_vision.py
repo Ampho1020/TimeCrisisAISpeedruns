@@ -47,6 +47,26 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(__file__))
 
 
+def _build_detector(args):
+    """Return the detector backend requested on the CLI.
+
+    ``--classical`` forces ``ClassicalDetector`` regardless of config.
+    Otherwise delegates to ``detector.build_detector`` with ``--onnx`` (or,
+    if omitted, ``config.VISION_ONNX_MODEL_PATH``) -- same selection logic
+    ``TimeCrisisEnv`` uses, so what you see here matches what training sees.
+    """
+    from detector import build_detector, ClassicalDetector
+
+    if args.classical:
+        return ClassicalDetector()
+    from config import VISION_ONNX_MODEL_PATH
+    onnx_path = args.onnx if args.onnx is not None else VISION_ONNX_MODEL_PATH
+    det = build_detector(onnx_path or None)
+    print(f"[inspect] Using {type(det).__name__}"
+          + (f" ({onnx_path})" if type(det).__name__ == "ONNXDetector" else ""))
+    return det
+
+
 # ---------------------------------------------------------------------------
 # Class colours (BGR for cv2 drawing)
 # ---------------------------------------------------------------------------
@@ -168,9 +188,8 @@ def _print_detections(idx: int, detections):
 def run_live(args):
     from config import HOST, PORT, STATE_SLOT
     from bridge_client import BridgeClient
-    from detector import ClassicalDetector
 
-    det = ClassicalDetector()
+    det = _build_detector(args)
     client = BridgeClient(HOST, PORT)
     print(f"[inspect] Listening on {HOST}:{PORT} -- launch BizHawk with the Lua bridge.")
     client.connect()
@@ -220,8 +239,6 @@ def run_live(args):
 # ---------------------------------------------------------------------------
 
 def run_file(args):
-    from detector import ClassicalDetector
-
     src_dir = args.frames
     out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
@@ -240,7 +257,7 @@ def run_file(args):
         return
 
     print(f"[inspect] Annotating {len(files)} image(s) from {src_dir} -> {out_dir}")
-    det = ClassicalDetector()
+    det = _build_detector(args)
 
     for idx, fname in enumerate(files):
         path = os.path.join(src_dir, fname)
@@ -288,6 +305,15 @@ def main():
     parser.add_argument(
         "--out-dir", default="/tmp/vision_inspect",
         help="Where to write annotated PNGs (default: /tmp/vision_inspect).",
+    )
+    parser.add_argument(
+        "--onnx", metavar="PATH", default=None,
+        help="Path to an ONNX model to use instead of config.VISION_ONNX_MODEL_PATH "
+             "(default: whatever config.VISION_ONNX_MODEL_PATH points at).",
+    )
+    parser.add_argument(
+        "--classical", action="store_true",
+        help="Force the classical MOG2 detector, ignoring --onnx / config.",
     )
     # Live-mode flags
     parser.add_argument(

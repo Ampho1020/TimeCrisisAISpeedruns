@@ -1,5 +1,6 @@
 """Central configuration. Edit values here, not in the other files."""
 
+import os
 from dataclasses import dataclass
 
 # -----------------------------
@@ -59,6 +60,22 @@ TIMEOUT_TIMER_THRESHOLD = 60
 # frame-skip or RAM sampling gaps.
 CONTINUE_SCREEN_STALE_TICKS = 3
 
+# Second, slower fallback for the SAME "continue?" screen problem, but which
+# does not depend on the ``timer`` address at all. The fast watchdog above
+# requires shots_fired/shots_hit/timer/life to ALL be frozen -- but if the
+# "continue?" prompt's on-screen countdown reuses (or otherwise still
+# advances) the same RAM address we read as ``timer``, that snapshot never
+# repeats and the fast watchdog never fires, so the episode can sit on the
+# continue prompt indefinitely. shots_fired/shots_hit/life, by contrast,
+# cannot legitimately change while on a non-gameplay screen, so we track
+# those three alone (see ``stale_shots_life_ticks`` in env_timecrisis.py) and
+# force termination if they stay frozen this many consecutive ticks. This is
+# deliberately much longer than CONTINUE_SCREEN_STALE_TICKS because normal
+# cover/duck play can legitimately go a couple seconds without a new shot or
+# hit -- this should only fire once that stretch would be implausible for
+# live gameplay.
+CONTINUE_SCREEN_FALLBACK_TICKS = 45
+
 # -----------------------------
 # ES hyperparameters
 # -----------------------------
@@ -109,71 +126,16 @@ VISION_CAPTURE_EVERY_N_TICKS = 3
 
 # Path to a fine-tuned YOLO/RT-DETR ONNX model. Empty string / non-existent
 # file -> detector.build_detector() falls back to the classical MOG2 +
-# palette + connectedComponents pipeline. No model file ships with the
-# repo -- the offline fine-tune workflow is documented at the bottom of
-# detector.py, and the "produce a labelled corpus" step is what
-# ``run_eval.py --dump-frames <dir>`` supports.
-VISION_ONNX_MODEL_PATH = ""
-
-# Projectile-triggered cover override (added 2026-08-10).
-# When ClassicalDetector sees a high-confidence PROJECTILE blob in the
-# horizontal centre band of the screen while the agent is exposed, the
-# vision_schedule step branch forces peek=False for that tick regardless of
-# what the schedule row says.  This gives an immediate hard dodge for the
-# rocket-launcher enemy whose projectile is otherwise fatal before ES has had
-# hundreds of generations to learn the exact duck timing.  The schedule+gain
-# mechanism still learns the timing in parallel -- this override only fires
-# when a real projectile is currently visible, so it has no cost on ticks
-# where the screen is clear.
+# palette + connectedComponents pipeline. Set to a real ONNX export to use
+# ONNXDetector instead (see detector.ONNXDetector for the supported output
+# layouts -- both legacy raw-head and YOLOv10/YOLO26-style end-to-end
+# exports are auto-detected).
 #
-# VISION_PROJECTILE_DODGE_MIN_CONF: confidence threshold.  Area-based:
-#   40 px saturates at 1.0; a ~16 px rocket round gives ~0.4.
-#   Raise to avoid dodging stray specks; lower to react to smaller rounds.
-# VISION_PROJECTILE_DODGE_CENTER_BAND: fraction of frame width that counts
-#   as "aimed at the player".  Only projectiles with cx_norm in
-#   [0.5 - band/2, 0.5 + band/2] trigger the duck.  Projectiles near the
-#   screen edge are likely already past the player position.
-#
-# STATUS (2026-08-10): DISABLED.  The grey check alone was still too
-# aggressive: the game scene contains grey concrete, grey enemy clothing,
-# and grey HUD shadows that MOG2 occasionally flags as foreground -- any
-# such artefact near screen centre triggers a dodge even with no real
-# missile present.  Use the velocity/persistence missile dodge below.
-VISION_PROJECTILE_DODGE_ENABLED     = False
-VISION_PROJECTILE_DODGE_MIN_CONF    = 0.4
-VISION_PROJECTILE_DODGE_CENTER_BAND = 0.6
-
-# Velocity + persistence missile dodge (2026-08-10).
-# The only reliable way to distinguish the shoulder-launched missile from
-# grey scenery noise and fast bullets is TRACKING across consecutive captures:
-#
-#   Scenery noise  -- same position every capture (MOG2 artefact):
-#                     displacement == 0 --> ignored.
-#   Bullets        -- faster than the 3-tick capture interval (~250 ms):
-#                     gone before the next capture, no matching blob --> ignored.
-#   Missile        -- slow enough to appear in TWO consecutive captures AND
-#                     move toward the player centre --> DODGE.
-#
-# A PROJECTILE blob in the current capture is flagged as a missile when:
-#   (a) a blob at a similar position (within MATCH_RADIUS) existed last capture,
-#   (b) displacement >= MIN_DISP (rules out static scenery artefacts),
-#   (c) the blob moved toward screen centre (abs(cx - 0.5) shrank), and
-#   (d) it is in the centre band above the confidence threshold.
-# The flag persists until the next capture so the agent stays in cover for
-# the full 3-tick interval rather than re-exposing immediately.
-#
-# VISION_MISSILE_MATCH_RADIUS  -- screen fraction: blobs within this are
-#   treated as the same object across captures.  Must be >= the missile's
-#   per-capture displacement (~0.25 for a rocket crossing half the screen
-#   in ~500 ms at a 250 ms capture interval).
-# VISION_MISSILE_MIN_DISP      -- minimum movement per capture to exclude
-#   zero-displacement scenery noise.
-# VISION_MISSILE_CENTER_BAND / MIN_CONF -- same semantics as PROJECTILE_DODGE.
-VISION_MISSILE_DODGE_ENABLED   = False  # disabled until tested; flip to True to try
-VISION_MISSILE_MATCH_RADIUS    = 0.35
-VISION_MISSILE_MIN_DISP        = 0.03
-VISION_MISSILE_CENTER_BAND     = 0.60
-VISION_MISSILE_MIN_CONF        = 0.30
+# best.onnx (2026-08-14): exported from runs/detect/train-21/weights/best.pt
+# (imgsz=320, 3-class ENEMY/GRENADE/PROJECTILE schema, trained on the full
+# gameplay-footage CVAT corpus). `yolo export model=best.pt format=onnx
+# imgsz=320 opset=12`.
+VISION_ONNX_MODEL_PATH = os.path.join(os.path.dirname(__file__), "best.onnx")
 
 POP_SIZE    = 30      # MUST be even (mirrored sampling)
 # SIGMA raised 0.05 -> 0.1 (2026-08-04): in-sim trend testing

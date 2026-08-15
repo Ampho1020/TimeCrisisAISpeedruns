@@ -5,7 +5,8 @@ import numpy as np
 from bridge_client import BridgeClient
 from config import (
     ACCURACY_BONUS_WEIGHT, AMMO_MAX_ROUNDS, CENTER_BAND, CENTER_CAMP_PENALTY,
-    CLEAR_BONUS, CLIP_SHIFT_BONUS, CONTINUE_SCREEN_STALE_TICKS, CURSOR_X_MAX,
+    CLEAR_BONUS, CLIP_SHIFT_BONUS, CONTINUE_SCREEN_FALLBACK_TICKS,
+    CONTINUE_SCREEN_STALE_TICKS, CURSOR_X_MAX,
     CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN, DAMAGE_PENALTY,
     DRY_FIRE_PENALTY, EDGE_BAND, EDGE_SCATTER_PENALTY, FAIL_PENALTY,
     FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
@@ -14,25 +15,9 @@ from config import (
     SAME_EPS, SCREEN_CLEAR_TIMER_BUMP, SHOT_SLOT_DIVERSITY_BONUS,
     SHOT_SLOT_DIVERSITY_SCALE, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
     VISION_CAPTURE_EVERY_N_TICKS, VISION_ONNX_MODEL_PATH,
-    VISION_PROJECTILE_DODGE_CENTER_BAND,
-    VISION_PROJECTILE_DODGE_ENABLED,
-    VISION_PROJECTILE_DODGE_MIN_CONF,
-    VISION_MISSILE_DODGE_ENABLED,
-    VISION_MISSILE_MATCH_RADIUS,
-    VISION_MISSILE_MIN_DISP,
-    VISION_MISSILE_CENTER_BAND,
-    VISION_MISSILE_MIN_CONF,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import act, act_schedule, act_vision_schedule
-
-# Imported at module level so the vision_schedule dodge override can call it
-# without an extra import inside the hot per-tick path.
-try:
-    from detector import blob_is_grey as _blob_is_grey
-except ImportError:  # pragma: no cover -- only missing if cv2 not installed
-    def _blob_is_grey(mean_rgb, **_):  # type: ignore[misc]
-        return True  # conservative: always dodge if detector unavailable
 
 
 def u16_delta(new_v: int, old_v: int) -> int:
@@ -222,6 +207,7 @@ class TimeCrisisEnv:
         self.peek_lock: int = 0   # minimum hold: any transition holds for PEEK_TRAVERSE_TICKS
         self.peek_locked_value: bool = False   # what state the lock is holding
         self.stale_core_ticks: int = 0  # consecutive ticks with identical core RAM snapshot
+        self.stale_shots_life_ticks: int = 0  # consecutive ticks with frozen shots/life only (timer-independent)
         self.ammo_left: int = AMMO_MAX_ROUNDS
         self.hit_delta: int = 0  # frames since the last confirmed hit
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
@@ -229,10 +215,6 @@ class TimeCrisisEnv:
         # Multi-screen tracking (see reset() for the full comment).
         self.screens_cleared: int = 0
         self.max_timer_delta_since_start: int = 0
-        # Missile velocity tracking: previous capture's PROJECTILE centroids
-        # and the active-dodge flag (see reset() and step() for details).
-        self._prev_proj_centroids: list = []
-        self._missile_dodge_active: bool = False
         # Set to a directory path (via ``run_eval.py --dump-frames <dir>``) to
         # save one PNG per decision tick during ``episode_fitness()``. Purely
         # diagnostic / used to produce the labelling corpus for the Phase 2
@@ -352,6 +334,7 @@ class TimeCrisisEnv:
         self.peek_lock = 0
         self.peek_locked_value = False
         self.stale_core_ticks = 0
+        self.stale_shots_life_ticks = 0
         self.ammo_left = AMMO_MAX_ROUNDS
         self.hit_delta = 0
         self.prev_aim_x_bias = 0.0
@@ -367,10 +350,6 @@ class TimeCrisisEnv:
         # clear whose bonus stretches across several ticks.
         self.screens_cleared = 0
         self.max_timer_delta_since_start = 0
-        # Clear missile tracking so previous-episode projectile history
-        # doesn't bleed into the next episode.
-        self._prev_proj_centroids = []
-        self._missile_dodge_active = False
         # Vision state: discard the previous episode's background model
         # (MOG2 in ClassicalDetector accumulates its own history across
         # calls) and the cached detections. Guarded via getattr so sim
@@ -409,60 +388,9 @@ class TimeCrisisEnv:
                         self.last_detections = []
                     print(f"[env] vision capture failed: {exc!r}", flush=True)
 
-                # Velocity / persistence missile tracking.
-                # Only runs on captures so we compare the NEW detections
-                # against the PREVIOUS capture's detections (not the same
-                # stale list reused between captures).
-                if VISION_MISSILE_DODGE_ENABLED:
-                    _curr_projs = [
-                        (float(d.cx_norm), float(d.cy_norm), float(d.confidence))
-                        for d in (self.last_detections or [])
-                        if int(d.class_id) == 2  # EnemyClass.PROJECTILE
-                    ]
-                    _mlo = 0.5 - VISION_MISSILE_CENTER_BAND / 2
-                    _mhi = 0.5 + VISION_MISSILE_CENTER_BAND / 2
-                    self._missile_dodge_active = False
-                    for _cx, _cy, _conf in _curr_projs:
-                        if _conf < VISION_MISSILE_MIN_CONF:
-                            continue
-                        if not (_mlo <= _cx <= _mhi):
-                            continue
-                        for _pcx, _pcy in self._prev_proj_centroids:
-                            _dist = ((_cx - _pcx) ** 2 + (_cy - _pcy) ** 2) ** 0.5
-                            if (
-                                _dist <= VISION_MISSILE_MATCH_RADIUS   # same blob
-                                and _dist >= VISION_MISSILE_MIN_DISP   # actually moved
-                                and abs(_cx - 0.5) < abs(_pcx - 0.5)  # toward centre
-                            ):
-                                self._missile_dodge_active = True
-                                break
-                        if self._missile_dodge_active:
-                            break
-                    # Store centroids for next capture's comparison.
-                    self._prev_proj_centroids = [
-                        (_cx, _cy) for _cx, _cy, _ in _curr_projs
-                    ]
-
             shoot, peek, aim_x_bias, aim_y_bias = act_vision_schedule(
                 theta, self.ticks, self.last_detections or [],
             )
-            # Grey-only dodge (disabled -- fires on grey scenery).
-            if VISION_PROJECTILE_DODGE_ENABLED and peek and self.last_detections:
-                _blo = 0.5 - VISION_PROJECTILE_DODGE_CENTER_BAND / 2
-                _bhi = 0.5 + VISION_PROJECTILE_DODGE_CENTER_BAND / 2
-                for _det in self.last_detections:
-                    if (
-                        int(_det.class_id) == 2
-                        and float(_det.confidence) >= VISION_PROJECTILE_DODGE_MIN_CONF
-                        and _blo <= float(_det.cx_norm) <= _bhi
-                        and (_det.mean_rgb is None
-                             or _blob_is_grey(_det.mean_rgb))
-                    ):
-                        peek = False
-                        break
-            # Velocity / persistence missile dodge (also disabled until tuned).
-            if VISION_MISSILE_DODGE_ENABLED and peek and self._missile_dodge_active:
-                peek = False
         else:
             shoot, peek, aim_x_bias, aim_y_bias = act(
                 theta, self._build_obs(
@@ -525,6 +453,9 @@ class TimeCrisisEnv:
         cleared_guess = dead_guess = timed_out_guess = False
         continue_screen_guess = False
         tick_start_core = core_watchdog_snapshot(self.prev)
+        tick_start_shots_life = (
+            self.prev["shots_fired"], self.prev["shots_hit"], self.prev["life"],
+        )
         timer_at_tick_start = self.prev["timer"]
 
         for f in range(FRAME_SKIP):
@@ -625,6 +556,31 @@ class TimeCrisisEnv:
         if self.stale_core_ticks >= CONTINUE_SCREEN_STALE_TICKS:
             timed_out_guess = True
             continue_screen_guess = True
+
+        # Second, slower fallback that ignores ``timer`` entirely (see
+        # CONTINUE_SCREEN_FALLBACK_TICKS in config.py): catches the case where
+        # the continue-prompt countdown keeps the timer RAM address moving,
+        # which would otherwise prevent the watchdog above from ever firing.
+        current_shots_life = (
+            self.prev["shots_fired"], self.prev["shots_hit"], self.prev["life"],
+        )
+        if (
+            not dead_guess
+            and not cleared_guess
+            and current_shots_life == tick_start_shots_life
+        ):
+            self.stale_shots_life_ticks += 1
+        else:
+            self.stale_shots_life_ticks = 0
+        if self.stale_shots_life_ticks >= CONTINUE_SCREEN_FALLBACK_TICKS:
+            timed_out_guess = True
+            continue_screen_guess = True
+            print(
+                "[env_timecrisis] shots/life-stale fallback fired "
+                f"({self.stale_shots_life_ticks} ticks) -- likely stuck on a "
+                "continue/menu screen the timer-based watchdog missed.",
+                flush=True,
+            )
 
         # Wasted exposure: penalise ticks where the agent is fully exposed with
         # an EMPTY clip (ammo_left was already 0 at the start of this tick)

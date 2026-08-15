@@ -7,3 +7,14 @@ training_log.csv
 *.bk2
 .vscode/
 .vscode/settings.json
+*.log
+*.csv
+*.zip
+*.pt
+cvat/
+label-studio/
+runs/
+VideoExport/
+Dataset_base/
+images/
+maingame_fulltrain/

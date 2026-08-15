@@ -17,6 +17,7 @@ from detector import (
     Detection,
     EnemyClass,
     NUM_CLASSES,
+    ONNXDetector,
     _ENEMY_MIN_AREA,
     _NOISE_MIN_AREA,
     _PROJECTILE_MAX_AREA,
@@ -27,9 +28,9 @@ from detector import (
     _ENEMY_COLOR_FLOOR,
     _ENEMY_THREAT_COLORS,
     _threat_color_score,
-    blob_is_grey,
     build_detector,
 )
+from config import VISION_ONNX_MODEL_PATH
 
 
 def _warmup(det: ClassicalDetector, frame: np.ndarray, n: int = 20) -> None:
@@ -236,13 +237,6 @@ class ClassicalDetectorSuite(unittest.TestCase):
                            msg="Red (high-threat) must outscore unknown green")
         self.assertAlmostEqual(green_score, _ENEMY_COLOR_FLOOR, places=3)
 
-    def test_blob_is_grey_accepts_grey_and_rejects_coloured(self):
-        self.assertTrue(blob_is_grey((130, 135, 128)))   # grey missile
-        self.assertTrue(blob_is_grey((100, 100, 100)))   # neutral grey
-        self.assertFalse(blob_is_grey((220, 50, 50)))    # red enemy
-        self.assertFalse(blob_is_grey((50, 80, 200)))    # blue enemy
-        self.assertFalse(blob_is_grey((220, 200, 50)))   # yellow enemy
-
     def test_wide_text_banner_blob_is_rejected(self):
         """A blob with w/h > _MAX_BLOB_ASPECT must be discarded even if its
         area qualifies as ENEMY -- this is how 'Hurry up!' and 'DANGER!'
@@ -304,6 +298,57 @@ class BuildDetectorFactorySuite(unittest.TestCase):
         self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
         with self.assertRaises(Exception):
             build_detector(onnx_model_path=path)
+
+
+class ProductionOnnxModelSuite(unittest.TestCase):
+    """Double-checks that build_detector(), wired with the SAME
+    config.VISION_ONNX_MODEL_PATH used by TimeCrisisEnv in real training,
+    actually loads the real trained model as an ONNXDetector and can run
+    detect() end-to-end. Skipped (not failed) when best.onnx isn't present
+    on disk (e.g. a fresh checkout before a model has been exported) --
+    the .onnx weights are not committed to git."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not (VISION_ONNX_MODEL_PATH and os.path.isfile(VISION_ONNX_MODEL_PATH)):
+            raise unittest.SkipTest(
+                f"config.VISION_ONNX_MODEL_PATH={VISION_ONNX_MODEL_PATH!r} "
+                "not found on disk -- no trained model to test against."
+            )
+
+    def test_build_detector_with_production_config_returns_onnx_detector(self):
+        det = build_detector(VISION_ONNX_MODEL_PATH)
+        self.assertIsInstance(det, ONNXDetector)
+
+    def test_detect_runs_on_a_real_frame_without_error(self):
+        det = build_detector(VISION_ONNX_MODEL_PATH)
+        frame = self._load_sample_frame()
+        dets = det.detect(frame)
+        self.assertIsInstance(dets, list)
+        for d in dets:
+            self.assertIsInstance(d, Detection)
+            self.assertIn(d.class_id, (0, 1, 2))
+            self.assertGreaterEqual(d.confidence, 0.0)
+            self.assertLessEqual(d.confidence, 1.0)
+            self.assertGreaterEqual(d.x, 0)
+            self.assertGreaterEqual(d.y, 0)
+            self.assertLessEqual(d.x + d.w, frame.shape[1])
+            self.assertLessEqual(d.y + d.h, frame.shape[0])
+
+    def _load_sample_frame(self):
+        """Prefer a real captured gameplay screenshot (images/*.png) so the
+        real model actually has something to detect; fall back to a blank
+        synthetic frame (matching the real capture resolution) if no
+        screenshots are present on disk."""
+        images_dir = os.path.join(os.path.dirname(__file__), "..", "images")
+        if os.path.isdir(images_dir):
+            import cv2
+            for name in sorted(os.listdir(images_dir)):
+                if name.lower().endswith(".png"):
+                    frame = cv2.imread(os.path.join(images_dir, name))
+                    if frame is not None:
+                        return frame
+        return np.zeros((240, 264, 3), dtype=np.uint8)
 
 
 if __name__ == "__main__":

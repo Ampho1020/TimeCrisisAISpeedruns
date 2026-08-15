@@ -1,0 +1,8 @@
+path: /home/ampho/TimeCrisisAISpeedruns
+
+train: /home/ampho/TimeCrisisAISpeedruns/labels_maingame
+
+names:
+  0: ENEMY
+  1: GRENADE
+  2: PROJECTILE

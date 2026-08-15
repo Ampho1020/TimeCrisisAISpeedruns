@@ -1,0 +1,21 @@
+{
+  "categories": [
+    {
+      "id": 0,
+      "name": "ENEMY"
+    },
+    {
+      "id": 1,
+      "name": "GRENADE"
+    },
+    {
+      "id": 2,
+      "name": "PROJECTILE"
+    }
+  ],
+  "info": {
+    "year": 2026,
+    "version": "1.0",
+    "contributor": "Label Studio"
+  }
+}
