@@ -6,6 +6,7 @@ import os
 
 class TrainingLogger:
     FIELDS = [
+        "run_id",
         "gen", "best", "mean", "std", "spread",
         "clear_rate", "best_time", "best_damage", "best_acc", "mean_acc",
         "mean_peek_flips", "mean_peek_hold", "mean_cover_time",
@@ -19,6 +20,14 @@ class TrainingLogger:
         # across the population per generation; theta_screens_cleared is the
         # current mean-theta's single-episode count.
         "mean_screens_cleared", "max_screens_cleared", "theta_screens_cleared",
+        # Vision-gain tracking (added 2026-08-15 alongside VISION_GAIN_WARMSTART
+        # in config.py). mean_vision_gain is the population's average
+        # tanh(vision_gain_logit) across all MAX_TICKS rows (0.0 for
+        # non-vision_schedule POLICY_MODE); theta_vision_gain is the same
+        # computed on the updated center theta. Both should stay non-trivial
+        # (not collapse toward 0) if ES is keeping vision meaningfully in the
+        # aim blend rather than learning to ignore it.
+        "mean_vision_gain", "theta_vision_gain",
     ]
 
     def __init__(self, path: str):

@@ -1,15 +1,16 @@
 """Evolution Strategies training loop."""
 
 import time
+from datetime import datetime
 
 import numpy as np
 
 from config import (
     ACT_DIM, ALPHA, CHECKPOINT_EVERY, EPISODES_PER_CANDIDATE, GENERATIONS,
-    HIDDEN, HUD_ENABLED, LOG_CSV, MAX_TICKS, OBS_DIM, POLICY_MODE, POP_SIZE,
-    SEED, SIGMA, SHOT_PHASE_WARMSTART_ROW_STD,
+    HIDDEN, HUD_ENABLED, LOG_CSV, LOG_CSV_TIMESTAMPED, MAX_TICKS, OBS_DIM,
+    POLICY_MODE, POP_SIZE, SEED, SIGMA, SHOT_PHASE_WARMSTART_ROW_STD,
     STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT, STD_STAGNATION_THRESHOLD,
-    VERBOSE_EPISODES,
+    VERBOSE_EPISODES, VISION_GAIN_WARMSTART,
 )
 from logger import TrainingLogger
 from policy import PARAM_COUNT, SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_ROW_DIM
@@ -37,6 +38,22 @@ def _average_episode_infos(infos: list) -> dict:
     """
     keys = infos[0].keys()
     return {k: float(np.mean([float(info[k]) for info in infos])) for k in keys}
+
+
+def _mean_vision_gain(theta_batch: np.ndarray) -> float:
+    """Mean tanh(vision_gain_logit) across all MAX_TICKS rows -- and, for a
+    2D batch, across every candidate too. Returns 0.0 outside
+    POLICY_MODE == "vision_schedule" (no such column exists elsewhere).
+    Used to log whether ES is keeping vision meaningfully in the aim blend
+    (see VISION_GAIN_WARMSTART in config.py) rather than collapsing it
+    toward 0.
+    """
+    if POLICY_MODE != "vision_schedule":
+        return 0.0
+    batch = theta_batch if theta_batch.ndim > 1 else theta_batch[None, :]
+    per_tick = MAX_TICKS * VISION_SCHEDULE_ROW_DIM
+    grids = batch[:, :per_tick].reshape(-1, MAX_TICKS, VISION_SCHEDULE_ROW_DIM)
+    return float(np.tanh(grids[:, :, 4]).mean())
 
 
 def train():
@@ -68,20 +85,20 @@ def train():
     elif POLICY_MODE == "vision_schedule":
         # Vision-conditioned schedule: per-tick (shoot, peek, base_ax,
         # base_ay, vision_gain) rows followed by a global class-priority
-        # vector. To keep the Phase 3 rollout risk-controlled we make gen-0
-        # behaviour BYTE-IDENTICAL to plain schedule mode:
-        #   * ``vision_gain`` column (col 4) zero-init -> tanh(0)=0 collapses
-        #     the vision blend to the base aim regardless of what the
-        #     detector returns.
+        # vector.
+        #   * ``vision_gain`` column (col 4) warm-starts to
+        #     VISION_GAIN_WARMSTART (config.py) instead of 0 -- a real
+        #     trained YOLO model is wired in now, so vision should be an
+        #     active part of the aim blend from gen 0 rather than something
+        #     ES has to discover from scratch. Set VISION_GAIN_WARMSTART=0.0
+        #     to restore the old byte-identical-to-schedule-mode rollout.
         #   * class-priority tail zero-init -> softmax is uniform, no bias
-        #     toward any particular EnemyClass.
-        # ES must then actively LEARN a non-zero gain / class priority to
-        # improve over the schedule baseline -- if it can't, we lose
-        # nothing (see /memories/session/plan.md Phase 4 gate).
+        #     toward any particular EnemyClass; ES still has to learn which
+        #     class to prioritize.
         per_tick = MAX_TICKS * VISION_SCHEDULE_ROW_DIM
         grid = theta[:per_tick].reshape(MAX_TICKS, VISION_SCHEDULE_ROW_DIM)
         grid[:, 1] += 1.0   # peek-forward bias (same as schedule mode)
-        grid[:, 4] = 0.0    # vision_gain -> disabled at gen 0
+        grid[:, 4] = VISION_GAIN_WARMSTART   # vision_gain -> active from gen 0
         theta[:per_tick] = grid.reshape(-1)
         theta[per_tick:] = 0.0  # class-priority tail -> uniform softmax
     else:
@@ -136,7 +153,20 @@ def train():
 
     pool = WorkerPool()
     pool.start()
-    logger = TrainingLogger(LOG_CSV)
+    # run_id uniquely identifies this training invocation. Used (a) to build
+    # a per-run log filename when LOG_CSV_TIMESTAMPED is True, so separate
+    # runs never append into the same file and interleave/duplicate "gen"
+    # values, and (b) written into every logged row regardless, as a second
+    # line of defense if LOG_CSV_TIMESTAMPED is ever turned off and two runs
+    # do end up sharing one file.
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if LOG_CSV_TIMESTAMPED:
+        base, ext = LOG_CSV.rsplit(".", 1) if "." in LOG_CSV else (LOG_CSV, "csv")
+        log_path = f"{base}_{run_id}.{ext}"
+    else:
+        log_path = LOG_CSV
+    print(f"[es_train] run_id={run_id} logging to {log_path}", flush=True)
+    logger = TrainingLogger(log_path)
     # Consecutive generations with fitness std below STD_STAGNATION_THRESHOLD.
     # When this reaches STAGNATION_PATIENCE, every mirrored candidate is
     # landing on the same behavior (e.g. the "never expose" collapse -- see
@@ -221,6 +251,15 @@ def train():
             # episode/gen is negligible next to the population's evals.
             theta_fitness, theta_info = pool.evaluate(theta[None, :])[0]
 
+            # Vision-gain diagnostics (see VISION_GAIN_WARMSTART in
+            # config.py): mean_vision_gain uses the pre-update `candidates`
+            # population (matching every other mean_* metric below, which
+            # comes from evaluating that same population); theta_vision_gain
+            # uses the post-update center `theta` (matching theta_fitness's
+            # timing above).
+            mean_vision_gain = _mean_vision_gain(candidates)
+            theta_vision_gain = _mean_vision_gain(theta)
+
             # --- diagnostics ---
             best_i = int(np.argmax(fitnesses))
             best = infos[best_i]
@@ -265,10 +304,12 @@ def train():
                 f"| aimspan ({mean_aim_span_x:.3f},{mean_aim_span_y:.3f}) "
                 f"| aimdx {mean_aim_dx:.3f} "
                 f"| hitd {mean_hit_delta:.1f} "
+                f"| vgain {mean_vision_gain:+.3f} "
                 f"| lanes L/M/R {mean_shot_left_frac:.0%}/{mean_shot_mid_frac:.0%}/{mean_shot_right_frac:.0%} ===\n"
                 f"    [center theta] fit {theta_fitness:8.2f} | clear {'YES' if theta_info['cleared'] >= 1.0 else 'no '} "
                 f"| screens {theta_info.get('screens_cleared', 0):2.0f} "
-                f"| t {theta_info['elapsed']:6.1f} | dmg {theta_info['damage']:4.0f} | acc {theta_info['accuracy']:5.1%}\n",
+                f"| t {theta_info['elapsed']:6.1f} | dmg {theta_info['damage']:4.0f} | acc {theta_info['accuracy']:5.1%} "
+                f"| vgain {theta_vision_gain:+.3f}\n",
                 flush=True,
             )
 
@@ -288,6 +329,7 @@ def train():
                         pass
 
             logger.log({
+                "run_id": run_id,
                 "gen": gen,
                 "best": float(fitnesses[best_i]),
                 "mean": float(fitnesses.mean()),
@@ -319,6 +361,8 @@ def train():
                 "mean_screens_cleared": mean_screens,
                 "max_screens_cleared": max_screens,
                 "theta_screens_cleared": float(theta_info.get("screens_cleared", 0)),
+                "mean_vision_gain": mean_vision_gain,
+                "theta_vision_gain": theta_vision_gain,
             })
 
             if gen % CHECKPOINT_EVERY == 0:

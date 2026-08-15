@@ -103,10 +103,15 @@ CONTINUE_SCREEN_FALLBACK_TICKS = 45
 #                 detected centroid into the base aim according to the
 #                 tick's learned gain. See policy.act_vision_schedule and
 #                 /memories/session/plan.md (Phase 3-5) for the full
-#                 design + sim-probe gate. Vision_gain and class_priority
-#                 are zero-initialised so gen-0 behaviour is IDENTICAL to
-#                 pure "schedule" mode -- ES has to actively learn to use
-#                 the vision signal.
+#                 design + sim-probe gate. Vision_gain was originally
+#                 zero-initialised so gen-0 behaviour matched pure "schedule"
+#                 mode exactly (a risk-controlled rollout while the detector
+#                 was unproven). Now that a real trained YOLO model is wired
+#                 in (see VISION_ONNX_MODEL_PATH), gen-0 warm-starts
+#                 vision_gain to VISION_GAIN_WARMSTART instead of 0 so vision
+#                 is actively part of the aim blend from generation 0 rather
+#                 than something ES has to discover from scratch -- ES can
+#                 still perturb it up/down/negative as usual.
 POLICY_MODE = "vision_schedule"
 
 # Class count for the vision-conditioned schedule's global class-priority
@@ -244,6 +249,15 @@ BIZHAWK_LAUNCH_STAGGER_SECONDS = 3.0
 # variation can show up earlier instead of waiting for many generations to
 # discover/use those dims from pure perturbation noise.
 SHOT_PHASE_WARMSTART_ROW_STD = 0.08
+
+# Warm-start value for vision_schedule mode's per-tick vision_gain_logit
+# column (see POLICY_MODE comment above). tanh(1.0) ~= 0.76, i.e. gen-0
+# blends the base aim ~76% of the way toward the top-priority detection's
+# centroid rather than 0% -- meaningful vision usage from the start, while
+# still small enough for SIGMA=0.1 perturbations to push it higher, lower,
+# or negative if ES finds that better. Set to 0.0 to restore the old
+# byte-identical-to-schedule-mode gen-0 behavior.
+VISION_GAIN_WARMSTART = 1.0
 
 # -----------------------------
 # Fitness shaping
@@ -439,6 +453,15 @@ ACT_DIM = 4
 # -----------------------------
 VERBOSE_EPISODES = False
 LOG_CSV = "training_log.csv"
+# If True, es_train.py writes each run to its own timestamped file (e.g.
+# training_log_20260815_153000.csv) instead of appending to the same
+# LOG_CSV every time, so separate runs' generations never blend together in
+# one file. plot_progress.py's existing "training_log*.csv" glob + --latest
+# flag already picks up whichever file is newest. Every row also carries a
+# run_id column regardless of this flag, as a second line of defense if you
+# ever do point two runs at the same file. Set False to restore the old
+# fixed-filename-append behavior.
+LOG_CSV_TIMESTAMPED = True
 HUD_ENABLED = True    # draw status text on the emulator window
 
 # -----------------------------
