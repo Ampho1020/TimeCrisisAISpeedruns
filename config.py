@@ -293,12 +293,16 @@ FAIL_PENALTY       = 200.0
 # strictly INCREASING marginal incentive to push for one more screen -- the
 # reward is genuinely "richer" per extra screen, not just larger absolute.
 #
-# Any per-frame timer bump larger than SCREEN_CLEAR_TIMER_BUMP is treated as
-# a new screen clear event. Time Crisis' timer counts DOWN at 1 unit/frame in
-# normal play and jumps up by hundreds on a clear, so ~30 is well above
-# natural noise and well below a real clear's bonus roll.
+# Any per-tick timer bump larger than SCREEN_CLEAR_TIMER_BUMP is treated as
+# a new screen clear event (compared tick-start vs tick-end, not frame-by-
+# frame -- the bonus-roll conversion completes within a single decision
+# tick). Time Crisis' timer counts DOWN by a few units/tick in normal play
+# (and even throughout the screen-to-screen transition itself -- there is no
+# "frozen" phase to key off) and jumps up by hundreds on a clear, so 10 is
+# comfortably above natural per-tick noise and well below a real clear's
+# bonus roll.
 MULTI_CLEAR_BONUS = 1000.0
-SCREEN_CLEAR_TIMER_BUMP = 30
+SCREEN_CLEAR_TIMER_BUMP = 10
 
 # Peeking out is a HOLD, not a tap: the ~0.2s (~12-frame) in/out traverse only
 # completes if the button is held through it. PEEK_TRAVERSE_TICKS is a game-

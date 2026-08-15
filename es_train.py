@@ -305,11 +305,7 @@ def train():
                 f"| aimdx {mean_aim_dx:.3f} "
                 f"| hitd {mean_hit_delta:.1f} "
                 f"| vgain {mean_vision_gain:+.3f} "
-                f"| lanes L/M/R {mean_shot_left_frac:.0%}/{mean_shot_mid_frac:.0%}/{mean_shot_right_frac:.0%} ===\n"
-                f"    [center theta] fit {theta_fitness:8.2f} | clear {'YES' if theta_info['cleared'] >= 1.0 else 'no '} "
-                f"| screens {theta_info.get('screens_cleared', 0):2.0f} "
-                f"| t {theta_info['elapsed']:6.1f} | dmg {theta_info['damage']:4.0f} | acc {theta_info['accuracy']:5.1%} "
-                f"| vgain {theta_vision_gain:+.3f}\n",
+                f"| lanes L/M/R {mean_shot_left_frac:.0%}/{mean_shot_mid_frac:.0%}/{mean_shot_right_frac:.0%} ===",
                 flush=True,
             )
 

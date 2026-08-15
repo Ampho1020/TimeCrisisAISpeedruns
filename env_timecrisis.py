@@ -214,7 +214,6 @@ class TimeCrisisEnv:
         self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
         # Multi-screen tracking (see reset() for the full comment).
         self.screens_cleared: int = 0
-        self.max_timer_delta_since_start: int = 0
         # Set to a directory path (via ``run_eval.py --dump-frames <dir>``) to
         # save one PNG per decision tick during ``episode_fitness()``. Purely
         # diagnostic / used to produce the labelling corpus for the Phase 2
@@ -340,16 +339,12 @@ class TimeCrisisEnv:
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
         self.phase_infer.reset()
-        # Multi-screen tracking (added 2026-08-10). We count DISTINCT
-        # screen-clear events across the episode via a monotonic peak
-        # tracker: any per-frame timer-vs-start jump exceeding the running
-        # peak by SCREEN_CLEAR_TIMER_BUMP is a new clear. Timer counts
-        # down 1/frame in normal play, and jumps up by hundreds on a real
-        # clear, so this is well above natural noise and distinguishes N
-        # separate clears (each pushes the peak by another chunk) from ONE
-        # clear whose bonus stretches across several ticks.
+        # Multi-screen tracking (added 2026-08-10, reworked 2026-08-15). We
+        # count DISTINCT screen-clear events across the episode by comparing
+        # the timer at the END of each decision tick to what it was at the
+        # START of that same tick (see step() for why this is tick-granular,
+        # not per-frame/stateful).
         self.screens_cleared = 0
-        self.max_timer_delta_since_start = 0
         # Vision state: discard the previous episode's background model
         # (MOG2 in ClassicalDetector accumulates its own history across
         # calls) and the cached detections. Guarded via getattr so sim
@@ -450,7 +445,7 @@ class TimeCrisisEnv:
         aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
 
         total_fired = total_hit = total_life_loss = 0
-        cleared_guess = dead_guess = timed_out_guess = False
+        dead_guess = timed_out_guess = False
         continue_screen_guess = False
         tick_start_core = core_watchdog_snapshot(self.prev)
         tick_start_shots_life = (
@@ -496,32 +491,6 @@ class TimeCrisisEnv:
             )
             if post["life"] == 0 or lethal_wrap:
                 dead_guess = True
-            # Heuristic clear detection: timer jumps discontinuously upward
-            # (screen-clear bonus roll -- no explicit "screen cleared" RAM
-            # flag has been found). ``cleared_guess`` here is a boolean "at
-            # LEAST one screen has been cleared this episode" flag kept for
-            # the original single-clear fitness branch below; the actual
-            # PER-SCREEN COUNT lives in ``self.screens_cleared`` and is
-            # incremented by the monotonic-peak tracker immediately below.
-            timer_delta_from_start = u16_delta(post["timer"], self.start_timer)
-            if timer_delta_from_start > 100:
-                cleared_guess = True
-            # Monotonic-peak screen-clear counter (added 2026-08-10 alongside
-            # vision_schedule + MULTI_CLEAR_BONUS). Time Crisis' timer only
-            # ever counts DOWN in normal play, and jumps UP by hundreds on a
-            # screen clear. We track the running peak of (timer -
-            # start_timer); each time that peak is pushed up by more than
-            # SCREEN_CLEAR_TIMER_BUMP, that's a new clear event. Between
-            # clears, the timer counts back down, so the peak stays flat --
-            # we cannot double-count a single clear whose cutscene stretches
-            # across several ticks. See config.py's MULTI_CLEAR_BONUS block
-            # for why this counter is what makes multi-screen learning
-            # possible at all.
-            if timer_delta_from_start > (
-                self.max_timer_delta_since_start + SCREEN_CLEAR_TIMER_BUMP
-            ):
-                self.screens_cleared += 1
-                self.max_timer_delta_since_start = timer_delta_from_start
             # Timeout: the countdown reached zero -> "continue?" screen. Detect
             # the zero-cross here (a large downward step across the tick also
             # counts, in case the timer skips the exact zero sample).
@@ -540,13 +509,32 @@ class TimeCrisisEnv:
             if dead_guess or timed_out_guess:
                 break
 
+        # Screen-clear detection (added 2026-08-10, reworked 2026-08-15):
+        # compare the timer at the END of this whole decision tick to what it
+        # was at the START of the tick -- tick-granular, not per-frame. Time
+        # Crisis' timer counts DOWN a few units/tick in normal play AND
+        # throughout the screen-to-screen transition itself (there is no
+        # "frozen" phase to key off), so a per-frame stateful "are we still
+        # inside a clear transition" flag is both unnecessary and unreliable
+        # (the timer's continuous countdown during the transition made a
+        # naive "re-arm once timer_step < 0" check fire far too early,
+        # letting a single clear's bonus roll get double-counted). The bonus
+        # roll conversion itself completes within a single tick, so one
+        # tick-level comparison against SCREEN_CLEAR_TIMER_BUMP is enough --
+        # this is also the single source of truth ``info["cleared"]`` derives
+        # from below, replacing the old separate cleared_guess heuristic.
+        tick_timer_delta = u16_delta(self.prev["timer"], timer_at_tick_start)
+        clear_this_tick = tick_timer_delta > SCREEN_CLEAR_TIMER_BUMP
+        if clear_this_tick:
+            self.screens_cleared += 1
+
         # Fallback continue/menu watchdog: if all core counters were frozen
         # across the entire decision tick, count it. Several consecutive frozen
         # ticks indicate we've likely landed on a non-playable menu (e.g.
         # continue prompt) that escaped direct life/timer terminal detection.
         if (
             not dead_guess
-            and not cleared_guess
+            and not clear_this_tick
             and not timed_out_guess
             and core_watchdog_snapshot(self.prev) == tick_start_core
         ):
@@ -566,7 +554,7 @@ class TimeCrisisEnv:
         )
         if (
             not dead_guess
-            and not cleared_guess
+            and not clear_this_tick
             and current_shots_life == tick_start_shots_life
         ):
             self.stale_shots_life_ticks += 1
@@ -610,13 +598,13 @@ class TimeCrisisEnv:
             shots_fired_delta=total_fired,
             shots_hit_delta=total_hit,
             life_delta=-total_life_loss,
-            timer_delta=u16_delta(self.prev["timer"], timer_at_tick_start),
+            timer_delta=tick_timer_delta,
             # Multi-screen: a clear no longer forces Phase.TERMINAL (which is
             # absorbing) -- we want the episode to keep running so ES can
             # LEARN to chain screens for the quadratic MULTI_CLEAR_BONUS.
             # Only death/timeout still end the episode; the "was there any
-            # clear" signal is captured by ``cleared_guess`` above and by
-            # ``self.screens_cleared`` for the fitness formula.
+            # clear" signal is captured by ``self.screens_cleared`` for the
+            # fitness formula (see info["cleared"] below).
             cleared_guess=False,
             dead_guess=dead_guess or timed_out_guess,
             can_fire_probe=(total_fired > 0),
@@ -641,11 +629,13 @@ class TimeCrisisEnv:
             "shots_fired_delta": total_fired,
             "shots_hit_delta": total_hit,
             "life_loss": total_life_loss,
-            "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
-            # Cumulative screen-clear count so far this episode (see reset()
-            # for the monotonic-peak counter). ``cleared`` above is the
-            # backward-compatible "at least one screen" boolean; this is the
-            # actual number MULTI_CLEAR_BONUS is computed from.
+            # Single source of truth: derived directly from screens_cleared
+            # (no separate/second clear heuristic -- see the screen-clear
+            # detection comment above, 2026-08-15). "At least one screen
+            # cleared so far this episode", excluding a tick where the SAME
+            # tick also ended in death/timeout.
+            "cleared": bool(self.screens_cleared > 0 and not dead_guess and not timed_out_guess),
+            # Cumulative screen-clear count so far this episode.
             "screens_cleared": int(self.screens_cleared),
             "dead": dead_guess,
             "timed_out": timed_out_guess,
@@ -715,10 +705,13 @@ class TimeCrisisEnv:
         # Read the cumulative screen-clear count from the env itself (not
         # accumulated across ticks) -- self.screens_cleared is monotone within
         # an episode and info["screens_cleared"] on the LAST tick already
-        # holds the final total.
+        # holds the final total. This is now the SOLE clear signal (info
+        # ["cleared"]/``cleared`` above is just a derived view of it -- see
+        # step()'s 2026-08-15 comment), so the branch below only needs to
+        # check screens_cleared.
         screens_cleared = int(getattr(self, "screens_cleared", 0))
 
-        if cleared or screens_cleared > 0:
+        if screens_cleared > 0:
             fitness = CLEAR_BONUS - elapsed - DAMAGE_PENALTY * total_life_loss
         else:
             fitness = -FAIL_PENALTY
