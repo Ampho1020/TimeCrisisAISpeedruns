@@ -1,13 +1,19 @@
 """Load a checkpoint and watch one episode.
 
 Usage:
-    python run_eval.py [checkpoint.npy] [--dump-frames <dir>]
+    python run_eval.py [checkpoint.npy] [--dump-frames <dir>] [--tick-vision]
 
 Flags:
     --dump-frames <dir>   Save one PNG per decision tick during the episode
                           under <dir>. Used to build a labelling corpus for
                           the offline YOLO fine-tune workflow documented in
                           detector.py's footer. No effect on fitness.
+    --tick-vision         Opt out of per-frame vision (revert to the
+                          training-matching cadence: vision refreshed once
+                          every VISION_CAPTURE_EVERY_N_TICKS ticks instead of
+                          every raw emulator frame). By default eval now
+                          refreshes vision + aim on every single frame, like
+                          a human player watching the screen continuously.
 """
 
 import argparse
@@ -42,6 +48,14 @@ def main():
         default=None,
         help="Save one PNG per decision tick under DIR (for offline labelling).",
     )
+    parser.add_argument(
+        "--tick-vision",
+        action="store_true",
+        help=(
+            "Revert to training-cadence vision (refresh every "
+            "VISION_CAPTURE_EVERY_N_TICKS ticks) instead of every frame."
+        ),
+    )
     args = parser.parse_args()
     theta = np.asarray(np.load(args.checkpoint), dtype=np.float64).reshape(-1)
     expected = _expected_theta_size()
@@ -53,7 +67,7 @@ def main():
             "with the current config."
         )
 
-    env = TimeCrisisEnv()
+    env = TimeCrisisEnv(per_frame_vision=not args.tick_vision)
     if args.dump_frames:
         env.dump_frames_dir = args.dump_frames
     env.connect()

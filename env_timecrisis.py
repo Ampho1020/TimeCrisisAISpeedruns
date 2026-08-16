@@ -195,9 +195,23 @@ def peek_hold_reward(
 
 
 class TimeCrisisEnv:
-    def __init__(self, host=HOST, port=PORT, state_slot=STATE_SLOT):
+    def __init__(self, host=HOST, port=PORT, state_slot=STATE_SLOT, per_frame_vision: bool = False):
         self.client = BridgeClient(host, port)
         self.state_slot = state_slot
+        # When True (set by run_eval.py, never by training/worker_pool.py),
+        # the vision_schedule branch below re-captures a screenshot and
+        # re-runs the detector + aim blend on EVERY raw emulator frame
+        # inside the FRAME_SKIP inner loop, instead of once per decision
+        # tick (cached across VISION_CAPTURE_EVERY_N_TICKS ticks). This makes
+        # standalone evaluation react to the freshest possible frame each
+        # 1/60s, like a human player watching the screen continuously,
+        # instead of the training-time batched cadence tuned for ES
+        # wall-clock cost. shoot/peek/base-aim still come from the fixed
+        # per-tick theta row (that granularity is inherent to the trained
+        # table and unaffected by this flag) -- only the vision-informed aim
+        # blend gets refreshed every frame. Substantially slower (many more
+        # detector calls per episode) so it's opt-in and only used for eval.
+        self.per_frame_vision = per_frame_vision
         self.phase_infer = PhaseInferer(vote_window=3)
         self.prev: dict[str, int] = {}
         self.start_timer = 0
@@ -370,8 +384,13 @@ class TimeCrisisEnv:
         elif POLICY_MODE == "vision_schedule":
             # Vision-conditioned schedule: refresh detections on the capture
             # cadence, then blend into the base aim via act_vision_schedule.
+            # In per_frame_vision mode (eval only) we always capture fresh
+            # here too -- this first capture backs the shoot/peek gating
+            # decision below; the frame loop further down re-captures again
+            # for every subsequent raw frame within this same tick.
             _is_new_capture = (
-                self.last_detections is None
+                getattr(self, "per_frame_vision", False)
+                or self.last_detections is None
                 or (self.ticks % VISION_CAPTURE_EVERY_N_TICKS) == 0
             )
             if _is_new_capture:
@@ -454,6 +473,26 @@ class TimeCrisisEnv:
         timer_at_tick_start = self.prev["timer"]
 
         for f in range(FRAME_SKIP):
+            # Per-frame vision refresh (eval only, see __init__): re-capture
+            # + re-blend the aim on every raw frame after the first (which
+            # already got a fresh capture above) so aim tracks the latest
+            # frame instead of being frozen for the whole FRAME_SKIP-frame
+            # tick. shoot/peek/base-aim are NOT recomputed here -- they come
+            # from the fixed per-tick theta row and would be identical.
+            if getattr(self, "per_frame_vision", False) and POLICY_MODE == "vision_schedule" and f > 0:
+                try:
+                    frame_img = self.client.get_screenshot()
+                    self.last_detections = self.detector.detect(frame_img)
+                except Exception as exc:  # pragma: no cover - defensive
+                    print(f"[env] per-frame vision capture failed: {exc!r}", flush=True)
+                _, _, aim_x_bias, aim_y_bias = act_vision_schedule(
+                    theta, self.ticks, self.last_detections or [],
+                )
+                aim_x = min(1.0, max(0.0, 0.5 + float(aim_x_bias)))
+                aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
+                self.prev_aim_x_bias = float(aim_x_bias)
+                self.prev_aim_y_bias = float(aim_y_bias)
+
             # Edge-trigger the shot: press briefly, release. Holding the
             # button for all 5 frames makes fire rate uncontrollable.
             # shoot_allowed ensures the trigger only fires when fully exposed.
