@@ -338,9 +338,22 @@ SCREEN_CLEAR_TIMER_BUMP = 10
 
 # Peeking out is a HOLD, not a tap: the ~0.2s (~12-frame) in/out traverse only
 # completes if the button is held through it. PEEK_TRAVERSE_TICKS is a game-
-# mechanics constant (minimum hold lock so a transition can't be reversed
-# mid-animation; also gates when shots are allowed to register) -- it is NOT
-# a reward shaping knob. We used to also reward holding densely
+# mechanics constant -- it is NOT a reward shaping knob. It sets the
+# minimum-hold LATCH (env_timecrisis.py's peek_lock) so the agent can't
+# reverse the peek button mid-traverse, which would otherwise make the real
+# in-game animation reverse instead of completing (confirmed live as the
+# "1 tick cover in-out" flicker bug) -- this part must stay tick-count-based
+# since we have no ground-truth RAM flag for "mid-transition". It's ALSO
+# still used to compute the peek_phase observation feature (how far along
+# the traverse is), purely informational. It NO LONGER gates whether shots
+# are attempted (shoot_allowed) -- that used to also require
+# peek_ticks >= PEEK_TRAVERSE_TICKS as a rough estimate of when the traverse
+# animation finishes, but real success/failure is decided by the emulator
+# and read back ground-truth via shots_fired (RAM) regardless, so the extra
+# wait just delayed attempts unnecessarily. Removed 2026-08-18 so reload/
+# re-expose timing is bounded by real game state (peek + ammo_left) instead
+# of a hardcoded tick count -- see env_timecrisis.py's shoot_allowed comment.
+# We used to also reward holding densely
 # (COVER_HOLD_REWARD), penalize flip-flopping (COVER_FLIP_PENALTY) and camping
 # (COVER_TIME_PENALTY), and give extra hit credit only on failed episodes
 # (PARTIAL_HIT_REWARD). All four were removed: they just layered noisy shaping

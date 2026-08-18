@@ -452,11 +452,24 @@ class TimeCrisisEnv:
             self.peek_lock = PEEK_TRAVERSE_TICKS - 1  # -1 because this tick counts
             self.peek_locked_value = peek
 
-        # Gate the trigger: shots only register when the character is FULLY out of
-        # cover (A held for at least PEEK_TRAVERSE_TICKS consecutive ticks).  Firing
-        # during the transition animation silently fails in-game, so we block it here
-        # to avoid wasting the edge-trigger on a guaranteed miss.
-        shoot_allowed = peek and self.prev_peek and self.peek_ticks >= PEEK_TRAVERSE_TICKS
+        # Gate the trigger: only attempt to fire once we're not mid-transition
+        # (this tick AND last tick both chose "peek"). We used to also require
+        # self.peek_ticks >= PEEK_TRAVERSE_TICKS (a fixed, rough estimate of
+        # the ~12-frame traverse-out animation) before even sending the shoot
+        # button -- but that's an artificial delay we don't need: real
+        # in-game success/failure is decided by the emulator itself, not by
+        # us, and is read back ground-truth via shots_fired (RAM) regardless
+        # of what we assume here. Firing before the real animation completes
+        # just silently fails in-game (total_fired stays 0, no reward, no
+        # ammo consumed) -- removing the estimate only lets the agent attempt
+        # shots as early as the actual game allows instead of waiting out our
+        # guess, i.e. a "frame perfect" reload/re-expose cycle bounded by real
+        # game state (peek + ammo_left) rather than a hardcoded tick count.
+        # NOTE: this is independent from peek_lock above, which must stay --
+        # that lock prevents the AGENT from reversing the peek button mid
+        # traverse (a real in-game animation-reversal bug, confirmed live),
+        # not from firing too early.
+        shoot_allowed = peek and self.prev_peek
         # Full-range mapping: tanh bias [-1, 1] spans the full screen [0, 1].
         # Using 0.5× previously kept the cursor in [0.17, 0.83] with typical
         # small initial weights; 1.0× lets early exploration reach the edges.

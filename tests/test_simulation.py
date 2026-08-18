@@ -2806,33 +2806,36 @@ class PeekGatingSuite(unittest.TestCase):
         self.assertEqual(info["shots_fired"], 0)
 
     def test_shooting_starts_only_after_traverse(self):
-        """shoot_allowed must be False for the first PEEK_TRAVERSE_TICKS ticks.
+        """shoot_allowed must be False on the very first peek-out tick, then
+        True from the next tick onward.
 
-        shoot_allowed = peek AND prev_peek AND peek_ticks >= PEEK_TRAVERSE_TICKS.
-        peek_ticks is updated at the END of each tick, so the gate opens at the
-        START of tick PEEK_TRAVERSE_TICKS (0-indexed) -- i.e. after exactly
-        PEEK_TRAVERSE_TICKS ticks have passed with peek=True.
+        shoot_allowed = peek AND prev_peek (2026-08-18: no longer also
+        requires peek_ticks >= PEEK_TRAVERSE_TICKS -- that fixed, rough
+        estimate of the traverse-out animation length used to also gate
+        whether we even attempted to fire; removed since real success/
+        failure is decided ground-truth by the emulator via shots_fired
+        regardless of what we assume here. peek_lock -- the anti-flicker
+        latch preventing the agent from reversing mid-traverse -- is
+        unchanged and still tick-count-based). On tick 0, prev_peek is
+        still False (the character hasn't been exposed for even one prior
+        tick), so the gate must stay closed for that one tick; by tick 1,
+        prev_peek is True and the gate opens.
         """
         theta = _theta_always(peek=True, shoot=True)
 
         env = SimulatedTimeCrisisEnv(seed=0)
         env.reset()
-        shots_before_gate = 0
-        for _ in range(PEEK_TRAVERSE_TICKS):   # ticks 0 .. PEEK_TRAVERSE_TICKS-1
-            _, _, info = env.step(theta)
-            shots_before_gate += info["shots_fired_delta"]
+        _, _, info = env.step(theta)   # tick 0: first peek-out tick
         self.assertEqual(
-            shots_before_gate, 0,
-            f"Agent fired before PEEK_TRAVERSE_TICKS={PEEK_TRAVERSE_TICKS} "
-            f"ticks had elapsed -- gating window is too short",
+            info["shots_fired_delta"], 0,
+            "Agent fired on the very first peek-out tick (prev_peek was "
+            "still False) -- gate should stay closed for at least one tick",
         )
-        # Tick PEEK_TRAVERSE_TICKS: peek_ticks now == PEEK_TRAVERSE_TICKS at
-        # the start of this tick, so shoot_allowed must be True.
+        # Tick 1: prev_peek is now True, so shoot_allowed must be True.
         _, _, info = env.step(theta)
         self.assertGreater(
             info["shots_fired_delta"], 0,
-            f"Agent still did not fire on tick {PEEK_TRAVERSE_TICKS} -- "
-            f"gate may never open",
+            "Agent still did not fire on tick 1 -- gate may never open",
         )
 
 
