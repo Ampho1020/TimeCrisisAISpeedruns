@@ -2175,10 +2175,13 @@ class TimedSpotScheduleAccuracyEnv(AccuracyShapedFitnessMixin, TimedSpotSchedule
 _VISION_SCHEDULE_ROW_DIM = 4
 _VISION_SCHEDULE_NUM_CLASSES = 3  # must match detector.NUM_CLASSES / config.NUM_ENEMY_CLASSES
 _VISION_SCHEDULE_PARAM_COUNT = (
-    MAX_TICKS * _VISION_SCHEDULE_ROW_DIM + _VISION_SCHEDULE_NUM_CLASSES + 1
+    MAX_TICKS * _VISION_SCHEDULE_ROW_DIM + _VISION_SCHEDULE_NUM_CLASSES + 2
 )
-# Index of the single global vision_gain_logit scalar -- the last entry.
-_VISION_SCHEDULE_GAIN_IDX = _VISION_SCHEDULE_PARAM_COUNT - 1
+# Index of the single global vision_gain_logit scalar (second-to-last entry).
+_VISION_SCHEDULE_GAIN_IDX = _VISION_SCHEDULE_PARAM_COUNT - 2
+# Index of the single global shoot_gain_logit scalar -- the last entry
+# (added 2026-08-17, see policy.py's SHOOT_GAIN_IDX note).
+_VISION_SCHEDULE_SHOOT_GAIN_IDX = _VISION_SCHEDULE_PARAM_COUNT - 1
 
 
 def _theta_vision_schedule_warm_start(seed: int = 42) -> np.ndarray:
@@ -2197,6 +2200,7 @@ def _theta_vision_schedule_warm_start(seed: int = 42) -> np.ndarray:
     theta[:per_tick] = grid.reshape(-1)
     theta[per_tick:_VISION_SCHEDULE_GAIN_IDX] = 0.0  # class-priority tail -- uniform softmax
     theta[_VISION_SCHEDULE_GAIN_IDX] = 0.0    # vision_gain -- disabled at gen 0
+    theta[_VISION_SCHEDULE_SHOOT_GAIN_IDX] = 0.0    # shoot_gain -- disabled at gen 0
     return theta
 
 
@@ -2218,28 +2222,31 @@ def _vision_schedule_action_at(theta: np.ndarray, tick: int, detections):
     idx = min(int(tick), MAX_TICKS - 1)
     row_start = idx * _VISION_SCHEDULE_ROW_DIM
     row = theta[row_start:row_start + _VISION_SCHEDULE_ROW_DIM]
-    shoot = bool(row[0] > 0.0)
+    base_shoot_logit = float(row[0])
     peek = bool(row[1] > 0.0)
     base_ax_bias = float(np.tanh(row[2]))
     base_ay_bias = float(np.tanh(row[3]))
     gain = float(np.tanh(theta[_VISION_SCHEDULE_GAIN_IDX]))
+    shoot_gain = float(np.tanh(theta[_VISION_SCHEDULE_SHOOT_GAIN_IDX]))
 
-    if not detections:
-        return shoot, peek, base_ax_bias, base_ay_bias
-
-    priority_start = MAX_TICKS * _VISION_SCHEDULE_ROW_DIM
-    priority_raw = theta[priority_start:priority_start + _VISION_SCHEDULE_NUM_CLASSES]
-    priority = _softmax_1d(np.asarray(priority_raw, dtype=np.float64))
     best_det = None
-    best_score = -np.inf
-    for det in detections:
-        cid = int(det.class_id)
-        if cid < 0 or cid >= _VISION_SCHEDULE_NUM_CLASSES:
-            continue
-        score = float(det.confidence) * float(priority[cid])
-        if score > best_score:
-            best_score = score
-            best_det = det
+    if detections:
+        priority_start = MAX_TICKS * _VISION_SCHEDULE_ROW_DIM
+        priority_raw = theta[priority_start:priority_start + _VISION_SCHEDULE_NUM_CLASSES]
+        priority = _softmax_1d(np.asarray(priority_raw, dtype=np.float64))
+        best_score = -np.inf
+        for det in detections:
+            cid = int(det.class_id)
+            if cid < 0 or cid >= _VISION_SCHEDULE_NUM_CLASSES:
+                continue
+            score = float(det.confidence) * float(priority[cid])
+            if score > best_score:
+                best_score = score
+                best_det = det
+
+    detected_bias = 1.0 if best_det is not None else -1.0
+    shoot = bool(base_shoot_logit + shoot_gain * detected_bias > 0.0)
+
     if best_det is None:
         return shoot, peek, base_ax_bias, base_ay_bias
 
@@ -3485,7 +3492,7 @@ class VisionScheduleSearchSuite(unittest.TestCase):
     def test_param_count_and_warm_start_shape(self):
         self.assertEqual(
             _VISION_SCHEDULE_PARAM_COUNT,
-            MAX_TICKS * _VISION_SCHEDULE_ROW_DIM + _VISION_SCHEDULE_NUM_CLASSES + 1,
+            MAX_TICKS * _VISION_SCHEDULE_ROW_DIM + _VISION_SCHEDULE_NUM_CLASSES + 2,
         )
         theta = _theta_vision_schedule_warm_start(seed=42)
         self.assertEqual(theta.shape[0], _VISION_SCHEDULE_PARAM_COUNT)
@@ -3516,9 +3523,9 @@ class VisionScheduleSearchSuite(unittest.TestCase):
             self.assertAlmostEqual(sim[3], prod[3], places=10)
 
     def test_gain_zero_collapses_to_schedule_mode(self):
-        """The whole warm-start rationale rests on this: with vision_gain=0
-        AND class_priority=0, ``_vision_schedule_action_at`` must produce
-        the SAME (shoot, peek, aim_x_bias, aim_y_bias) as
+        """The whole warm-start rationale rests on this: with vision_gain=0,
+        shoot_gain=0, AND class_priority=0, ``_vision_schedule_action_at``
+        must produce the SAME (shoot, peek, aim_x_bias, aim_y_bias) as
         ``_schedule_action_at`` on the equivalent 4-col theta, regardless
         of what the detector returns."""
         from detector import Detection
@@ -3534,6 +3541,7 @@ class VisionScheduleSearchSuite(unittest.TestCase):
         theta_v[:per_tick] = grid.reshape(-1)
         theta_v[per_tick:_VISION_SCHEDULE_GAIN_IDX] = 0.0
         theta_v[_VISION_SCHEDULE_GAIN_IDX] = 0.0
+        theta_v[_VISION_SCHEDULE_SHOOT_GAIN_IDX] = 0.0
         theta_s = grid[:, :4].reshape(-1).copy()
 
         dets = [Detection(x=10, y=20, w=8, h=8, class_id=0, confidence=0.9,
@@ -3571,6 +3579,53 @@ class VisionScheduleSearchSuite(unittest.TestCase):
         # requires biases of (-0.25, +0.25) once gain saturates near +1.
         self.assertAlmostEqual(ax_bias, -0.25, places=2)
         self.assertAlmostEqual(ay_bias, +0.25, places=2)
+
+    def test_positive_shoot_gain_requires_detection_to_fire(self):
+        """Fix for the reported 2026-08-17 bug: aim tracked detections
+        instantly via per_frame_vision, but the trigger only fired on the
+        fixed open-loop schedule -- producing multi-second gaps between
+        aim-on-target and shot-fired. With base_shoot_logit at exactly 0
+        (a coin-flip open-loop decision) and shoot_gain saturated near +1,
+        the trigger must fire ONLY when a valid detection is present."""
+        from detector import Detection
+
+        theta = np.zeros(_VISION_SCHEDULE_PARAM_COUNT)
+        theta[_VISION_SCHEDULE_SHOOT_GAIN_IDX] = 5.0  # shoot_gain ~ +1 (saturated)
+        dets = [Detection(x=0, y=0, w=1, h=1, class_id=0, confidence=1.0,
+                          cx_norm=0.5, cy_norm=0.5)]
+        shoot_no_det = _vision_schedule_action_at(theta, 0, [])[0]
+        shoot_with_det = _vision_schedule_action_at(theta, 0, dets)[0]
+        self.assertFalse(shoot_no_det)
+        self.assertTrue(shoot_with_det)
+
+    def test_negative_shoot_gain_suppresses_shoot_when_detection_present(self):
+        """Symmetric case: a saturated NEGATIVE shoot_gain should flip the
+        polarity -- ES could in principle learn to hold fire while a
+        (perhaps low-priority/decoy) target is in view."""
+        from detector import Detection
+
+        theta = np.zeros(_VISION_SCHEDULE_PARAM_COUNT)
+        theta[_VISION_SCHEDULE_SHOOT_GAIN_IDX] = -5.0  # shoot_gain ~ -1 (saturated)
+        dets = [Detection(x=0, y=0, w=1, h=1, class_id=0, confidence=1.0,
+                          cx_norm=0.5, cy_norm=0.5)]
+        shoot_no_det = _vision_schedule_action_at(theta, 0, [])[0]
+        shoot_with_det = _vision_schedule_action_at(theta, 0, dets)[0]
+        self.assertTrue(shoot_no_det)
+        self.assertFalse(shoot_with_det)
+
+    def test_shoot_gain_zero_matches_open_loop_shoot(self):
+        """shoot_gain=0 must reproduce the pure open-loop shoot decision
+        (row[0] > 0) regardless of detection presence -- the warm-start
+        invariant this whole feature has to preserve for backward
+        compatibility with schedule-mode behaviour."""
+        from detector import Detection
+
+        theta = np.zeros(_VISION_SCHEDULE_PARAM_COUNT)
+        theta[0] = 3.0  # tick 0's shoot_logit: positive -> open-loop shoot=True
+        dets = [Detection(x=0, y=0, w=1, h=1, class_id=0, confidence=1.0,
+                          cx_norm=0.5, cy_norm=0.5)]
+        self.assertTrue(_vision_schedule_action_at(theta, 0, [])[0])
+        self.assertTrue(_vision_schedule_action_at(theta, 0, dets)[0])
 
     def test_class_priority_routes_target_selection(self):
         """When two detections are present with different classes, the

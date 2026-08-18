@@ -8,13 +8,13 @@ import numpy as np
 from config import (
     ACT_DIM, ALPHA, CHECKPOINT_EVERY, EPISODES_PER_CANDIDATE, GENERATIONS,
     HIDDEN, HUD_ENABLED, LOG_CSV, LOG_CSV_TIMESTAMPED, MAX_TICKS, OBS_DIM,
-    POLICY_MODE, POP_SIZE, SEED, SIGMA, SHOT_PHASE_WARMSTART_ROW_STD,
-    STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT, STD_STAGNATION_THRESHOLD,
-    VERBOSE_EPISODES, VISION_GAIN_WARMSTART,
+    POLICY_MODE, POP_SIZE, SEED, SIGMA, SHOOT_GAIN_WARMSTART,
+    SHOT_PHASE_WARMSTART_ROW_STD, STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT,
+    STD_STAGNATION_THRESHOLD, VERBOSE_EPISODES, VISION_GAIN_WARMSTART,
 )
 from logger import TrainingLogger
 from policy import (
-    PARAM_COUNT, SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_GAIN_IDX,
+    PARAM_COUNT, SCHEDULE_PARAM_COUNT, SHOOT_GAIN_IDX, VISION_SCHEDULE_GAIN_IDX,
     VISION_SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_ROW_DIM,
 )
 from worker_pool import WorkerPool
@@ -58,6 +58,18 @@ def _mean_vision_gain(theta_batch: np.ndarray) -> float:
         return 0.0
     batch = theta_batch if theta_batch.ndim > 1 else theta_batch[None, :]
     return float(np.tanh(batch[:, VISION_SCHEDULE_GAIN_IDX]).mean())
+
+
+def _mean_shoot_gain(theta_batch: np.ndarray) -> float:
+    """Mean tanh(shoot_gain_logit) across every candidate in the batch --
+    same rationale/shape as _mean_vision_gain above, but for the shoot-side
+    detection-presence blend (see SHOOT_GAIN_WARMSTART in config.py, added
+    2026-08-17 to fix the trigger lagging seconds behind the now-instant
+    per-frame aim tracking)."""
+    if POLICY_MODE != "vision_schedule":
+        return 0.0
+    batch = theta_batch if theta_batch.ndim > 1 else theta_batch[None, :]
+    return float(np.tanh(batch[:, SHOOT_GAIN_IDX]).mean())
 
 
 def train():
@@ -106,6 +118,7 @@ def train():
         theta[:per_tick] = grid.reshape(-1)
         theta[per_tick:VISION_SCHEDULE_GAIN_IDX] = 0.0  # class-priority tail -> uniform softmax
         theta[VISION_SCHEDULE_GAIN_IDX] = VISION_GAIN_WARMSTART  # vision_gain -> active from gen 0
+        theta[SHOOT_GAIN_IDX] = SHOOT_GAIN_WARMSTART  # shoot_gain -> active from gen 0
     else:
         # Warm-start the shoot logit to +2 and the peek logit to +1 (asymmetric,
         # 2026-08-04). Without some positive bias, ~50% of random seeds produce a
@@ -264,6 +277,8 @@ def train():
             # timing above).
             mean_vision_gain = _mean_vision_gain(candidates)
             theta_vision_gain = _mean_vision_gain(theta)
+            mean_shoot_gain = _mean_shoot_gain(candidates)
+            theta_shoot_gain = _mean_shoot_gain(theta)
 
             # --- diagnostics ---
             best_i = int(np.argmax(fitnesses))
@@ -309,7 +324,7 @@ def train():
                 f"| aimspan ({mean_aim_span_x:.3f},{mean_aim_span_y:.3f}) "
                 f"| aimdx {mean_aim_dx:.3f} "
                 f"| hitd {mean_hit_delta:.1f} "
-                f"| vgain {mean_vision_gain:+.3f} "
+                f"| vgain {mean_vision_gain:+.3f} | sgain {mean_shoot_gain:+.3f} "
                 f"| lanes L/M/R {mean_shot_left_frac:.0%}/{mean_shot_mid_frac:.0%}/{mean_shot_right_frac:.0%} ===",
                 flush=True,
             )
@@ -364,6 +379,8 @@ def train():
                 "theta_screens_cleared": float(theta_info.get("screens_cleared", 0)),
                 "mean_vision_gain": mean_vision_gain,
                 "theta_vision_gain": theta_vision_gain,
+                "mean_shoot_gain": mean_shoot_gain,
+                "theta_shoot_gain": theta_shoot_gain,
             })
 
             if gen % CHECKPOINT_EVERY == 0:

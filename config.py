@@ -131,11 +131,18 @@ NUM_ENEMY_CLASSES = 3
 # How often (in decision ticks) TimeCrisisEnv captures a fresh screenshot +
 # runs detection under POLICY_MODE="vision_schedule". Between captures the
 # most recent detections are re-used, matching the cadence pattern from the
-# sim's TimedSpotVisionEnv probe. 3 ticks is a compromise: cheap enough
-# that detection cost stays off the hot path (BizHawk decision loop is ~83ms
-# per tick, 20-30ms of detection every 3rd tick fits well), but frequent
-# enough that a fast-moving projectile detection doesn't get stale.
-VISION_CAPTURE_EVERY_N_TICKS = 3
+# sim's TimedSpotVisionEnv probe. Was 3 (a wall-clock-cost compromise), but
+# the 2026-08-17 shoot_gain live run showed mean_shoot_gain/theta_shoot_gain
+# declining steadily across 80 generations (0.76 -> 0.67) while
+# mean_vision_gain climbed (0.76 -> 0.94) -- ES was learning to DISTRUST the
+# detection-presence shoot signal because it was stale (up to 2 ticks old)
+# relative to the noise-free, perfectly-deterministic open-loop per-tick
+# schedule (this env replays bit-identically from a fixed savestate, see
+# EPISODES_PER_CANDIDATE note below). Set to 1 so shoot_gain sees a fresh
+# detection every tick during training too, matching eval's per_frame_vision
+# cadence and removing ES's incentive to fall back to fixed-tick timing.
+# Costs an extra ~20-30ms/tick x2 in live BizHawk training wall clock.
+VISION_CAPTURE_EVERY_N_TICKS = 1
 
 # Path to a fine-tuned YOLO/RT-DETR ONNX model. Empty string / non-existent
 # file -> detector.build_detector() falls back to the classical MOG2 +
@@ -267,6 +274,22 @@ SHOT_PHASE_WARMSTART_ROW_STD = 0.08
 # negative if ES finds that better. Set to 0.0 to restore the old
 # byte-identical-to-schedule-mode gen-0 behavior.
 VISION_GAIN_WARMSTART = 1.0
+
+# Warm-start value for vision_schedule mode's single global
+# shoot_gain_logit scalar (added 2026-08-17 alongside per_frame_vision --
+# see policy.py's note above VISION_SCHEDULE_ROW_DIM). Blends detection
+# PRESENCE (+1 detected / -1 not detected) into the shoot decision on top
+# of the open-loop shoot_logit, so the trigger can react to "is a target
+# actually in view" instead of firing purely on the fixed per-tick
+# schedule. The first live 80-gen run (1.0 -> tanh ~= 0.76) validated the
+# mechanism works (100% clear rate, mean_acc 0.33 -> 0.49) but also showed
+# ES steadily eroding shoot_gain back down to ~0.67, traced to stale
+# (every-3rd-tick) training-time vision -- see VISION_CAPTURE_EVERY_N_TICKS
+# above, now fixed to 1. With that staleness removed, raised to 2.0
+# (tanh(2.0) ~= 0.96) for a stronger gen-0 bias towards reactive,
+# detection-gated shooting -- still perturbable by ES if it finds lower is
+# better. Set to 0.0 to restore the old open-loop-only shoot decision.
+SHOOT_GAIN_WARMSTART = 2.0
 
 # -----------------------------
 # Fitness shaping

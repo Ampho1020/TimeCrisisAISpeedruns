@@ -28,6 +28,12 @@ class TrainingLogger:
         # (not collapse toward 0) if ES is keeping vision meaningfully in the
         # aim blend rather than learning to ignore it.
         "mean_vision_gain", "theta_vision_gain",
+        # Shoot-gain tracking (added 2026-08-17 alongside SHOOT_GAIN_WARMSTART
+        # in config.py -- fixes the trigger lagging behind the now-instant
+        # per-frame aim tracking). Same shape as the vision_gain pair above,
+        # but for tanh(shoot_gain_logit), the detection-presence blend into
+        # the shoot decision.
+        "mean_shoot_gain", "theta_shoot_gain",
     ]
 
     def __init__(self, path: str):

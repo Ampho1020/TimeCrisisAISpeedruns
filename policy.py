@@ -40,10 +40,29 @@ SCHEDULE_PARAM_COUNT = MAX_TICKS * 4
 # NOTE: this is a breaking layout change -- existing theta_*.npy checkpoints
 # saved under the old 5-column-per-tick layout are NOT compatible and must
 # be discarded/retrained.
+# 2026-08-17: added a second global scalar, shoot_gain_logit, appended
+# after vision_gain_logit. Root cause: shoot/peek are read purely from the
+# fixed per-tick row -- an open-loop timing table completely uninformed by
+# whether a target is actually visible right now. Once per_frame_vision
+# (env_timecrisis.py) made AIM track a fresh detection every single raw
+# frame, the mismatch became obvious/reported live: the crosshair snaps
+# onto an enemy almost instantly, but the trigger only fires whenever that
+# tick's fixed shoot_logit happens to be positive -- which can be many
+# ticks (observed: multiple seconds) away from the moment a target became
+# visible. shoot_gain lets ES learn how much a CURRENT detection's presence
+# should nudge the trigger, on top of the open-loop baseline -- see
+# act_vision_schedule for the exact blend. With shoot_gain=0 this collapses
+# byte-identical to the old open-loop-only shoot decision.
+#
+# NOTE: this is a breaking layout change (PARAM_COUNT grew by 1) --
+# existing theta_*.npy checkpoints are NOT compatible and must be
+# discarded/retrained.
 VISION_SCHEDULE_ROW_DIM = 4
-VISION_SCHEDULE_PARAM_COUNT = MAX_TICKS * VISION_SCHEDULE_ROW_DIM + NUM_ENEMY_CLASSES + 1
-# Index of the single global vision_gain_logit scalar -- the last entry.
-VISION_SCHEDULE_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 1
+VISION_SCHEDULE_PARAM_COUNT = MAX_TICKS * VISION_SCHEDULE_ROW_DIM + NUM_ENEMY_CLASSES + 2
+# Index of the single global vision_gain_logit scalar (second-to-last entry).
+VISION_SCHEDULE_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 2
+# Index of the single global shoot_gain_logit scalar -- the last entry.
+SHOOT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 1
 
 
 def _unpack(theta: np.ndarray):
@@ -108,18 +127,32 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
         base_aim_y_bias) rows indexed by ``tick``.
       * next ``NUM_ENEMY_CLASSES`` entries: raw class priority scores
         (softmax'd here before use).
-      * final single entry (``VISION_SCHEDULE_GAIN_IDX``): one shared
-        ``vision_gain_logit`` scalar used for every tick.
+      * penultimate entry (``VISION_SCHEDULE_GAIN_IDX``): one shared
+        ``vision_gain_logit`` scalar used for every tick, blending the
+        detected centroid into the aim.
+      * final entry (``SHOOT_GAIN_IDX``): one shared ``shoot_gain_logit``
+        scalar, blending detection PRESENCE into the shoot decision.
 
     ``detections`` is a list of ``detector.Detection`` objects (may be
-    empty). If empty, this returns the base action untouched -- so a
-    zero-init ``vision_gain`` and ``class_priority`` reproduce plain
-    schedule-mode behaviour exactly on generation 0.
+    empty). With zero-init ``vision_gain``/``shoot_gain``/``class_priority``
+    this reproduces plain schedule-mode behaviour exactly on generation 0.
 
     If detections are present, we score each one by
-    ``confidence * softmax(class_priority)[class_id]``, pick the top
-    scorer, and blend its normalized centroid into the base aim in [0,1]
-    screen space:
+    ``confidence * softmax(class_priority)[class_id]`` and pick the top
+    scorer (``best_det``). That drives TWO independent blends:
+
+    1. Shoot -- a +1/-1 nudge (present/absent) scaled by shoot_gain, added
+       to the tick's base shoot_logit before the threshold:
+
+           shoot_gain = tanh(shoot_gain_logit)                      # in [-1, 1]
+           shoot = (base_shoot_logit + shoot_gain * (+1 if best_det else -1)) > 0
+
+       This is what lets the trigger react to "is a target actually in
+       view right now" instead of firing purely on the open-loop tick
+       schedule (see the 2026-08-17 note above VISION_SCHEDULE_ROW_DIM).
+
+    2. Aim -- best_det's normalized centroid blended into the base aim in
+       [0,1] screen space:
 
         gain = tanh(vision_gain_logit)                 # in [-1, 1]
         base_x_01 = clip(0.5 + base_aim_x_bias, 0, 1)  # env's own decoder
@@ -136,33 +169,41 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
     idx = min(int(tick), MAX_TICKS - 1)
     row_start = idx * VISION_SCHEDULE_ROW_DIM
     row = theta[row_start:row_start + VISION_SCHEDULE_ROW_DIM]
-    shoot = bool(row[0] > 0.0)
+    base_shoot_logit = float(row[0])
     peek = bool(row[1] > 0.0)
     base_ax_bias = float(np.tanh(row[2]))
     base_ay_bias = float(np.tanh(row[3]))
     gain = float(np.tanh(theta[VISION_SCHEDULE_GAIN_IDX]))
+    shoot_gain = float(np.tanh(theta[SHOOT_GAIN_IDX]))
 
-    if not detections:
-        # Vision blend has no target this tick -- fall back to base aim.
-        return shoot, peek, base_ax_bias, base_ay_bias
-
-    priority_start = MAX_TICKS * VISION_SCHEDULE_ROW_DIM
-    priority_raw = theta[priority_start:priority_start + NUM_ENEMY_CLASSES]
-    priority = _softmax(np.asarray(priority_raw, dtype=np.float64))
-    # Score each detection; ignore any with class_id outside the priority
-    # range so a misconfigured detector can never index-out-of-range here
-    # (a bad detection is treated the same as no detection).
+    # Score every detection (if any) up front -- best_det feeds BOTH the
+    # shoot decision below and the aim blend, so "no valid target" is
+    # handled identically (best_det is None) whether detections was empty
+    # or every entry had an out-of-range class_id.
     best_det = None
-    best_score = -np.inf
-    for det in detections:
-        cid = int(det.class_id)
-        if cid < 0 or cid >= NUM_ENEMY_CLASSES:
-            continue
-        score = float(det.confidence) * float(priority[cid])
-        if score > best_score:
-            best_score = score
-            best_det = det
+    if detections:
+        priority_start = MAX_TICKS * VISION_SCHEDULE_ROW_DIM
+        priority_raw = theta[priority_start:priority_start + NUM_ENEMY_CLASSES]
+        priority = _softmax(np.asarray(priority_raw, dtype=np.float64))
+        best_score = -np.inf
+        for det in detections:
+            cid = int(det.class_id)
+            if cid < 0 or cid >= NUM_ENEMY_CLASSES:
+                continue
+            score = float(det.confidence) * float(priority[cid])
+            if score > best_score:
+                best_score = score
+                best_det = det
+
+    # Shoot: base open-loop logit plus a +/-1 detection-presence nudge
+    # scaled by the learned shoot_gain. shoot_gain=0 collapses exactly to
+    # the old open-loop-only decision (row[0] > 0), same warm-start
+    # invariant as vision_gain=0.
+    detected_bias = 1.0 if best_det is not None else -1.0
+    shoot = bool(base_shoot_logit + shoot_gain * detected_bias > 0.0)
+
     if best_det is None:
+        # No usable target this tick -- fall back to base aim.
         return shoot, peek, base_ax_bias, base_ay_bias
 
     # Blend in [0, 1] screen space, then convert back to the [-1, 1] bias
