@@ -3,7 +3,10 @@ open-loop per-tick action-schedule alternative (see config.POLICY_MODE)."""
 
 import numpy as np
 
-from config import ACT_DIM, HIDDEN, MAX_TICKS, NUM_ENEMY_CLASSES, OBS_DIM
+from config import (
+    ACT_DIM, HIDDEN, MAX_TICKS, NUM_ENEMY_CLASSES, OBS_DIM,
+    SHOOT_DETECTION_SCALE,
+)
 
 PARAM_COUNT = OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM + ACT_DIM
 
@@ -181,6 +184,7 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
     # handled identically (best_det is None) whether detections was empty
     # or every entry had an out-of-range class_id.
     best_det = None
+    best_conf = 0.0
     if detections:
         priority_start = MAX_TICKS * VISION_SCHEDULE_ROW_DIM
         priority_raw = theta[priority_start:priority_start + NUM_ENEMY_CLASSES]
@@ -194,13 +198,17 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
             if score > best_score:
                 best_score = score
                 best_det = det
+                best_conf = float(det.confidence)
 
-    # Shoot: base open-loop logit plus a +/-1 detection-presence nudge
-    # scaled by the learned shoot_gain. shoot_gain=0 collapses exactly to
-    # the old open-loop-only decision (row[0] > 0), same warm-start
-    # invariant as vision_gain=0.
-    detected_bias = 1.0 if best_det is not None else -1.0
-    shoot = bool(base_shoot_logit + shoot_gain * detected_bias > 0.0)
+    # Shoot: base open-loop logit plus a confidence-shaped nudge in [-1, 1]
+    # from the selected detection. No target -> -1.0. Confident target ->
+    # closer to +1.0. This reacts sooner than a binary presence-only signal.
+    detection_term = -1.0
+    if best_det is not None:
+        detection_term = float(np.clip(2.0 * best_conf - 1.0, -1.0, 1.0))
+    shoot = bool(
+        base_shoot_logit + SHOOT_DETECTION_SCALE * shoot_gain * detection_term > 0.0
+    )
 
     if best_det is None:
         # No usable target this tick -- fall back to base aim.

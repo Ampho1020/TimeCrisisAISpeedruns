@@ -291,6 +291,17 @@ VISION_GAIN_WARMSTART = 1.0
 # better. Set to 0.0 to restore the old open-loop-only shoot decision.
 SHOOT_GAIN_WARMSTART = 2.0
 
+# Scales how strongly live detection confidence can nudge the trigger in
+# POLICY_MODE="vision_schedule". The shoot decision blends this term onto
+# the open-loop per-tick shoot logit in policy.act_vision_schedule:
+#   base_shoot_logit + SHOOT_DETECTION_SCALE * shoot_gain * detection_term
+# where detection_term is confidence-shaped in [-1, 1].
+#
+# Larger values make the trigger react more immediately to confident
+# detections (less schedule-timed waiting). Keep moderate to avoid
+# over-firing on noisy detections.
+SHOOT_DETECTION_SCALE = 2.0
+
 # -----------------------------
 # Fitness shaping
 # -----------------------------
@@ -532,6 +543,7 @@ HUD_ENABLED = True    # draw status text on the emulator window
 GUNCON_CALIB = {
     "center_x": 0.5,
     "center_y": 0.5,
+
     "scale_x": 0.94,   # DuckStation-verified: X axis to 94%
     "scale_y": 1.0,    # Y already perfect
     "offset_x": 0.0,

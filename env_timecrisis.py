@@ -469,7 +469,7 @@ class TimeCrisisEnv:
         # that lock prevents the AGENT from reversing the peek button mid
         # traverse (a real in-game animation-reversal bug, confirmed live),
         # not from firing too early.
-        shoot_allowed = peek and self.prev_peek
+        shoot_allowed = peek
         # Full-range mapping: tanh bias [-1, 1] spans the full screen [0, 1].
         # Using 0.5× previously kept the cursor in [0.17, 0.83] with typical
         # small initial weights; 1.0× lets early exploration reach the edges.
