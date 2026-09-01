@@ -200,12 +200,15 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
                 best_det = det
                 best_conf = float(det.confidence)
 
-    # Shoot: base open-loop logit plus a confidence-shaped nudge in [-1, 1]
-    # from the selected detection. No target -> -1.0. Confident target ->
-    # closer to +1.0. This reacts sooner than a binary presence-only signal.
-    detection_term = -1.0
+    # Shoot: base open-loop logit plus a confidence-shaped additive nudge.
+    # Safety behavior for existing checkpoints:
+    #   * no detection -> 0.0 (preserve baseline schedule firing)
+    #   * detection    -> [0, 1] additive encouragement only
+    # This avoids the failure mode where low/no detections suppress trigger
+    # output below the old baseline and the policy appears to stop firing.
+    detection_term = 0.0
     if best_det is not None:
-        detection_term = float(np.clip(2.0 * best_conf - 1.0, -1.0, 1.0))
+        detection_term = float(np.clip(best_conf, 0.0, 1.0))
     shoot = bool(
         base_shoot_logit + SHOOT_DETECTION_SCALE * shoot_gain * detection_term > 0.0
     )

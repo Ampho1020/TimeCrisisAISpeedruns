@@ -314,8 +314,9 @@ ENEMY_SHIELD_WIDE_ASPECT = 0.90
 ENEMY_SHIELD_X_OFFSET_FRAC = 0.22
 
 # Trigger pulse cadence while shoot=True (0-based frame index within one
-# decision tick). 1 => pulse every frame (max hailstorm), 2 => every other.
-SHOOT_PULSE_EVERY_N_FRAMES = 1
+# decision tick). Uses one-frame PRESS pulses separated by release frames,
+# so values below 2 are clamped to 2 in env_timecrisis.py for reliability.
+SHOOT_PULSE_EVERY_N_FRAMES = 2
 
 # -----------------------------
 # Fitness shaping

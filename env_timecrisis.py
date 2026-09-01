@@ -516,11 +516,12 @@ class TimeCrisisEnv:
             # Edge-trigger the shot: press briefly, release. Holding the
             # button for all 5 frames makes fire rate uncontrollable.
             # shoot_allowed ensures the trigger only fires when fully exposed.
+            pulse_every = max(2, int(SHOOT_PULSE_EVERY_N_FRAMES))
             self.client.set_input(
                 shoot=bool(
                     shoot
                     and shoot_allowed
-                    and (f % max(1, int(SHOOT_PULSE_EVERY_N_FRAMES)) == 0)
+                    and (f % pulse_every == 0)
                 ),
                 peek=peek,
                 aim_x=aim_x,
