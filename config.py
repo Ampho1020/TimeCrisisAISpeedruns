@@ -273,7 +273,7 @@ SHOT_PHASE_WARMSTART_ROW_STD = 0.08
 # small enough for SIGMA=0.1 perturbations to push it higher, lower, or
 # negative if ES finds that better. Set to 0.0 to restore the old
 # byte-identical-to-schedule-mode gen-0 behavior.
-VISION_GAIN_WARMSTART = 1.0
+VISION_GAIN_WARMSTART = 1.8
 
 # Warm-start value for vision_schedule mode's single global
 # shoot_gain_logit scalar (added 2026-08-17 alongside per_frame_vision --
@@ -289,7 +289,7 @@ VISION_GAIN_WARMSTART = 1.0
 # (tanh(2.0) ~= 0.96) for a stronger gen-0 bias towards reactive,
 # detection-gated shooting -- still perturbable by ES if it finds lower is
 # better. Set to 0.0 to restore the old open-loop-only shoot decision.
-SHOOT_GAIN_WARMSTART = 2.0
+SHOOT_GAIN_WARMSTART = 2.8
 
 # Scales how strongly live detection confidence can nudge the trigger in
 # POLICY_MODE="vision_schedule". The shoot decision blends this term onto
@@ -300,18 +300,28 @@ SHOOT_GAIN_WARMSTART = 2.0
 # Larger values make the trigger react more immediately to confident
 # detections (less schedule-timed waiting). Keep moderate to avoid
 # over-firing on noisy detections.
-SHOOT_DETECTION_SCALE = 2.0
+SHOOT_DETECTION_SCALE = 3.5
+
+# Vision-priority overrides for "shoot what you see" behavior.
+# If the top detection is at/above this confidence, bypass the blended shoot
+# logit and force shoot=True (subject to env-side ammo/peek guards).
+VISION_FORCE_SHOOT_CONFIDENCE = 0.45
+# Minimum blend gain when a confident detection is present. This makes aim
+# follow vision aggressively instead of staying near the open-loop base aim.
+VISION_MIN_BLEND_GAIN = 0.85
 
 # Vision-target aim offset for ENEMY detections. The detector supplies both
 # centroid and aim target; for enemies we bias toward upper torso/head instead
 # of geometric center so limb/shield center-mass misses happen less often.
 #
 # Y fraction is measured from bbox top (0.0 = top edge, 1.0 = bottom edge).
-ENEMY_AIM_Y_FRACTION = 0.28
+ENEMY_AIM_Y_FRACTION = 0.26
 # If an enemy bbox is wide (likely shield-side posture), shift x away from
 # dead-center toward an inner-side shoulder point to avoid shielded center.
 ENEMY_SHIELD_WIDE_ASPECT = 0.90
-ENEMY_SHIELD_X_OFFSET_FRAC = 0.22
+# Set to 0.0 to disable lateral side-shift; top-center aiming is usually
+# safer on shielded enemies when shield orientation is not explicitly known.
+ENEMY_SHIELD_X_OFFSET_FRAC = 0.0
 
 # Trigger pulse cadence while shoot=True (0-based frame index within one
 # decision tick). Uses one-frame PRESS pulses separated by release frames,
@@ -390,6 +400,16 @@ SCREEN_CLEAR_TIMER_BUMP = 10
 # into fitness.
 PEEK_TRAVERSE_TICKS = 3     # ticks (x FRAME_SKIP frames) to clear the traverse
 
+# Transition-lock hold durations (in decision ticks) for the peek button
+# state machine. These are separate from PEEK_TRAVERSE_TICKS so we can reduce
+# "takes too long to look out" latency without changing the observation's
+# peek-phase normalization scale.
+#
+# OUT controls cover -> exposed transitions (agent wants to look out).
+# IN controls exposed -> cover transitions (agent ducks/reloads).
+PEEK_LOCK_OUT_TICKS = 0
+PEEK_LOCK_IN_TICKS = 1
+
 # NOTE: we deliberately do NOT reward raw shots fired (nor per-shot reload/
 # active-fire bonuses). Any reward that scales with shot COUNT is a magdump
 # hack -- the policy learns to spam the trigger for free reward regardless of
@@ -421,7 +441,7 @@ DRY_FIRE_PENALTY = 2.0
 # - EXPOSED_NO_SHOT_PENALTY: exposed with ammo but no shot landed that tick.
 # - COVER_HESITATION_PENALTY: stayed in cover with ammo while enemy visible.
 EXPOSED_NO_SHOT_PENALTY = 25.0
-COVER_HESITATION_PENALTY = 12.0
+COVER_HESITATION_PENALTY = 30.0
 
 # Miss-correction shaping: reward sequences that recover from a miss by
 # shifting aim instead of repeating the same spot, and penalize repeated
@@ -567,7 +587,9 @@ GUNCON_CALIB = {
     "center_x": 0.5,
     "center_y": 0.5,
 
-    "scale_x": 0.94,   # DuckStation-verified: X axis to 94%
+    # Stronger center compression to counter symmetric outward drift:
+    # left aims landing too far left and right aims too far right.
+    "scale_x": 0.94,
     "scale_y": 1.0,    # Y already perfect
     "offset_x": 0.0,
     "offset_y": 0.0,

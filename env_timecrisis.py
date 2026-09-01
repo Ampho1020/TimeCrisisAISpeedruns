@@ -13,7 +13,8 @@ from config import (
     EXPOSED_NO_SHOT_PENALTY,
     FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
     MAX_TICKS, MISS_CORRECTION_BONUS, MOVE_EPS, MULTI_CLEAR_BONUS,
-    PEEK_TRAVERSE_TICKS, POLICY_MODE, PORT, RAM, RELOAD_BONUS, REPEATED_MISS_PENALTY,
+    PEEK_LOCK_IN_TICKS, PEEK_LOCK_OUT_TICKS, PEEK_TRAVERSE_TICKS,
+    POLICY_MODE, PORT, RAM, RELOAD_BONUS, REPEATED_MISS_PENALTY,
     SAME_EPS, SCREEN_CLEAR_TIMER_BUMP, SHOOT_PULSE_EVERY_N_FRAMES,
     SHOT_SLOT_DIVERSITY_BONUS,
     SHOT_SLOT_DIVERSITY_SCALE, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
@@ -456,7 +457,8 @@ class TimeCrisisEnv:
             self.peek_lock -= 1
         elif peek != self.prev_peek:
             # Any transition: lock the new state
-            self.peek_lock = PEEK_TRAVERSE_TICKS - 1  # -1 because this tick counts
+            lock_ticks = PEEK_LOCK_OUT_TICKS if peek else PEEK_LOCK_IN_TICKS
+            self.peek_lock = max(0, int(lock_ticks) - 1)  # -1 because this tick counts
             self.peek_locked_value = peek
 
         # Gate the trigger: only attempt to fire once we're not mid-transition

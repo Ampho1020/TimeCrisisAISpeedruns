@@ -6,6 +6,8 @@ import numpy as np
 from config import (
     ACT_DIM, HIDDEN, MAX_TICKS, NUM_ENEMY_CLASSES, OBS_DIM,
     SHOOT_DETECTION_SCALE,
+    VISION_FORCE_SHOOT_CONFIDENCE,
+    VISION_MIN_BLEND_GAIN,
 )
 
 PARAM_COUNT = OBS_DIM * HIDDEN + HIDDEN + HIDDEN * ACT_DIM + ACT_DIM
@@ -209,9 +211,10 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
     detection_term = 0.0
     if best_det is not None:
         detection_term = float(np.clip(best_conf, 0.0, 1.0))
-    shoot = bool(
-        base_shoot_logit + SHOOT_DETECTION_SCALE * shoot_gain * detection_term > 0.0
-    )
+    shoot_logit = base_shoot_logit + SHOOT_DETECTION_SCALE * shoot_gain * detection_term
+    shoot = bool(shoot_logit > 0.0)
+    if best_det is not None and best_conf >= VISION_FORCE_SHOOT_CONFIDENCE:
+        shoot = True
 
     if best_det is None:
         # No usable target this tick -- fall back to base aim.
@@ -223,10 +226,13 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
     base_y_01 = min(1.0, max(0.0, 0.5 + base_ay_bias))
     target_x_norm = float(getattr(best_det, "aim_x_norm", best_det.cx_norm))
     target_y_norm = float(getattr(best_det, "aim_y_norm", best_det.cy_norm))
+    blend_gain = gain
+    if best_conf >= VISION_FORCE_SHOOT_CONFIDENCE:
+        blend_gain = max(blend_gain, VISION_MIN_BLEND_GAIN)
     blended_x_01 = min(
-        1.0, max(0.0, base_x_01 + gain * (target_x_norm - base_x_01)),
+        1.0, max(0.0, base_x_01 + blend_gain * (target_x_norm - base_x_01)),
     )
     blended_y_01 = min(
-        1.0, max(0.0, base_y_01 + gain * (target_y_norm - base_y_01)),
+        1.0, max(0.0, base_y_01 + blend_gain * (target_y_norm - base_y_01)),
     )
     return shoot, peek, blended_x_01 - 0.5, blended_y_01 - 0.5
