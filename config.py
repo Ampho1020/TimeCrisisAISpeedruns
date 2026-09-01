@@ -291,6 +291,15 @@ VISION_GAIN_WARMSTART = 1.8
 # better. Set to 0.0 to restore the old open-loop-only shoot decision.
 SHOOT_GAIN_WARMSTART = 2.8
 
+# Warm-start for vision_schedule's learned edge-drift correction gain.
+# 0.0 starts with no learned correction; ES can adapt positive/negative.
+VISION_DRIFT_GAIN_WARMSTART = 0.0
+
+# Edge threshold for applying learned drift correction from cursor error.
+# 0.0 = everywhere, 1.0 = only exact edge. 0.65 means correction ramps in
+# mostly near the outer ~17.5% on each side.
+VISION_DRIFT_EDGE_START = 0.65
+
 # Scales how strongly live detection confidence can nudge the trigger in
 # POLICY_MODE="vision_schedule". The shoot decision blends this term onto
 # the open-loop per-tick shoot logit in policy.act_vision_schedule:
@@ -596,7 +605,7 @@ GUNCON_CALIB = {
     "offset_x": 0.0,
     "offset_y": 0.0,
     "min_x": 0.0,
-    "max_x": 0.98,
+    "max_x": 1.0,
     "min_y": 0.0,
     "max_y": 1.0,
 }

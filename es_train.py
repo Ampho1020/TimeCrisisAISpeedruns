@@ -17,10 +17,12 @@ from config import (
     POLICY_MODE, POP_SIZE, SEED, SIGMA, SHOOT_GAIN_WARMSTART,
     SHOT_PHASE_WARMSTART_ROW_STD, STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT,
     STD_STAGNATION_THRESHOLD, VERBOSE_EPISODES, VISION_GAIN_WARMSTART,
+    VISION_DRIFT_GAIN_WARMSTART,
 )
 from logger import TrainingLogger
 from policy import (
     PARAM_COUNT, SCHEDULE_PARAM_COUNT, SHOOT_GAIN_IDX, VISION_SCHEDULE_GAIN_IDX,
+    DRIFT_GAIN_IDX,
     VISION_SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_ROW_DIM,
 )
 from worker_pool import WorkerPool
@@ -76,6 +78,14 @@ def _mean_shoot_gain(theta_batch: np.ndarray) -> float:
         return 0.0
     batch = theta_batch if theta_batch.ndim > 1 else theta_batch[None, :]
     return float(np.tanh(batch[:, SHOOT_GAIN_IDX]).mean())
+
+
+def _mean_drift_gain(theta_batch: np.ndarray) -> float:
+    """Mean tanh(drift_gain_logit) across candidates (vision_schedule only)."""
+    if POLICY_MODE != "vision_schedule":
+        return 0.0
+    batch = theta_batch if theta_batch.ndim > 1 else theta_batch[None, :]
+    return float(np.tanh(batch[:, DRIFT_GAIN_IDX]).mean())
 
 
 def train(init_theta_path: str | None = None):
@@ -134,6 +144,7 @@ def train(init_theta_path: str | None = None):
         theta[per_tick:VISION_SCHEDULE_GAIN_IDX] = 0.0  # class-priority tail -> uniform softmax
         theta[VISION_SCHEDULE_GAIN_IDX] = VISION_GAIN_WARMSTART  # vision_gain -> active from gen 0
         theta[SHOOT_GAIN_IDX] = SHOOT_GAIN_WARMSTART  # shoot_gain -> active from gen 0
+        theta[DRIFT_GAIN_IDX] = VISION_DRIFT_GAIN_WARMSTART  # drift_gain -> no correction at gen 0
     else:
         # Warm-start the shoot logit to +2 and the peek logit to +1 (asymmetric,
         # 2026-08-04). Without some positive bias, ~50% of random seeds produce a
@@ -294,6 +305,8 @@ def train(init_theta_path: str | None = None):
             theta_vision_gain = _mean_vision_gain(theta)
             mean_shoot_gain = _mean_shoot_gain(candidates)
             theta_shoot_gain = _mean_shoot_gain(theta)
+            mean_drift_gain = _mean_drift_gain(candidates)
+            theta_drift_gain = _mean_drift_gain(theta)
 
             # --- diagnostics ---
             best_i = int(np.argmax(fitnesses))
@@ -340,6 +353,7 @@ def train(init_theta_path: str | None = None):
                 f"| aimdx {mean_aim_dx:.3f} "
                 f"| hitd {mean_hit_delta:.1f} "
                 f"| vgain {mean_vision_gain:+.3f} | sgain {mean_shoot_gain:+.3f} "
+                f"| dgain {mean_drift_gain:+.3f} "
                 f"| lanes L/M/R {mean_shot_left_frac:.0%}/{mean_shot_mid_frac:.0%}/{mean_shot_right_frac:.0%} ===",
                 flush=True,
             )
@@ -396,6 +410,8 @@ def train(init_theta_path: str | None = None):
                 "theta_vision_gain": theta_vision_gain,
                 "mean_shoot_gain": mean_shoot_gain,
                 "theta_shoot_gain": theta_shoot_gain,
+                "mean_drift_gain": mean_drift_gain,
+                "theta_drift_gain": theta_drift_gain,
             })
 
             if gen % CHECKPOINT_EVERY == 0:

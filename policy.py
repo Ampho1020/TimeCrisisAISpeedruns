@@ -6,6 +6,7 @@ import numpy as np
 from config import (
     ACT_DIM, HIDDEN, MAX_TICKS, NUM_ENEMY_CLASSES, OBS_DIM,
     SHOOT_DETECTION_SCALE,
+    VISION_DRIFT_EDGE_START,
     VISION_FORCE_SHOOT_CONFIDENCE,
     VISION_MIN_BLEND_GAIN,
 )
@@ -63,11 +64,11 @@ SCHEDULE_PARAM_COUNT = MAX_TICKS * 4
 # existing theta_*.npy checkpoints are NOT compatible and must be
 # discarded/retrained.
 VISION_SCHEDULE_ROW_DIM = 4
-VISION_SCHEDULE_PARAM_COUNT = MAX_TICKS * VISION_SCHEDULE_ROW_DIM + NUM_ENEMY_CLASSES + 2
-# Index of the single global vision_gain_logit scalar (second-to-last entry).
-VISION_SCHEDULE_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 2
-# Index of the single global shoot_gain_logit scalar -- the last entry.
-SHOOT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 1
+VISION_SCHEDULE_PARAM_COUNT = MAX_TICKS * VISION_SCHEDULE_ROW_DIM + NUM_ENEMY_CLASSES + 3
+# Indexes of global scalars in tail order: vision_gain, shoot_gain, drift_gain.
+VISION_SCHEDULE_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 3
+SHOOT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 2
+DRIFT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 1
 
 
 def _unpack(theta: np.ndarray):
@@ -124,7 +125,13 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     return exp / total
 
 
-def act_vision_schedule(theta: np.ndarray, tick: int, detections):
+def act_vision_schedule(
+    theta: np.ndarray,
+    tick: int,
+    detections,
+    cursor_x_norm: float | None = None,
+    cursor_y_norm: float | None = None,
+):
     """Vision-conditioned open-loop action selection.
 
     Theta layout (see ``VISION_SCHEDULE_PARAM_COUNT`` above):
@@ -132,11 +139,14 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
         base_aim_y_bias) rows indexed by ``tick``.
       * next ``NUM_ENEMY_CLASSES`` entries: raw class priority scores
         (softmax'd here before use).
-      * penultimate entry (``VISION_SCHEDULE_GAIN_IDX``): one shared
-        ``vision_gain_logit`` scalar used for every tick, blending the
-        detected centroid into the aim.
-      * final entry (``SHOOT_GAIN_IDX``): one shared ``shoot_gain_logit``
-        scalar, blending detection PRESENCE into the shoot decision.
+            * third-from-last entry (``VISION_SCHEDULE_GAIN_IDX``): one shared
+                ``vision_gain_logit`` scalar used for every tick, blending the
+                detected centroid into the aim.
+            * second-from-last entry (``SHOOT_GAIN_IDX``): one shared
+                ``shoot_gain_logit`` scalar, blending detection PRESENCE into the
+                shoot decision.
+            * final entry (``DRIFT_GAIN_IDX``): one shared ``drift_gain_logit``
+                scalar used to learn edge drift correction from live cursor error.
 
     ``detections`` is a list of ``detector.Detection`` objects (may be
     empty). With zero-init ``vision_gain``/``shoot_gain``/``class_priority``
@@ -180,6 +190,7 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
     base_ay_bias = float(np.tanh(row[3]))
     gain = float(np.tanh(theta[VISION_SCHEDULE_GAIN_IDX]))
     shoot_gain = float(np.tanh(theta[SHOOT_GAIN_IDX]))
+    drift_gain = float(np.tanh(theta[DRIFT_GAIN_IDX]))
 
     # Score every detection (if any) up front -- best_det feeds BOTH the
     # shoot decision below and the aim blend, so "no valid target" is
@@ -226,6 +237,16 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
     base_y_01 = min(1.0, max(0.0, 0.5 + base_ay_bias))
     target_x_norm = float(getattr(best_det, "aim_x_norm", best_det.cx_norm))
     target_y_norm = float(getattr(best_det, "aim_y_norm", best_det.cy_norm))
+
+    if cursor_x_norm is not None and cursor_y_norm is not None:
+        edge_mag_x = max(0.0, abs(target_x_norm - 0.5) * 2.0 - VISION_DRIFT_EDGE_START)
+        edge_gain_x = min(1.0, edge_mag_x / max(1e-6, 1.0 - VISION_DRIFT_EDGE_START))
+        target_x_norm = float(np.clip(
+            target_x_norm + drift_gain * edge_gain_x * (target_x_norm - float(cursor_x_norm)),
+            0.0,
+            1.0,
+        ))
+
     blend_gain = gain
     if best_conf >= VISION_FORCE_SHOOT_CONFIDENCE:
         blend_gain = max(blend_gain, VISION_MIN_BLEND_GAIN)

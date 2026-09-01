@@ -408,7 +408,15 @@ class TimeCrisisEnv:
                     print(f"[env] vision capture failed: {exc!r}", flush=True)
 
             shoot, peek, aim_x_bias, aim_y_bias = act_vision_schedule(
-                theta, self.ticks, self.last_detections or [],
+                theta,
+                self.ticks,
+                self.last_detections or [],
+                cursor_x_norm=normalize_cursor(
+                    self.prev.get("cursor_x", CURSOR_X_MIN), CURSOR_X_MIN, CURSOR_X_MAX,
+                ),
+                cursor_y_norm=normalize_cursor(
+                    self.prev.get("cursor_y", CURSOR_Y_MIN), CURSOR_Y_MIN, CURSOR_Y_MAX,
+                ),
             )
             enemy_visible = any(
                 int(det.class_id) == 0 for det in (self.last_detections or [])
@@ -508,7 +516,15 @@ class TimeCrisisEnv:
                 except Exception as exc:  # pragma: no cover - defensive
                     print(f"[env] per-frame vision capture failed: {exc!r}", flush=True)
                 _, _, aim_x_bias, aim_y_bias = act_vision_schedule(
-                    theta, self.ticks, self.last_detections or [],
+                    theta,
+                    self.ticks,
+                    self.last_detections or [],
+                    cursor_x_norm=normalize_cursor(
+                        self.prev.get("cursor_x", CURSOR_X_MIN), CURSOR_X_MIN, CURSOR_X_MAX,
+                    ),
+                    cursor_y_norm=normalize_cursor(
+                        self.prev.get("cursor_y", CURSOR_Y_MIN), CURSOR_Y_MIN, CURSOR_Y_MAX,
+                    ),
                 )
                 aim_x = min(1.0, max(0.0, 0.5 + float(aim_x_bias)))
                 aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
