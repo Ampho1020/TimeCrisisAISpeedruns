@@ -302,6 +302,21 @@ SHOOT_GAIN_WARMSTART = 2.0
 # over-firing on noisy detections.
 SHOOT_DETECTION_SCALE = 2.0
 
+# Vision-target aim offset for ENEMY detections. The detector supplies both
+# centroid and aim target; for enemies we bias toward upper torso/head instead
+# of geometric center so limb/shield center-mass misses happen less often.
+#
+# Y fraction is measured from bbox top (0.0 = top edge, 1.0 = bottom edge).
+ENEMY_AIM_Y_FRACTION = 0.28
+# If an enemy bbox is wide (likely shield-side posture), shift x away from
+# dead-center toward an inner-side shoulder point to avoid shielded center.
+ENEMY_SHIELD_WIDE_ASPECT = 0.90
+ENEMY_SHIELD_X_OFFSET_FRAC = 0.22
+
+# Trigger pulse cadence while shoot=True (0-based frame index within one
+# decision tick). 1 => pulse every frame (max hailstorm), 2 => every other.
+SHOOT_PULSE_EVERY_N_FRAMES = 1
+
 # -----------------------------
 # Fitness shaping
 # -----------------------------
@@ -399,6 +414,13 @@ AMMO_MAX_ROUNDS = 6
 # be 0 in practice -- this penalty is now a harmless backstop/diagnostic, not
 # the primary mechanism. Left in place in case the override ever has a gap.
 DRY_FIRE_PENALTY = 2.0
+
+# Bravery shaping for vision_schedule mode. Both terms are applied only when
+# an ENEMY detection is visible on the tick.
+# - EXPOSED_NO_SHOT_PENALTY: exposed with ammo but no shot landed that tick.
+# - COVER_HESITATION_PENALTY: stayed in cover with ammo while enemy visible.
+EXPOSED_NO_SHOT_PENALTY = 25.0
+COVER_HESITATION_PENALTY = 12.0
 
 # Miss-correction shaping: reward sequences that recover from a miss by
 # shifting aim instead of repeating the same spot, and penalize repeated

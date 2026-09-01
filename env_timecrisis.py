@@ -7,12 +7,15 @@ from config import (
     ACCURACY_BONUS_WEIGHT, AMMO_MAX_ROUNDS, CENTER_BAND, CENTER_CAMP_PENALTY,
     CLEAR_BONUS, CLIP_SHIFT_BONUS, CONTINUE_SCREEN_FALLBACK_TICKS,
     CONTINUE_SCREEN_STALE_TICKS, CURSOR_X_MAX,
-    CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN, DAMAGE_PENALTY,
+    CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN, COVER_HESITATION_PENALTY,
+    DAMAGE_PENALTY,
     DRY_FIRE_PENALTY, EDGE_BAND, EDGE_SCATTER_PENALTY, FAIL_PENALTY,
+    EXPOSED_NO_SHOT_PENALTY,
     FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
     MAX_TICKS, MISS_CORRECTION_BONUS, MOVE_EPS, MULTI_CLEAR_BONUS,
     PEEK_TRAVERSE_TICKS, POLICY_MODE, PORT, RAM, RELOAD_BONUS, REPEATED_MISS_PENALTY,
-    SAME_EPS, SCREEN_CLEAR_TIMER_BUMP, SHOT_SLOT_DIVERSITY_BONUS,
+    SAME_EPS, SCREEN_CLEAR_TIMER_BUMP, SHOOT_PULSE_EVERY_N_FRAMES,
+    SHOT_SLOT_DIVERSITY_BONUS,
     SHOT_SLOT_DIVERSITY_SCALE, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
     VISION_CAPTURE_EVERY_N_TICKS, VISION_ONNX_MODEL_PATH,
 )
@@ -375,6 +378,7 @@ class TimeCrisisEnv:
 
     def step(self, theta: np.ndarray):
         peek_phase = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if self.prev_peek else -1.0)
+        enemy_visible = False
         if POLICY_MODE == "schedule":
             # Open-loop: action is read directly from theta[self.ticks],
             # no observation consumed for action selection. `obs` is still
@@ -404,6 +408,9 @@ class TimeCrisisEnv:
 
             shoot, peek, aim_x_bias, aim_y_bias = act_vision_schedule(
                 theta, self.ticks, self.last_detections or [],
+            )
+            enemy_visible = any(
+                int(det.class_id) == 0 for det in (self.last_detections or [])
             )
         else:
             shoot, peek, aim_x_bias, aim_y_bias = act(
@@ -510,7 +517,11 @@ class TimeCrisisEnv:
             # button for all 5 frames makes fire rate uncontrollable.
             # shoot_allowed ensures the trigger only fires when fully exposed.
             self.client.set_input(
-                shoot=bool(shoot and shoot_allowed and f < 2),
+                shoot=bool(
+                    shoot
+                    and shoot_allowed
+                    and (f % max(1, int(SHOOT_PULSE_EVERY_N_FRAMES)) == 0)
+                ),
                 peek=peek,
                 aim_x=aim_x,
                 aim_y=aim_y,
@@ -630,6 +641,10 @@ class TimeCrisisEnv:
         # shoot with ammo still available.
         ammo_before_tick = self.ammo_left
         dry_fire = bool(shoot_allowed and ammo_before_tick == 0)
+        no_shot_exposed = bool(
+            shoot_allowed and ammo_before_tick > 0 and enemy_visible and total_fired == 0
+        )
+        hesitated_cover = bool((not peek) and ammo_before_tick > 0 and enemy_visible)
 
         # Ammo bookkeeping: consume rounds fired this tick (only ever nonzero
         # while shoot_allowed, i.e. fully exposed), then -- on the exact tick
@@ -695,6 +710,8 @@ class TimeCrisisEnv:
             "peek": bool(peek),
             "phase": phase.name,
             "dry_fire": dry_fire,
+            "no_shot_exposed": no_shot_exposed,
+            "hesitated_cover": hesitated_cover,
             "reload_correct": reload_correct,
             "ammo_left": self.ammo_left,
             "hit_delta": int(self.hit_delta),
@@ -708,6 +725,8 @@ class TimeCrisisEnv:
         self.reset()
         total_hits = total_fired = total_life_loss = 0
         dry_fire_ticks = 0
+        no_shot_exposed_ticks = 0
+        hesitated_cover_ticks = 0
         reload_correct_count = 0
         cleared = False
         timed_out = dead = False
@@ -749,6 +768,8 @@ class TimeCrisisEnv:
                     "hit": bool(info["shots_hit_delta"] > 0),
                 })
             dry_fire_ticks += int(info["dry_fire"])
+            no_shot_exposed_ticks += int(info.get("no_shot_exposed", False))
+            hesitated_cover_ticks += int(info.get("hesitated_cover", False))
             reload_correct_count += int(info["reload_correct"])
             if done:
                 break
@@ -856,6 +877,8 @@ class TimeCrisisEnv:
 
         fitness += HIT_REWARD * total_hits
         fitness -= DRY_FIRE_PENALTY * dry_fire_ticks
+        fitness -= EXPOSED_NO_SHOT_PENALTY * no_shot_exposed_ticks
+        fitness -= COVER_HESITATION_PENALTY * hesitated_cover_ticks
         fitness += RELOAD_BONUS * reload_correct_count
 
         # Hygiene reset: if this episode ended in a failed terminal state
@@ -883,6 +906,8 @@ class TimeCrisisEnv:
             "peek_hold_score": float(hold_score),
             "cover_time": int(ticks_in_cover),
             "dry_fire_ticks": int(dry_fire_ticks),
+            "no_shot_exposed_ticks": int(no_shot_exposed_ticks),
+            "hesitated_cover_ticks": int(hesitated_cover_ticks),
             "reload_correct_count": int(reload_correct_count),
             "continue_screen_count": int(continue_screen_count),
             "aim_x_std": aim_x_std,

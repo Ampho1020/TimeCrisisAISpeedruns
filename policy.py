@@ -218,10 +218,12 @@ def act_vision_schedule(theta: np.ndarray, tick: int, detections):
     # contract env.step consumes (env re-adds 0.5 and clips to [0, 1]).
     base_x_01 = min(1.0, max(0.0, 0.5 + base_ax_bias))
     base_y_01 = min(1.0, max(0.0, 0.5 + base_ay_bias))
+    target_x_norm = float(getattr(best_det, "aim_x_norm", best_det.cx_norm))
+    target_y_norm = float(getattr(best_det, "aim_y_norm", best_det.cy_norm))
     blended_x_01 = min(
-        1.0, max(0.0, base_x_01 + gain * (float(best_det.cx_norm) - base_x_01)),
+        1.0, max(0.0, base_x_01 + gain * (target_x_norm - base_x_01)),
     )
     blended_y_01 = min(
-        1.0, max(0.0, base_y_01 + gain * (float(best_det.cy_norm) - base_y_01)),
+        1.0, max(0.0, base_y_01 + gain * (target_y_norm - base_y_01)),
     )
     return shoot, peek, blended_x_01 - 0.5, blended_y_01 - 0.5

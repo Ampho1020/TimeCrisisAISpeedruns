@@ -60,6 +60,12 @@ from typing import Sequence
 
 import numpy as np
 
+from config import (
+    ENEMY_AIM_Y_FRACTION,
+    ENEMY_SHIELD_WIDE_ASPECT,
+    ENEMY_SHIELD_X_OFFSET_FRAC,
+)
+
 
 # ---------------------------------------------------------------------------
 # Public data contract
@@ -111,6 +117,11 @@ class Detection:
     confidence: float
     cx_norm: float
     cy_norm: float
+    # Preferred aim target in [0, 1] screen space. For non-enemy classes this
+    # usually equals centroid; for ENEMY it can be an offset point (upper torso/
+    # shoulder) to reduce limb/shield center-mass misses.
+    aim_x_norm: float | None = None
+    aim_y_norm: float | None = None
     # Mean RGB colour of the blob region sampled from the original (pre-upscale)
     # frame, as a (R, G, B) tuple of floats in [0, 255].  Populated by
     # ClassicalDetector; None from ONNXDetector (which has no original-frame
@@ -249,6 +260,35 @@ def _threat_color_score(mean_rgb: np.ndarray) -> float:
             dist = (abs(r - cr) + abs(g - cg) + abs(b - cb)) / max(1.0, tol * 3.0)
             best = max(best, score * max(0.0, 1.0 - dist))
     return best if best > 0.0 else _ENEMY_COLOR_FLOOR
+
+
+def _aim_point_for_detection(
+    class_id: int,
+    bx: int,
+    by: int,
+    bw: int,
+    bh: int,
+    frame_w: int,
+    frame_h: int,
+) -> tuple[float, float]:
+    """Return preferred normalized aim point for one detection bbox."""
+    cx_norm = float((bx + 0.5 * bw) / max(1, frame_w))
+    cy_norm = float((by + 0.5 * bh) / max(1, frame_h))
+    if class_id != int(EnemyClass.ENEMY):
+        return cx_norm, cy_norm
+
+    # Enemy: bias upward toward upper torso/head region.
+    aim_y = float((by + bh * ENEMY_AIM_Y_FRACTION) / max(1, frame_h))
+
+    # Shield-like wide enemy poses are more likely to block center-mass shots.
+    # Shift laterally toward the inner shoulder (toward screen center).
+    aim_x = cx_norm
+    aspect = float(bw) / max(float(bh), 1.0)
+    if aspect >= ENEMY_SHIELD_WIDE_ASPECT:
+        direction = 1.0 if cx_norm < 0.5 else -1.0
+        aim_x = float((bx + bw * (0.5 + direction * ENEMY_SHIELD_X_OFFSET_FRAC)) / max(1, frame_w))
+
+    return float(np.clip(aim_x, 0.0, 1.0)), float(np.clip(aim_y, 0.0, 1.0))
 
 
 class ClassicalDetector:
@@ -422,6 +462,9 @@ class ClassicalDetector:
             # Centroid scaled back to original-frame space.
             cx = float(centroids[i, 0]) / scale
             cy = float(centroids[i, 1]) / scale
+            aim_x_norm, aim_y_norm = _aim_point_for_detection(
+                class_id, bx, by, bw, bh, w, h,
+            )
             detections.append(
                 Detection(
                     x=bx,
@@ -432,6 +475,8 @@ class ClassicalDetector:
                     confidence=confidence,
                     cx_norm=cx / w,
                     cy_norm=cy / h,
+                    aim_x_norm=aim_x_norm,
+                    aim_y_norm=aim_y_norm,
                     mean_rgb=mean_rgb_val,
                 )
             )
@@ -578,6 +623,9 @@ class ONNXDetector:
             h_i = max(1, int(bh[i]))
             cxi = float(cx[i])
             cyi = float(cy[i])
+            aim_x_norm, aim_y_norm = _aim_point_for_detection(
+                int(best_class[i]), bx, by, w_i, h_i, src_w, src_h,
+            )
             detections.append(
                 Detection(
                     x=bx,
@@ -588,6 +636,8 @@ class ONNXDetector:
                     confidence=float(best_conf[i]),
                     cx_norm=float(cxi / src_w),
                     cy_norm=float(cyi / src_h),
+                    aim_x_norm=aim_x_norm,
+                    aim_y_norm=aim_y_norm,
                 )
             )
         return detections
@@ -611,6 +661,9 @@ class ONNXDetector:
             bh = max(1, int((y2 - y1) * scale_y))
             cx = float((x1 + x2) / 2.0 * scale_x)
             cy = float((y1 + y2) / 2.0 * scale_y)
+            aim_x_norm, aim_y_norm = _aim_point_for_detection(
+                int(cls), bx, by, bw, bh, src_w, src_h,
+            )
             detections.append(
                 Detection(
                     x=bx,
@@ -621,6 +674,8 @@ class ONNXDetector:
                     confidence=conf,
                     cx_norm=cx / src_w,
                     cy_norm=cy / src_h,
+                    aim_x_norm=aim_x_norm,
+                    aim_y_norm=aim_y_norm,
                 )
             )
         return detections

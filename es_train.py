@@ -1,5 +1,11 @@
-"""Evolution Strategies training loop."""
+"""Evolution Strategies training loop.
 
+Usage:
+    python es_train.py
+    python es_train.py --init-theta theta_final.npy
+"""
+
+import argparse
 import time
 from datetime import datetime
 
@@ -72,7 +78,7 @@ def _mean_shoot_gain(theta_batch: np.ndarray) -> float:
     return float(np.tanh(batch[:, SHOOT_GAIN_IDX]).mean())
 
 
-def train():
+def train(init_theta_path: str | None = None):
     if POP_SIZE % 2 != 0:
         raise ValueError("POP_SIZE must be even for mirrored sampling.")
 
@@ -83,8 +89,17 @@ def train():
         param_count = VISION_SCHEDULE_PARAM_COUNT
     else:
         param_count = PARAM_COUNT
-    # Small init -- large weights saturate tanh and kill the signal.
-    theta = rng.normal(0.0, 0.1, size=(param_count,)).astype(np.float64)
+    if init_theta_path:
+        theta = np.asarray(np.load(init_theta_path), dtype=np.float64).reshape(-1)
+        if theta.size != param_count:
+            raise ValueError(
+                f"Init theta parameter count mismatch for POLICY_MODE='{POLICY_MODE}': "
+                f"loaded {theta.size}, expected {param_count} from {init_theta_path}."
+            )
+        print(f"[es_train] loaded init theta from {init_theta_path}", flush=True)
+    else:
+        # Small init -- large weights saturate tanh and kill the signal.
+        theta = rng.normal(0.0, 0.1, size=(param_count,)).astype(np.float64)
 
     if POLICY_MODE == "schedule":
         # Open-loop: theta is a flat (MAX_TICKS, 4) per-tick action table
@@ -405,4 +420,14 @@ def train():
 
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--init-theta",
+        default=None,
+        help=(
+            "Path to an existing theta .npy file to continue training from "
+            "instead of random initialization."
+        ),
+    )
+    args = parser.parse_args()
+    train(init_theta_path=args.init_theta)
