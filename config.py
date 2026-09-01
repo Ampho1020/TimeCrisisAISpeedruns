@@ -582,15 +582,21 @@ HUD_ENABLED = True    # draw status text on the emulator window
 #
 # Axes are normalized to [0.0, 1.0] (0 = left/top, 1 = right/bottom),
 # so center = 0.5.
+# Optional post-calibration clip bounds can rein in edge-only overshoot while
+# preserving near-identity mapping over most of the screen.
 # -----------------------------
 GUNCON_CALIB = {
     "center_x": 0.5,
     "center_y": 0.5,
 
-    # Stronger center compression to counter symmetric outward drift:
-    # left aims landing too far left and right aims too far right.
-    "scale_x": 0.94,
+    # Identity mapping so vision target coordinates map 1:1 to the cursor.
+    # If extreme-edge tearing returns, step down slightly (e.g. 0.99/0.98).
+    "scale_x": 1.0,
     "scale_y": 1.0,    # Y already perfect
     "offset_x": 0.0,
     "offset_y": 0.0,
+    "min_x": 0.0,
+    "max_x": 0.98,
+    "min_y": 0.0,
+    "max_y": 1.0,
 }

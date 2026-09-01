@@ -112,9 +112,15 @@ def apply_guncon_calibration(aim_x, aim_y):
     c = GUNCON_CALIB
     x = c["center_x"] + (aim_x - c["center_x"]) * c["scale_x"] + c["offset_x"]
     y = c["center_y"] + (aim_y - c["center_y"]) * c["scale_y"] + c["offset_y"]
-    # clamp so we never send out-of-range coordinates to the port
-    x = min(1.0, max(0.0, x))
-    y = min(1.0, max(0.0, y))
+    # Optional post-calibration clip bounds allow edge-specific guard rails
+    # (e.g. rein in right-edge overshoot) while preserving near-identity
+    # mapping over most of the screen.
+    min_x = float(c.get("min_x", 0.0))
+    max_x = float(c.get("max_x", 1.0))
+    min_y = float(c.get("min_y", 0.0))
+    max_y = float(c.get("max_y", 1.0))
+    x = min(max_x, max(min_x, x))
+    y = min(max_y, max(min_y, y))
     return x, y
 
 
