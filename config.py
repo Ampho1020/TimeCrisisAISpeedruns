@@ -157,6 +157,23 @@ VISION_CAPTURE_EVERY_N_TICKS = 1
 # imgsz=320 opset=12`.
 VISION_ONNX_MODEL_PATH = os.path.join(os.path.dirname(__file__), "best.onnx")
 
+# Path to the SAME fine-tuned model's raw ultralytics .pt weights (source of
+# best.onnx above). Added 2026-09-05: VISION_PROFILE timing showed
+# ONNXDetector (base `onnxruntime`, CPU-only -- `onnxruntime-gpu` isn't
+# installed, so CUDAExecutionProvider was never actually selectable despite
+# the code accepting a providers list) averaging ~85-90ms/detect() call and
+# dominating every decision tick (~715-944ms/tick measured live vs an ~83ms
+# real-time budget at FRAME_SKIP=5 @ 60Hz). `detector.build_detector()` now
+# prefers a torch/Ultralytics-backed GPU detector (TorchYoloDetector) when
+# this path exists AND `torch.cuda.is_available()`, reusing the venv's
+# already-working CUDA torch install instead of installing `onnxruntime-gpu`
+# (which would need its CUDA/cuDNN build matched against the existing torch
+# CUDA 13 libs). Falls back to ONNXDetector (CPU), then ClassicalDetector,
+# if torch/CUDA isn't available -- same "never hard-fail on missing model"
+# philosophy as VISION_ONNX_MODEL_PATH.
+VISION_TORCH_MODEL_PATH = os.path.join(os.path.dirname(__file__), "best.pt")
+VISION_DETECTOR_DEVICE = "cuda"  # passed to TorchYoloDetector's YOLO.to(...)
+
 # Diagnostic-only timing instrumentation for the vision_schedule path
 # (2026-09-05, chasing a "decisions feel slow live" report). When True,
 # TimeCrisisEnv.step() times each self.client.get_screenshot() call and

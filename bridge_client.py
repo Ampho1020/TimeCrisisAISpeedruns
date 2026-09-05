@@ -333,6 +333,27 @@ class BridgeClient:
             raise RuntimeError(f"Bridge returned no value for 'read_u16 0x{addr:X}'")
         return int(resp)
 
+    def read_u16_multi(self, addrs) -> list:
+        """Read several u16 RAM values in ONE round trip.
+
+        Added 2026-09-05: VISION_PROFILE timing (see repo memory) showed
+        ``TimeCrisisEnv._read_core()``'s six sequential ``read_u16()`` calls
+        costing ~75-90ms COMBINED per frame, even though each individual
+        memory read is essentially free on the BizHawk side -- the cost is
+        the fixed per-command round-trip latency of ``bizhawk_bridge.lua``'s
+        main loop (one socket command serviced per ``emu.yield()``), paid
+        once per command regardless of what it does. Batching N addresses
+        into a single ``read_u16_multi`` command collapses N round trips
+        into 1.
+        """
+        addr_str = " ".join(f"0x{a:X}" for a in addrs)
+        resp = self._cmd(f"read_u16_multi {addr_str}")
+        if resp is None:
+            raise RuntimeError(
+                f"Bridge returned no value for 'read_u16_multi {addr_str}'"
+            )
+        return [int(v) for v in resp.split()]
+
     def set_input(self, shoot: bool, peek: bool, aim_x: float = 0.5, aim_y: float = 0.5):
         # Apply the Guncon calibration exactly once, right before sending.
         cx, cy = apply_guncon_calibration(aim_x, aim_y)

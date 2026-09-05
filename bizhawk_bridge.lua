@@ -44,6 +44,7 @@
 --
 -- Commands (one per line):
 --   read_u16 <addr>                               -> OK <value>
+--   read_u16_multi <addr1> <addr2> ...            -> OK <v1> <v2> ...
 --   set_input <shoot01> <peek01> <aim_x> <aim_y>  -> OK   (aim_* optional)
 --   input_state                                   -> OK <shoot01> <peek01> <aim_x> <aim_y>
 --   step <n>                                      -> OK
@@ -195,6 +196,21 @@ local function handle(line)
     local addr = parse_int(parts[2])
     if not addr then return "ERR bad_addr\n" end
     return "OK " .. tostring(memory.read_u16_le(addr, DOMAIN)) .. "\n"
+
+  elseif cmd == "read_u16_multi" then
+    -- Batches several read_u16 addresses into ONE round trip. Added
+    -- 2026-09-05: the main loop below services exactly one socket command
+    -- per emu.yield(), so N sequential read_u16 calls cost N loop
+    -- iterations' worth of round-trip latency even though each individual
+    -- memory.read_u16_le() call itself is essentially free -- batching
+    -- collapses that to a single round trip regardless of N.
+    local vals = {}
+    for i = 2, #parts do
+      local addr = parse_int(parts[i])
+      if not addr then return "ERR bad_addr\n" end
+      table.insert(vals, tostring(memory.read_u16_le(addr, DOMAIN)))
+    end
+    return "OK " .. table.concat(vals, " ") .. "\n"
 
   elseif cmd == "set_input" then
     shoot = (parts[2] == "1")

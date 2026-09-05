@@ -682,25 +682,177 @@ class ONNXDetector:
 
 
 # ---------------------------------------------------------------------------
+# TorchYoloDetector -- GPU-accelerated backend via ultralytics + torch CUDA
+# ---------------------------------------------------------------------------
+
+
+class TorchYoloDetector:
+    """GPU inference wrapper matching the ``Detection`` contract.
+
+    Added 2026-09-05: ``VISION_PROFILE`` timing (see repo memory) showed
+    ``ONNXDetector`` averaging ~85-90ms per ``detect()`` call because the
+    venv only has base ``onnxruntime`` (no ``onnxruntime-gpu``), so
+    ``CUDAExecutionProvider`` was never actually selectable -- every call
+    ran on CPU regardless of the ``providers=[...]`` list passed in. This
+    backend loads the SAME fine-tuned weights (``best.pt``, the source
+    ``best.onnx`` was exported from) via ``ultralytics.YOLO`` on the
+    venv's already-working CUDA ``torch`` install, cutting per-call
+    inference time roughly 8x in an ad-hoc GPU benchmark (~11ms vs
+    ~85-90ms for the same model/input size).
+
+    ``ultralytics.YOLO.predict()`` already rescales its output boxes back
+    to the ORIGINAL input frame's coordinate space (unlike ``ONNXDetector``,
+    which must manually undo its own resize), so no manual scale-factor
+    bookkeeping is needed here.
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        input_size: tuple[int, int] = (320, 320),
+        confidence_threshold: float = 0.25,
+        nms_iou_threshold: float = 0.45,
+        device: str = "cuda",
+    ):
+        from ultralytics import YOLO  # lazy import
+
+        self.model_path = model_path
+        self.input_size = input_size
+        self.confidence_threshold = confidence_threshold
+        self.nms_iou_threshold = nms_iou_threshold
+        self.device = device
+        self._model = YOLO(model_path)
+        self._model.to(device)
+
+    def reset(self) -> None:
+        """No stateful history -- see ``ONNXDetector.reset`` docstring."""
+        return
+
+    def detect(self, frame: np.ndarray) -> list[Detection]:
+        if frame.ndim != 3 or frame.shape[2] < 3:
+            raise ValueError(
+                f"Expected HxWx3(+) uint8 RGB frame, got shape {frame.shape}"
+            )
+        src_h, src_w = frame.shape[:2]
+        # bridge_client.get_screenshot() hands us RGB; ultralytics treats a
+        # raw numpy array as BGR (the cv2.imread convention), so swap
+        # channels the same way ClassicalDetector does before MOG2.
+        bgr = frame[:, :, [2, 1, 0]].astype(np.uint8, copy=False)
+        results = self._model.predict(
+            bgr,
+            imgsz=self.input_size[0],
+            device=self.device,
+            conf=self.confidence_threshold,
+            iou=self.nms_iou_threshold,
+            verbose=False,
+        )
+        boxes = results[0].boxes
+        if boxes is None or len(boxes) == 0:
+            return []
+        xyxy = boxes.xyxy.detach().cpu().numpy()
+        conf = boxes.conf.detach().cpu().numpy()
+        cls = boxes.cls.detach().cpu().numpy().astype(int)
+
+        detections: list[Detection] = []
+        for i in range(xyxy.shape[0]):
+            x1, y1, x2, y2 = xyxy[i]
+            bx = max(0, int(x1))
+            by = max(0, int(y1))
+            bw = max(1, int(x2 - x1))
+            bh = max(1, int(y2 - y1))
+            cx = float((x1 + x2) / 2.0)
+            cy = float((y1 + y2) / 2.0)
+            aim_x_norm, aim_y_norm = _aim_point_for_detection(
+                int(cls[i]), bx, by, bw, bh, src_w, src_h,
+            )
+            detections.append(
+                Detection(
+                    x=bx,
+                    y=by,
+                    w=bw,
+                    h=bh,
+                    class_id=int(cls[i]),
+                    confidence=float(conf[i]),
+                    cx_norm=cx / src_w,
+                    cy_norm=cy / src_h,
+                    aim_x_norm=aim_x_norm,
+                    aim_y_norm=aim_y_norm,
+                )
+            )
+        return detections
+
+
+# ---------------------------------------------------------------------------
 # Factory + selection helper
 # ---------------------------------------------------------------------------
 
 
-def build_detector(onnx_model_path: str | None = None):
-    """Return an ONNXDetector if the model file exists, else ClassicalDetector.
+def build_detector(
+    onnx_model_path: str | None = None,
+    torch_model_path: str | None = None,
+    device: str = "cuda",
+):
+    """Return a detector, preferring GPU torch, then ONNX, then classical.
 
-    Called once per ``TimeCrisisEnv`` in Phase 3 (never in a hot loop). If
-    ``onnx_model_path`` is None or the file is missing, we deliberately
-    fall back to the classical detector rather than raising -- day-1
-    production has no ONNX model, and forcing a crash on absent-model
-    would prevent training from starting.
+    Called once per ``TimeCrisisEnv`` in Phase 3 (never in a hot loop).
+    Selection order:
 
-    Always prints which backend it picked (and, for ONNX, the resolved
-    absolute path + file size/mtime) so a real training run's console/log
-    output makes it unmistakable whether the trained model is actually
-    loaded, rather than silently falling back to the classical baseline on
-    a bad path/typo. Every worker process prints this once at startup.
+      1. ``TorchYoloDetector`` if ``torch_model_path`` exists on disk AND
+         ``torch.cuda.is_available()`` -- fastest path (see
+         ``TorchYoloDetector`` docstring for the 2026-09-05 timing
+         motivation). Falls through to step 2 on ANY failure (missing
+         ``ultralytics``/``torch``, no CUDA device, corrupt weights, etc.)
+         rather than raising, since a dev box without a GPU must still be
+         able to train/eval.
+      2. ``ONNXDetector`` if ``onnx_model_path`` exists on disk (CPU-only
+         in this venv -- see ``ONNXDetector`` docstring).
+      3. ``ClassicalDetector`` -- the no-model-required baseline.
+
+    ``torch_model_path`` defaults to ``None`` (not ``config.VISION_TORCH_
+    MODEL_PATH``) so existing callers that only pass ``onnx_model_path``
+    keep getting ``ONNXDetector`` unchanged; production call sites
+    (``env_timecrisis.py``) pass ``config.VISION_TORCH_MODEL_PATH``
+    explicitly to opt in.
+
+    Always prints which backend it picked (and, for ONNX/torch, the
+    resolved absolute path + file size/mtime) so a real training run's
+    console/log output makes it unmistakable whether the trained model is
+    actually loaded, rather than silently falling back to the classical
+    baseline on a bad path/typo. Every worker process prints this once at
+    startup.
     """
+    if torch_model_path:
+        abs_path = os.path.abspath(torch_model_path)
+        if os.path.isfile(abs_path):
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    raise RuntimeError("torch.cuda.is_available() is False")
+                import datetime as _dt
+                size_mb = os.path.getsize(abs_path) / (1024 * 1024)
+                mtime = _dt.datetime.fromtimestamp(
+                    os.path.getmtime(abs_path)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                det = TorchYoloDetector(abs_path, device=device)
+                print(
+                    f"[detector] Using TorchYoloDetector (GPU/{device}): "
+                    f"{abs_path} ({size_mb:.1f} MB, modified {mtime})",
+                    flush=True,
+                )
+                return det
+            except Exception as exc:
+                print(
+                    f"[detector] TorchYoloDetector unavailable ({exc!r}) -- "
+                    "falling back to ONNXDetector/ClassicalDetector.",
+                    flush=True,
+                )
+        else:
+            print(
+                f"[detector] torch_model_path={abs_path!r} does not exist "
+                "-- skipping TorchYoloDetector.",
+                flush=True,
+            )
+
     if onnx_model_path:
         abs_path = os.path.abspath(onnx_model_path)
         if os.path.isfile(abs_path):

@@ -109,7 +109,10 @@ class FakeBizHawk(threading.Thread):
                         sock.sendall(self._frame("ERR unknown_cmd"))
                         continue
                     self.commands.append(line)
-                    if line.startswith("read_u16 "):
+                    if line.startswith("read_u16_multi "):
+                        n = len(line.split()) - 1
+                        reply = "OK " + " ".join(str(4660 + i) for i in range(n))
+                    elif line.startswith("read_u16 "):
                         reply = "OK 4660"
                     elif line == "frame":
                         reply = "OK 99"
@@ -156,6 +159,29 @@ class BridgeClientTests(unittest.TestCase):
         self.assertEqual(fake.commands[0], "read_u16 0x1234")
         self.assertEqual(fake.commands[1], "set_input 1 0 0.9700 0.2500")
         self.assertEqual(fake.commands[2], "frame")
+
+    def test_read_u16_multi_batches_addresses_into_one_round_trip(self):
+        """read_u16_multi must send exactly one framed command containing
+        every address (proving it's a single round trip, not N separate
+        read_u16 calls) and parse the space-separated reply back into a
+        list in the same order the addresses were requested."""
+        host, port = "127.0.0.1", get_free_port()
+        fake = FakeBizHawk(host, port)
+        fake.start()
+
+        client = BridgeClient(host, port, timeout=2.0)
+        self.addCleanup(client.close)
+        client.connect()
+        fake.commands.clear()
+
+        values = client.read_u16_multi([0x1000, 0x2000, 0x3000])
+        client.close()
+        fake.join(timeout=2.0)
+
+        self.assertIsNone(fake.error)
+        self.assertEqual(len(fake.commands), 1)
+        self.assertEqual(fake.commands[0], "read_u16_multi 0x1000 0x2000 0x3000")
+        self.assertEqual(values, [4660, 4661, 4662])
 
     def test_get_screenshot_reads_framed_bmp_and_decodes_to_rgb(self):
         """BridgeClient.get_screenshot() must consume the length-prefixed BMP

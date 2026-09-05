@@ -20,8 +20,8 @@ from config import (
     SAME_EPS, SCREEN_CLEAR_TIMER_BUMP, SHOOT_PULSE_EVERY_N_FRAMES,
     SHOT_SLOT_DIVERSITY_BONUS,
     SHOT_SLOT_DIVERSITY_SCALE, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
-    VISION_CAPTURE_EVERY_N_TICKS, VISION_ONNX_MODEL_PATH,
-    VISION_PROFILE, VISION_PROFILE_PRINT_EVERY,
+    VISION_CAPTURE_EVERY_N_TICKS, VISION_DETECTOR_DEVICE, VISION_ONNX_MODEL_PATH,
+    VISION_PROFILE, VISION_PROFILE_PRINT_EVERY, VISION_TORCH_MODEL_PATH,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import act, act_schedule, act_vision_schedule
@@ -254,7 +254,11 @@ class TimeCrisisEnv:
         # all so the schedule/mlp code paths pay zero import/init cost.
         if POLICY_MODE == "vision_schedule":
             from detector import build_detector
-            self.detector = build_detector(VISION_ONNX_MODEL_PATH or None)
+            self.detector = build_detector(
+                VISION_ONNX_MODEL_PATH or None,
+                torch_model_path=VISION_TORCH_MODEL_PATH or None,
+                device=VISION_DETECTOR_DEVICE,
+            )
         else:
             self.detector = None
         self.last_detections: list | None = None
@@ -264,11 +268,17 @@ class TimeCrisisEnv:
         self._profile_shot_ms: list[float] = []
         self._profile_detect_ms: list[float] = []
         self._profile_tick_ms: list[float] = []
+        self._profile_setinput_ms: list[float] = []
+        self._profile_stepframes_ms: list[float] = []
+        self._profile_readcore_ms: list[float] = []
 
     def _profile_reset(self) -> None:
         self._profile_shot_ms = []
         self._profile_detect_ms = []
         self._profile_tick_ms = []
+        self._profile_setinput_ms = []
+        self._profile_stepframes_ms = []
+        self._profile_readcore_ms = []
 
     def _profile_maybe_print(self) -> None:
         """Print a rolling mean/max timing summary every
@@ -287,6 +297,9 @@ class TimeCrisisEnv:
             f"[vision_profile] tick={self.ticks} n={len(self._profile_tick_ms)} "
             f"| screenshot {_stats(self._profile_shot_ms)} "
             f"| detect {_stats(self._profile_detect_ms)} "
+            f"| set_input {_stats(self._profile_setinput_ms)} "
+            f"| step_frames {_stats(self._profile_stepframes_ms)} "
+            f"| read_core {_stats(self._profile_readcore_ms)} "
             f"| full_tick {_stats(self._profile_tick_ms)}",
             flush=True,
         )
@@ -336,6 +349,27 @@ class TimeCrisisEnv:
     # -- RAM ------------------------------------------------------------
 
     def _read_core(self):
+        # Prefer a single batched round trip (BridgeClient.read_u16_multi,
+        # added 2026-09-05 -- see repo memory) over six sequential
+        # read_u16() calls: each command pays a fixed Lua-loop round-trip
+        # cost regardless of payload, so batching collapses ~75-90ms/frame
+        # down to ~13ms/frame. Falls back to individual read_u16() calls for
+        # any client that doesn't implement the batched method (e.g. the
+        # in-process simulation fakes in tests/test_simulation.py).
+        batch = getattr(self.client, "read_u16_multi", None)
+        if batch is not None:
+            vals = batch([
+                RAM.shots_fired, RAM.shots_hit, RAM.timer,
+                RAM.life, RAM.cursor_x, RAM.cursor_y,
+            ])
+            return {
+                "shots_fired": vals[0],
+                "shots_hit":   vals[1],
+                "timer":       vals[2],
+                "life":        vals[3],
+                "cursor_x":    vals[4],
+                "cursor_y":    vals[5],
+            }
         return {
             "shots_fired": self.client.read_u16(RAM.shots_fired),
             "shots_hit":   self.client.read_u16(RAM.shots_hit),
@@ -589,6 +623,8 @@ class TimeCrisisEnv:
             # button for all 5 frames makes fire rate uncontrollable.
             # shoot_allowed ensures the trigger only fires when fully exposed.
             pulse_every = max(2, int(SHOOT_PULSE_EVERY_N_FRAMES))
+            if VISION_PROFILE:
+                _t0 = time.perf_counter()
             self.client.set_input(
                 shoot=bool(
                     shoot
@@ -599,10 +635,19 @@ class TimeCrisisEnv:
                 aim_x=aim_x,
                 aim_y=aim_y,
             )
+            if VISION_PROFILE:
+                self._profile_setinput_ms.append((time.perf_counter() - _t0) * 1000.0)
 
             pre = self.prev
+            if VISION_PROFILE:
+                _t0 = time.perf_counter()
             self.client.step_frames(1)
+            if VISION_PROFILE:
+                self._profile_stepframes_ms.append((time.perf_counter() - _t0) * 1000.0)
+                _t0 = time.perf_counter()
             post = self._read_core()
+            if VISION_PROFILE:
+                self._profile_readcore_ms.append((time.perf_counter() - _t0) * 1000.0)
 
             total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
             frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
