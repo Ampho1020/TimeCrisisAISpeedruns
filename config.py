@@ -157,6 +157,20 @@ VISION_CAPTURE_EVERY_N_TICKS = 1
 # imgsz=320 opset=12`.
 VISION_ONNX_MODEL_PATH = os.path.join(os.path.dirname(__file__), "best.onnx")
 
+# Diagnostic-only timing instrumentation for the vision_schedule path
+# (2026-09-05, chasing a "decisions feel slow live" report). When True,
+# TimeCrisisEnv.step() times each self.client.get_screenshot() call and
+# each self.detector.detect() call (wall-clock, time.perf_counter) plus the
+# full step() tick, and prints a rolling mean/max summary every
+# VISION_PROFILE_PRINT_EVERY ticks. Zero cost when False (no timing calls
+# made at all, not just suppressed prints). Does not affect training/fitness
+# in any way -- pure print-side diagnostics to find out whether screenshot
+# round-trip (BizHawk PNG encode + socket + cv2.imdecode) or detector
+# inference (ONNX/classical) is the actual bottleneck before optimizing
+# either one blind.
+VISION_PROFILE = False
+VISION_PROFILE_PRINT_EVERY = 30  # ticks between rolling-summary prints
+
 POP_SIZE    = 30      # MUST be even (mirrored sampling)
 # SIGMA raised 0.05 -> 0.1 (2026-08-04): in-sim trend testing
 # (tests/test_simulation.py ExtendedMiniESTrendSuite) showed the population
@@ -273,7 +287,7 @@ SHOT_PHASE_WARMSTART_ROW_STD = 0.08
 # small enough for SIGMA=0.1 perturbations to push it higher, lower, or
 # negative if ES finds that better. Set to 0.0 to restore the old
 # byte-identical-to-schedule-mode gen-0 behavior.
-VISION_GAIN_WARMSTART = 1.8
+VISION_GAIN_WARMSTART = 1.2
 
 # Warm-start value for vision_schedule mode's single global
 # shoot_gain_logit scalar (added 2026-08-17 alongside per_frame_vision --
@@ -289,7 +303,7 @@ VISION_GAIN_WARMSTART = 1.8
 # (tanh(2.0) ~= 0.96) for a stronger gen-0 bias towards reactive,
 # detection-gated shooting -- still perturbable by ES if it finds lower is
 # better. Set to 0.0 to restore the old open-loop-only shoot decision.
-SHOOT_GAIN_WARMSTART = 2.8
+SHOOT_GAIN_WARMSTART = 1.2
 
 # Warm-start for vision_schedule's learned edge-drift correction gain.
 # 0.0 starts with no learned correction; ES can adapt positive/negative.
@@ -309,15 +323,15 @@ VISION_DRIFT_EDGE_START = 0.65
 # Larger values make the trigger react more immediately to confident
 # detections (less schedule-timed waiting). Keep moderate to avoid
 # over-firing on noisy detections.
-SHOOT_DETECTION_SCALE = 3.5
+SHOOT_DETECTION_SCALE = 1.5
 
 # Vision-priority overrides for "shoot what you see" behavior.
 # If the top detection is at/above this confidence, bypass the blended shoot
 # logit and force shoot=True (subject to env-side ammo/peek guards).
-VISION_FORCE_SHOOT_CONFIDENCE = 0.45
+VISION_FORCE_SHOOT_CONFIDENCE = 0.70
 # Minimum blend gain when a confident detection is present. This makes aim
 # follow vision aggressively instead of staying near the open-loop base aim.
-VISION_MIN_BLEND_GAIN = 0.85
+VISION_MIN_BLEND_GAIN = 0.60
 
 # Vision-target aim offset for ENEMY detections. The detector supplies both
 # centroid and aim target; for enemies we bias toward upper torso/head instead

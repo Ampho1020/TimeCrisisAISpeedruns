@@ -1,5 +1,7 @@
 
 
+import time
+
 import numpy as np
 
 from bridge_client import BridgeClient
@@ -19,6 +21,7 @@ from config import (
     SHOT_SLOT_DIVERSITY_BONUS,
     SHOT_SLOT_DIVERSITY_SCALE, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
     VISION_CAPTURE_EVERY_N_TICKS, VISION_ONNX_MODEL_PATH,
+    VISION_PROFILE, VISION_PROFILE_PRINT_EVERY,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import act, act_schedule, act_vision_schedule
@@ -255,6 +258,39 @@ class TimeCrisisEnv:
         else:
             self.detector = None
         self.last_detections: list | None = None
+        # VISION_PROFILE diagnostics (config.py): rolling per-tick timing
+        # buffers, only ever appended to when VISION_PROFILE is True (see
+        # _profile_reset/_profile_maybe_print below). Zero cost otherwise.
+        self._profile_shot_ms: list[float] = []
+        self._profile_detect_ms: list[float] = []
+        self._profile_tick_ms: list[float] = []
+
+    def _profile_reset(self) -> None:
+        self._profile_shot_ms = []
+        self._profile_detect_ms = []
+        self._profile_tick_ms = []
+
+    def _profile_maybe_print(self) -> None:
+        """Print a rolling mean/max timing summary every
+        VISION_PROFILE_PRINT_EVERY ticks, then clear the buffers so each
+        printed window reflects only the ticks since the last print (a live
+        rolling view, not a cumulative episode-long average)."""
+        if len(self._profile_tick_ms) < VISION_PROFILE_PRINT_EVERY:
+            return
+
+        def _stats(vals: list[float]) -> str:
+            if not vals:
+                return "n/a"
+            return f"mean={sum(vals) / len(vals):.1f}ms max={max(vals):.1f}ms"
+
+        print(
+            f"[vision_profile] tick={self.ticks} n={len(self._profile_tick_ms)} "
+            f"| screenshot {_stats(self._profile_shot_ms)} "
+            f"| detect {_stats(self._profile_detect_ms)} "
+            f"| full_tick {_stats(self._profile_tick_ms)}",
+            flush=True,
+        )
+        self._profile_reset()
 
     def connect(self):
         self.client.connect()
@@ -371,6 +407,7 @@ class TimeCrisisEnv:
         if detector is not None:
             detector.reset()
         self.last_detections = None
+        self._profile_reset()
         return self._build_obs(
             self.prev, 0, 0, 0.0, self.ammo_left,
             self.prev_aim_x_bias, self.prev_aim_y_bias,
@@ -378,6 +415,7 @@ class TimeCrisisEnv:
         )
 
     def step(self, theta: np.ndarray):
+        _tick_t0 = time.perf_counter() if VISION_PROFILE else 0.0
         peek_phase = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if self.prev_peek else -1.0)
         enemy_visible = False
         if POLICY_MODE == "schedule":
@@ -400,8 +438,16 @@ class TimeCrisisEnv:
             )
             if _is_new_capture:
                 try:
-                    frame = self.client.get_screenshot()
-                    self.last_detections = self.detector.detect(frame)
+                    if VISION_PROFILE:
+                        _t0 = time.perf_counter()
+                        frame = self.client.get_screenshot()
+                        self._profile_shot_ms.append((time.perf_counter() - _t0) * 1000.0)
+                        _t0 = time.perf_counter()
+                        self.last_detections = self.detector.detect(frame)
+                        self._profile_detect_ms.append((time.perf_counter() - _t0) * 1000.0)
+                    else:
+                        frame = self.client.get_screenshot()
+                        self.last_detections = self.detector.detect(frame)
                 except Exception as exc:  # pragma: no cover - defensive
                     if self.last_detections is None:
                         self.last_detections = []
@@ -511,8 +557,16 @@ class TimeCrisisEnv:
             # from the fixed per-tick theta row and would be identical.
             if getattr(self, "per_frame_vision", False) and POLICY_MODE == "vision_schedule" and f > 0:
                 try:
-                    frame_img = self.client.get_screenshot()
-                    self.last_detections = self.detector.detect(frame_img)
+                    if VISION_PROFILE:
+                        _t0 = time.perf_counter()
+                        frame_img = self.client.get_screenshot()
+                        self._profile_shot_ms.append((time.perf_counter() - _t0) * 1000.0)
+                        _t0 = time.perf_counter()
+                        self.last_detections = self.detector.detect(frame_img)
+                        self._profile_detect_ms.append((time.perf_counter() - _t0) * 1000.0)
+                    else:
+                        frame_img = self.client.get_screenshot()
+                        self.last_detections = self.detector.detect(frame_img)
                 except Exception as exc:  # pragma: no cover - defensive
                     print(f"[env] per-frame vision capture failed: {exc!r}", flush=True)
                 _, _, aim_x_bias, aim_y_bias = act_vision_schedule(
@@ -737,6 +791,9 @@ class TimeCrisisEnv:
             "aim_x": float(aim_x),
             "aim_y": float(aim_y),
         }
+        if VISION_PROFILE:
+            self._profile_tick_ms.append((time.perf_counter() - _tick_t0) * 1000.0)
+            self._profile_maybe_print()
         return obs, done, info
 
     def episode_fitness(self, theta: np.ndarray):
