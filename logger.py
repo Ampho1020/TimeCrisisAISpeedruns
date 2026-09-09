@@ -12,6 +12,12 @@ class TrainingLogger:
         "mean_peek_flips", "mean_peek_hold", "mean_cover_time",
         "mean_aim_x_std", "mean_aim_y_std", "mean_aim_span_x", "mean_aim_span_y",
         "mean_aim_dx", "mean_hit_delta",
+        # Reaction-latency tracking (added 2026-09-09, recommendation #3 of
+        # the peek_gain follow-up). Mean ticks between a target first
+        # becoming visible and the first shot fired at it (see
+        # REACTION_LATENCY_PENALTY in config.py). Should trend DOWN if ES is
+        # learning to react faster to visible targets.
+        "mean_reaction_latency",
         "mean_shot_left_frac", "mean_shot_mid_frac", "mean_shot_right_frac",
         "sigma_used",
         "theta_fitness", "theta_clear", "theta_time", "theta_damage", "theta_acc",

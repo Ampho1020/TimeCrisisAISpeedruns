@@ -16,7 +16,8 @@ from config import (
     FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
     MAX_TICKS, MISS_CORRECTION_BONUS, MOVE_EPS, MULTI_CLEAR_BONUS,
     PEEK_LOCK_IN_TICKS, PEEK_LOCK_OUT_TICKS, PEEK_TRAVERSE_TICKS,
-    POLICY_MODE, PORT, RAM, RELOAD_BONUS, REPEATED_MISS_PENALTY,
+    POLICY_MODE, PORT, RAM, REACTION_LATENCY_NORM_TICKS, REACTION_LATENCY_PENALTY,
+    RELOAD_BONUS, REPEATED_MISS_PENALTY,
     SAME_EPS, SCREEN_CLEAR_TIMER_BUMP, SHOOT_PULSE_EVERY_N_FRAMES,
     SHOT_SLOT_DIVERSITY_BONUS,
     SHOT_SLOT_DIVERSITY_SCALE, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
@@ -231,6 +232,7 @@ class TimeCrisisEnv:
         self.stale_shots_life_ticks: int = 0  # consecutive ticks with frozen shots/life only (timer-independent)
         self.ammo_left: int = AMMO_MAX_ROUNDS
         self.hit_delta: int = 0  # frames since the last confirmed hit
+        self.reaction_no_shot_streak: int = 0  # ticks a target has been visible with no shot fired since
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
         self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
         # Multi-screen tracking (see reset() for the full comment).
@@ -424,6 +426,7 @@ class TimeCrisisEnv:
         self.stale_shots_life_ticks = 0
         self.ammo_left = AMMO_MAX_ROUNDS
         self.hit_delta = 0
+        self.reaction_no_shot_streak = 0
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
         self.phase_infer.reset()
@@ -764,6 +767,22 @@ class TimeCrisisEnv:
         )
         hesitated_cover = bool((not peek) and ammo_before_tick > 0 and enemy_visible)
 
+        # Reaction latency: how many ticks a target has been visible without
+        # a shot being fired at it yet (see REACTION_LATENCY_PENALTY in
+        # config.py). Resets to 0 the instant a shot is fired while a target
+        # is visible -- reaction_latency below then reports the streak length
+        # right BEFORE that reset (0 means "fired the same tick it appeared").
+        # Also resets to 0 whenever no target is visible (nothing to react to).
+        reaction_latency = None
+        if enemy_visible:
+            if total_fired > 0:
+                reaction_latency = self.reaction_no_shot_streak
+                self.reaction_no_shot_streak = 0
+            else:
+                self.reaction_no_shot_streak += 1
+        else:
+            self.reaction_no_shot_streak = 0
+
         # Ammo bookkeeping: consume rounds fired this tick (only ever nonzero
         # while shoot_allowed, i.e. fully exposed), then -- on the exact tick
         # the character ducks back into cover -- award a flat, count-
@@ -830,6 +849,7 @@ class TimeCrisisEnv:
             "dry_fire": dry_fire,
             "no_shot_exposed": no_shot_exposed,
             "hesitated_cover": hesitated_cover,
+            "reaction_latency": reaction_latency,
             "reload_correct": reload_correct,
             "ammo_left": self.ammo_left,
             "hit_delta": int(self.hit_delta),
@@ -860,6 +880,7 @@ class TimeCrisisEnv:
         aim_y_per_tick = []
         hit_delta_per_tick = []
         shot_events = []
+        reaction_latencies = []
 
         while True:
             _, done, info = self.step(theta)
@@ -891,9 +912,18 @@ class TimeCrisisEnv:
             dry_fire_ticks += int(info["dry_fire"])
             no_shot_exposed_ticks += int(info.get("no_shot_exposed", False))
             hesitated_cover_ticks += int(info.get("hesitated_cover", False))
+            if info.get("reaction_latency") is not None:
+                reaction_latencies.append(int(info["reaction_latency"]))
             reload_correct_count += int(info["reload_correct"])
             if done:
                 break
+
+        # An episode ending mid-streak (a target still visible, no shot
+        # fired at it yet) would otherwise never contribute a sample --
+        # closing that loophole so a policy can't dodge this metric by
+        # simply never firing at a visible target.
+        if self.reaction_no_shot_streak > 0:
+            reaction_latencies.append(int(self.reaction_no_shot_streak))
 
         elapsed = u16_delta(self.start_timer, self.prev["timer"])
         # Read the cumulative screen-clear count from the env itself (not
@@ -985,6 +1015,8 @@ class TimeCrisisEnv:
         accuracy = float(total_hits / max(total_fired, 1))
         mean_hit_delta = float(np.mean(hit_delta_per_tick)) if hit_delta_per_tick else 0.0
         mean_hit_delta_norm = mean_hit_delta / HIT_DELTA_NORM_FRAMES
+        mean_reaction_latency = float(np.mean(reaction_latencies)) if reaction_latencies else 0.0
+        mean_reaction_latency_norm = mean_reaction_latency / REACTION_LATENCY_NORM_TICKS
 
         miss_metrics = compute_miss_correction_metrics(shot_events)
         fitness += MISS_CORRECTION_BONUS * miss_metrics["corrected"]
@@ -995,6 +1027,7 @@ class TimeCrisisEnv:
         fitness += CLIP_SHIFT_BONUS * miss_metrics["clip_shift"]
         fitness += SHOT_SLOT_DIVERSITY_BONUS * miss_metrics["shot_slot_diversity"]
         fitness -= HIT_DELTA_PENALTY * mean_hit_delta_norm
+        fitness -= REACTION_LATENCY_PENALTY * mean_reaction_latency_norm
 
         fitness += HIT_REWARD * total_hits
         fitness -= DRY_FIRE_PENALTY * dry_fire_ticks
@@ -1055,4 +1088,6 @@ class TimeCrisisEnv:
             "miss_shot_slot_diversity": miss_metrics["shot_slot_diversity"],
             "mean_hit_delta": mean_hit_delta,
             "mean_hit_delta_norm": mean_hit_delta_norm,
+            "mean_reaction_latency": mean_reaction_latency,
+            "mean_reaction_latency_norm": mean_reaction_latency_norm,
         }

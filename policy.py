@@ -6,6 +6,7 @@ import numpy as np
 from config import (
     ACT_DIM, HIDDEN, MAX_TICKS, NUM_ENEMY_CLASSES, OBS_DIM,
     PEEK_DETECTION_SCALE,
+    SCHEDULE_BLOCK_TICKS,
     SHOOT_DETECTION_SCALE,
     VISION_DRIFT_EDGE_START,
     VISION_FORCE_SHOOT_CONFIDENCE,
@@ -87,8 +88,36 @@ SCHEDULE_PARAM_COUNT = MAX_TICKS * 4
 # NOTE: this is a breaking layout change (PARAM_COUNT grew by 1 again) --
 # existing theta_*.npy checkpoints are NOT compatible and must be
 # discarded/retrained.
-VISION_SCHEDULE_ROW_DIM = 4
-VISION_SCHEDULE_PARAM_COUNT = MAX_TICKS * VISION_SCHEDULE_ROW_DIM + NUM_ENEMY_CLASSES + 4
+#
+# 2026-09-09 (later same day): split the old 4-column-per-tick row into TWO
+# separately-resolved tables (recommendation #2 from the peek_gain
+# follow-up). Root cause: now that shoot/peek are BOTH reactive to live
+# detections (shoot_gain/peek_gain above), the per-tick shoot_logit/
+# peek_logit columns mostly just need to supply a sane DEFAULT for "nothing
+# visible yet" -- they no longer need to independently re-derive 900
+# separate exposure/firing windows from scratch, which was a needlessly
+# large, sparse search space for ES (POP_SIZE=30) to optimize. aim_x/aim_y
+# bias genuinely DO need per-tick resolution (enemy position legitimately
+# differs tick to tick), so those stay as-is. shoot_logit/peek_logit now
+# share ONE value per SCHEDULE_BLOCK_TICKS-tick block instead of one value
+# per tick -- at the default SCHEDULE_BLOCK_TICKS=30 that's 30 blocks
+# instead of 900 rows for those two columns, shrinking the table from
+# MAX_TICKS*4=3600 to MAX_TICKS*2 + NUM_SCHEDULE_BLOCKS*2 = 1860 (~48% of
+# the old size) while leaving aim's per-tick granularity untouched.
+#
+# NOTE: this is a breaking layout change (the per-tick row shrank from 4
+# columns to 2, and a new block table was inserted) -- existing
+# theta_*.npy checkpoints are NOT compatible and must be discarded/
+# retrained.
+VISION_SCHEDULE_AIM_DIM = 2      # per-tick: (base_aim_x_bias, base_aim_y_bias)
+VISION_SCHEDULE_BLOCK_DIM = 2    # per-block: (shoot_logit, peek_logit)
+NUM_SCHEDULE_BLOCKS = (MAX_TICKS + SCHEDULE_BLOCK_TICKS - 1) // SCHEDULE_BLOCK_TICKS
+VISION_SCHEDULE_AIM_TABLE_SIZE = MAX_TICKS * VISION_SCHEDULE_AIM_DIM
+VISION_SCHEDULE_BLOCK_TABLE_SIZE = NUM_SCHEDULE_BLOCKS * VISION_SCHEDULE_BLOCK_DIM
+VISION_SCHEDULE_PARAM_COUNT = (
+    VISION_SCHEDULE_AIM_TABLE_SIZE + VISION_SCHEDULE_BLOCK_TABLE_SIZE
+    + NUM_ENEMY_CLASSES + 4
+)
 # Indexes of global scalars in tail order: vision_gain, shoot_gain, drift_gain, peek_gain.
 VISION_SCHEDULE_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 4
 SHOOT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 3
@@ -160,8 +189,17 @@ def act_vision_schedule(
     """Vision-conditioned open-loop action selection.
 
     Theta layout (see ``VISION_SCHEDULE_PARAM_COUNT`` above):
-      * first ``MAX_TICKS * 4`` entries: (shoot, peek, base_aim_x_bias,
-        base_aim_y_bias) rows indexed by ``tick``.
+      * first ``VISION_SCHEDULE_AIM_TABLE_SIZE`` entries: (base_aim_x_bias,
+        base_aim_y_bias) rows indexed by ``tick`` directly -- one row per
+        tick, since enemy position genuinely varies tick to tick.
+      * next ``VISION_SCHEDULE_BLOCK_TABLE_SIZE`` entries: (shoot_logit,
+        peek_logit) rows indexed by ``tick // SCHEDULE_BLOCK_TICKS`` --
+        ONE shared row per block of ``SCHEDULE_BLOCK_TICKS`` ticks instead
+        of per-tick (added 2026-09-09 as recommendation #2 of the
+        peek_gain follow-up: now that shoot/peek both react to live
+        detections via shoot_gain/peek_gain, the open-loop columns mostly
+        just need to supply a sane default for "nothing visible yet", so a
+        much coarser table is enough and shrinks ES's search space).
       * next ``NUM_ENEMY_CLASSES`` entries: raw class priority scores
         (softmax'd here before use).
             * ``VISION_SCHEDULE_GAIN_IDX``: one shared ``vision_gain_logit``
@@ -193,7 +231,7 @@ def act_vision_schedule(
 
        This is what lets the trigger react to "is a target actually in
        view right now" instead of firing purely on the open-loop tick
-       schedule (see the 2026-08-17 note above VISION_SCHEDULE_ROW_DIM).
+       schedule (see the 2026-08-17 note above VISION_SCHEDULE_BLOCK_DIM).
 
     2. Peek -- the SAME shape of nudge, scaled by peek_gain, added to the
        tick's base peek_logit before the threshold:
@@ -203,7 +241,7 @@ def act_vision_schedule(
 
        This lets the agent learn to come OUT of cover when a target is
        actually visible instead of only exposing on the open-loop tick
-       schedule (see the 2026-09-09 note above VISION_SCHEDULE_ROW_DIM).
+       schedule (see the 2026-09-09 note above VISION_SCHEDULE_BLOCK_DIM).
        Without this, a confident detection could force shoot=True while
        peek stayed False that tick, and env_timecrisis.py's
        ``shoot_allowed = peek`` gate would silently swallow the shot.
@@ -224,12 +262,15 @@ def act_vision_schedule(
     Returns (shoot: bool, peek: bool, aim_x_bias: float in [-1, 1], aim_y_bias: float in [-1, 1])
     """
     idx = min(int(tick), MAX_TICKS - 1)
-    row_start = idx * VISION_SCHEDULE_ROW_DIM
-    row = theta[row_start:row_start + VISION_SCHEDULE_ROW_DIM]
-    base_shoot_logit = float(row[0])
-    base_peek_logit = float(row[1])
-    base_ax_bias = float(np.tanh(row[2]))
-    base_ay_bias = float(np.tanh(row[3]))
+    aim_row_start = idx * VISION_SCHEDULE_AIM_DIM
+    aim_row = theta[aim_row_start:aim_row_start + VISION_SCHEDULE_AIM_DIM]
+    base_ax_bias = float(np.tanh(aim_row[0]))
+    base_ay_bias = float(np.tanh(aim_row[1]))
+    block_idx = idx // SCHEDULE_BLOCK_TICKS
+    block_row_start = VISION_SCHEDULE_AIM_TABLE_SIZE + block_idx * VISION_SCHEDULE_BLOCK_DIM
+    block_row = theta[block_row_start:block_row_start + VISION_SCHEDULE_BLOCK_DIM]
+    base_shoot_logit = float(block_row[0])
+    base_peek_logit = float(block_row[1])
     gain = float(np.tanh(theta[VISION_SCHEDULE_GAIN_IDX]))
     shoot_gain = float(np.tanh(theta[SHOOT_GAIN_IDX]))
     drift_gain = float(np.tanh(theta[DRIFT_GAIN_IDX]))
@@ -242,7 +283,7 @@ def act_vision_schedule(
     best_det = None
     best_conf = 0.0
     if detections:
-        priority_start = MAX_TICKS * VISION_SCHEDULE_ROW_DIM
+        priority_start = VISION_SCHEDULE_AIM_TABLE_SIZE + VISION_SCHEDULE_BLOCK_TABLE_SIZE
         priority_raw = theta[priority_start:priority_start + NUM_ENEMY_CLASSES]
         priority = _softmax(np.asarray(priority_raw, dtype=np.float64))
         best_score = -np.inf

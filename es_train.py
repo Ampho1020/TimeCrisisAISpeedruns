@@ -23,7 +23,9 @@ from logger import TrainingLogger
 from policy import (
     PARAM_COUNT, SCHEDULE_PARAM_COUNT, PEEK_GAIN_IDX, SHOOT_GAIN_IDX,
     VISION_SCHEDULE_GAIN_IDX, DRIFT_GAIN_IDX,
-    VISION_SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_ROW_DIM,
+    VISION_SCHEDULE_PARAM_COUNT,
+    VISION_SCHEDULE_AIM_TABLE_SIZE, VISION_SCHEDULE_BLOCK_DIM,
+    VISION_SCHEDULE_BLOCK_TABLE_SIZE, NUM_SCHEDULE_BLOCKS,
 )
 from worker_pool import WorkerPool
 
@@ -137,10 +139,13 @@ def train(init_theta_path: str | None = None):
         theta[:, 1] += 1.0
         theta = theta.reshape(-1)
     elif POLICY_MODE == "vision_schedule":
-        # Vision-conditioned schedule: per-tick (shoot, peek, base_ax,
-        # base_ay) rows, followed by a global class-priority vector, followed
-        # by one single global vision_gain_logit scalar (see policy.py's
-        # 2026-08-15 note on why vision_gain is shared rather than per-tick).
+        # Vision-conditioned schedule: per-tick (base_ax, base_ay) aim rows,
+        # followed by per-BLOCK (shoot, peek) rows (added 2026-09-09,
+        # recommendation #2 of the peek_gain follow-up -- see policy.py's
+        # VISION_SCHEDULE_BLOCK_DIM notes for why shoot/peek got coarser
+        # resolution than aim), followed by a global class-priority vector,
+        # followed by the four shared gain scalars (see policy.py's
+        # 2026-08-15 note on why these are shared rather than per-tick).
         #   * ``vision_gain`` warm-starts to VISION_GAIN_WARMSTART (config.py)
         #     instead of 0 -- a real trained YOLO model is wired in now, so
         #     vision should be an active part of the aim blend from gen 0
@@ -150,11 +155,14 @@ def train(init_theta_path: str | None = None):
         #   * class-priority tail zero-init -> softmax is uniform, no bias
         #     toward any particular EnemyClass; ES still has to learn which
         #     class to prioritize.
-        per_tick = MAX_TICKS * VISION_SCHEDULE_ROW_DIM
-        grid = theta[:per_tick].reshape(MAX_TICKS, VISION_SCHEDULE_ROW_DIM)
-        grid[:, 1] += 1.0   # peek-forward bias (same as schedule mode)
-        theta[:per_tick] = grid.reshape(-1)
-        theta[per_tick:VISION_SCHEDULE_GAIN_IDX] = 0.0  # class-priority tail -> uniform softmax
+        #   * aim (theta[:VISION_SCHEDULE_AIM_TABLE_SIZE]) gets no warm-start
+        #     bias -- only shoot/peek's per-block rows do, below.
+        block_start = VISION_SCHEDULE_AIM_TABLE_SIZE
+        block_end = block_start + VISION_SCHEDULE_BLOCK_TABLE_SIZE
+        block_grid = theta[block_start:block_end].reshape(NUM_SCHEDULE_BLOCKS, VISION_SCHEDULE_BLOCK_DIM)
+        block_grid[:, 1] += 1.0   # peek-forward bias (same as schedule mode), now per-block
+        theta[block_start:block_end] = block_grid.reshape(-1)
+        theta[block_end:VISION_SCHEDULE_GAIN_IDX] = 0.0  # class-priority tail -> uniform softmax
         theta[VISION_SCHEDULE_GAIN_IDX] = VISION_GAIN_WARMSTART  # vision_gain -> active from gen 0
         theta[SHOOT_GAIN_IDX] = SHOOT_GAIN_WARMSTART  # shoot_gain -> active from gen 0
         theta[DRIFT_GAIN_IDX] = VISION_DRIFT_GAIN_WARMSTART  # drift_gain -> no correction at gen 0
@@ -356,6 +364,7 @@ def train(init_theta_path: str | None = None):
             mean_shot_mid_frac = float(np.mean([x["shot_mid_frac"] for x in infos]))
             mean_shot_right_frac = float(np.mean([x["shot_right_frac"] for x in infos]))
             mean_hit_delta = float(np.mean([x["mean_hit_delta"] for x in infos]))
+            mean_reaction_latency = float(np.mean([x["mean_reaction_latency"] for x in infos]))
 
             print(
                 f"\n=== gen {gen:03d} | best {fitnesses[best_i]:8.2f} "
@@ -368,6 +377,7 @@ def train(init_theta_path: str | None = None):
                 f"| aimspan ({mean_aim_span_x:.3f},{mean_aim_span_y:.3f}) "
                 f"| aimdx {mean_aim_dx:.3f} "
                 f"| hitd {mean_hit_delta:.1f} "
+                f"| rlat {mean_reaction_latency:.1f} "
                 f"| vgain {mean_vision_gain:+.3f} | sgain {mean_shoot_gain:+.3f} "
                 f"| dgain {mean_drift_gain:+.3f} | pgain {mean_peek_gain:+.3f} "
                 f"| lanes L/M/R {mean_shot_left_frac:.0%}/{mean_shot_mid_frac:.0%}/{mean_shot_right_frac:.0%} ===",
@@ -410,6 +420,7 @@ def train(init_theta_path: str | None = None):
                 "mean_aim_span_y": mean_aim_span_y,
                 "mean_aim_dx": mean_aim_dx,
                 "mean_hit_delta": mean_hit_delta,
+                "mean_reaction_latency": mean_reaction_latency,
                 "mean_shot_left_frac": mean_shot_left_frac,
                 "mean_shot_mid_frac": mean_shot_mid_frac,
                 "mean_shot_right_frac": mean_shot_right_frac,

@@ -128,6 +128,23 @@ POLICY_MODE = "vision_schedule"
 # incompatible because theta dimensionality changes.
 NUM_ENEMY_CLASSES = 3
 
+# Tick-block size for the vision_schedule shoot/peek columns (recommendation
+# #2 from the 2026-09-09 peek_gain follow-up -- see policy.py's
+# VISION_SCHEDULE_BLOCK_DIM notes). Now that shoot/peek are both reactive to
+# live detections (shoot_gain/peek_gain), the open-loop shoot_logit/
+# peek_logit columns mostly just need to supply a sane DEFAULT for "nothing
+# visible yet" rather than independently re-deriving 900 separate exposure/
+# firing windows -- a needlessly large, sparse search space for ES
+# (POP_SIZE=30) to explore. Grouping those two columns into one shared value
+# per SCHEDULE_BLOCK_TICKS-tick block (aim_x/aim_y stay per-tick, since
+# enemy position genuinely varies tick to tick) cuts the vision_schedule
+# table from MAX_TICKS*4=3600 to MAX_TICKS*2 + (MAX_TICKS/SCHEDULE_BLOCK_
+# TICKS)*2 = 1860 at the default value below (~48% of the old size).
+#
+# NOTE: this is a breaking layout change -- existing theta_*.npy checkpoints
+# are NOT compatible and must be discarded/retrained.
+SCHEDULE_BLOCK_TICKS = 30
+
 # How often (in decision ticks) TimeCrisisEnv captures a fresh screenshot +
 # runs detection under POLICY_MODE="vision_schedule". Between captures the
 # most recent detections are re-used, matching the cadence pattern from the
@@ -308,7 +325,7 @@ VISION_GAIN_WARMSTART = 1.2
 
 # Warm-start value for vision_schedule mode's single global
 # shoot_gain_logit scalar (added 2026-08-17 alongside per_frame_vision --
-# see policy.py's note above VISION_SCHEDULE_ROW_DIM). Blends detection
+# see policy.py's note above VISION_SCHEDULE_BLOCK_DIM). Blends detection
 # PRESENCE (+1 detected / -1 not detected) into the shoot decision on top
 # of the open-loop shoot_logit, so the trigger can react to "is a target
 # actually in view" instead of firing purely on the fixed per-tick
@@ -324,7 +341,7 @@ SHOOT_GAIN_WARMSTART = 1.2
 
 # Warm-start value for vision_schedule mode's single global
 # peek_gain_logit scalar (added 2026-09-09 alongside PEEK_DETECTION_SCALE --
-# see policy.py's note above VISION_SCHEDULE_ROW_DIM). Blends detection
+# see policy.py's note above VISION_SCHEDULE_BLOCK_DIM). Blends detection
 # PRESENCE into the peek (exposure) decision the same way SHOOT_GAIN_WARMSTART
 # does for shoot, so the agent is biased toward coming OUT of cover for a
 # visible target from generation 0 rather than discovering it from scratch.
@@ -523,6 +540,27 @@ CENTER_CAMP_PENALTY = 30.0
 # from long dry streaks.
 HIT_DELTA_NORM_FRAMES = 300.0
 HIT_DELTA_PENALTY = 80.0
+
+# Reaction-latency shaping (recommendation #3 from the 2026-09-09 peek_gain
+# follow-up). Neither HIT_DELTA_PENALTY above (time since the last HIT) nor
+# EXPOSED_NO_SHOT_PENALTY/COVER_HESITATION_PENALTY (flat per-tick penalties
+# while a target is visible) directly measure how long the agent takes to
+# fire once a target FIRST becomes visible -- this adds that missing signal
+# directly, targeting "fire as fast as possible" instead of relying on the
+# indirect pressure from ``elapsed``.
+#
+# Tracked tick-by-tick in env_timecrisis.py: a running streak counter
+# increments on every tick an ENEMY detection is visible and no shot is
+# fired that tick, and resets to 0 the instant either (a) a shot is fired
+# while a target is visible -- the streak length just before the reset is
+# recorded as one completed "reaction latency" sample -- or (b) no target
+# is visible (nothing to react to). episode_fitness() averages every
+# completed sample (plus one final unresolved sample if the episode ends
+# mid-streak, so a policy can't dodge this metric by simply never firing)
+# into mean_reaction_latency, normalizes by REACTION_LATENCY_NORM_TICKS,
+# and penalizes the result.
+REACTION_LATENCY_NORM_TICKS = 20.0
+REACTION_LATENCY_PENALTY = 60.0
 
 # Accuracy-shaped fitness bonus (rewards hit RATE, not just hit COUNT).
 # Sim-validated (repo memory "Miss-correction objective probe", 2026-08-06):
