@@ -5,6 +5,7 @@ import numpy as np
 
 from config import (
     ACT_DIM, HIDDEN, MAX_TICKS, NUM_ENEMY_CLASSES, OBS_DIM,
+    PEEK_DETECTION_SCALE,
     SHOOT_DETECTION_SCALE,
     VISION_DRIFT_EDGE_START,
     VISION_FORCE_SHOOT_CONFIDENCE,
@@ -63,12 +64,36 @@ SCHEDULE_PARAM_COUNT = MAX_TICKS * 4
 # NOTE: this is a breaking layout change (PARAM_COUNT grew by 1) --
 # existing theta_*.npy checkpoints are NOT compatible and must be
 # discarded/retrained.
+#
+# 2026-09-09: added a fourth global scalar, peek_gain_logit, appended after
+# drift_gain_logit. Root cause: peek (cover <-> exposed) was read PURELY
+# from the fixed per-tick row, completely blind to detections -- unlike
+# shoot, which already blends detection presence via shoot_gain and can
+# even force-fire on a confident detection (VISION_FORCE_SHOOT_CONFIDENCE).
+# That force-shoot override was silently a no-op whenever the open-loop
+# schedule's peek for that tick happened to be False, since
+# env_timecrisis.py gates the trigger with shoot_allowed = peek -- the
+# agent could be staring at a clean, high-confidence target and still not
+# fire, purely because the absolute-tick schedule hadn't scheduled an
+# exposure window at that moment. peek_gain lets ES learn how much a
+# CURRENT detection's presence should nudge the agent to come OUT of cover,
+# on top of the open-loop baseline, and reuses the same
+# VISION_FORCE_SHOOT_CONFIDENCE bar to force peek=True alongside shoot=True
+# (see act_vision_schedule). With peek_gain=0 this collapses byte-identical
+# to the old open-loop-only peek decision. ammo_left==0 still hard-forces
+# peek=False afterward in env_timecrisis.py, so this cannot make the agent
+# expose with an empty clip.
+#
+# NOTE: this is a breaking layout change (PARAM_COUNT grew by 1 again) --
+# existing theta_*.npy checkpoints are NOT compatible and must be
+# discarded/retrained.
 VISION_SCHEDULE_ROW_DIM = 4
-VISION_SCHEDULE_PARAM_COUNT = MAX_TICKS * VISION_SCHEDULE_ROW_DIM + NUM_ENEMY_CLASSES + 3
-# Indexes of global scalars in tail order: vision_gain, shoot_gain, drift_gain.
-VISION_SCHEDULE_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 3
-SHOOT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 2
-DRIFT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 1
+VISION_SCHEDULE_PARAM_COUNT = MAX_TICKS * VISION_SCHEDULE_ROW_DIM + NUM_ENEMY_CLASSES + 4
+# Indexes of global scalars in tail order: vision_gain, shoot_gain, drift_gain, peek_gain.
+VISION_SCHEDULE_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 4
+SHOOT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 3
+DRIFT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 2
+PEEK_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 1
 
 
 def _unpack(theta: np.ndarray):
@@ -139,22 +164,26 @@ def act_vision_schedule(
         base_aim_y_bias) rows indexed by ``tick``.
       * next ``NUM_ENEMY_CLASSES`` entries: raw class priority scores
         (softmax'd here before use).
-            * third-from-last entry (``VISION_SCHEDULE_GAIN_IDX``): one shared
-                ``vision_gain_logit`` scalar used for every tick, blending the
-                detected centroid into the aim.
-            * second-from-last entry (``SHOOT_GAIN_IDX``): one shared
-                ``shoot_gain_logit`` scalar, blending detection PRESENCE into the
-                shoot decision.
-            * final entry (``DRIFT_GAIN_IDX``): one shared ``drift_gain_logit``
-                scalar used to learn edge drift correction from live cursor error.
+            * ``VISION_SCHEDULE_GAIN_IDX``: one shared ``vision_gain_logit``
+                scalar used for every tick, blending the detected centroid
+                into the aim.
+            * ``SHOOT_GAIN_IDX``: one shared ``shoot_gain_logit`` scalar,
+                blending detection PRESENCE into the shoot decision.
+            * ``DRIFT_GAIN_IDX``: one shared ``drift_gain_logit`` scalar used
+                to learn edge drift correction from live cursor error.
+            * ``PEEK_GAIN_IDX``: one shared ``peek_gain_logit`` scalar,
+                blending detection PRESENCE into the peek (exposure) decision
+                -- same idea as shoot_gain, but for whether to come OUT of
+                cover at all.
 
     ``detections`` is a list of ``detector.Detection`` objects (may be
-    empty). With zero-init ``vision_gain``/``shoot_gain``/``class_priority``
-    this reproduces plain schedule-mode behaviour exactly on generation 0.
+    empty). With zero-init ``vision_gain``/``shoot_gain``/``peek_gain``/
+    ``class_priority`` this reproduces plain schedule-mode behaviour exactly
+    on generation 0.
 
     If detections are present, we score each one by
     ``confidence * softmax(class_priority)[class_id]`` and pick the top
-    scorer (``best_det``). That drives TWO independent blends:
+    scorer (``best_det``). That drives THREE independent blends:
 
     1. Shoot -- a +1/-1 nudge (present/absent) scaled by shoot_gain, added
        to the tick's base shoot_logit before the threshold:
@@ -166,7 +195,20 @@ def act_vision_schedule(
        view right now" instead of firing purely on the open-loop tick
        schedule (see the 2026-08-17 note above VISION_SCHEDULE_ROW_DIM).
 
-    2. Aim -- best_det's normalized centroid blended into the base aim in
+    2. Peek -- the SAME shape of nudge, scaled by peek_gain, added to the
+       tick's base peek_logit before the threshold:
+
+           peek_gain = tanh(peek_gain_logit)                        # in [-1, 1]
+           peek = (base_peek_logit + peek_gain * (+1 if best_det else -1)) > 0
+
+       This lets the agent learn to come OUT of cover when a target is
+       actually visible instead of only exposing on the open-loop tick
+       schedule (see the 2026-09-09 note above VISION_SCHEDULE_ROW_DIM).
+       Without this, a confident detection could force shoot=True while
+       peek stayed False that tick, and env_timecrisis.py's
+       ``shoot_allowed = peek`` gate would silently swallow the shot.
+
+    3. Aim -- best_det's normalized centroid blended into the base aim in
        [0,1] screen space:
 
         gain = tanh(vision_gain_logit)                 # in [-1, 1]
@@ -185,12 +227,13 @@ def act_vision_schedule(
     row_start = idx * VISION_SCHEDULE_ROW_DIM
     row = theta[row_start:row_start + VISION_SCHEDULE_ROW_DIM]
     base_shoot_logit = float(row[0])
-    peek = bool(row[1] > 0.0)
+    base_peek_logit = float(row[1])
     base_ax_bias = float(np.tanh(row[2]))
     base_ay_bias = float(np.tanh(row[3]))
     gain = float(np.tanh(theta[VISION_SCHEDULE_GAIN_IDX]))
     shoot_gain = float(np.tanh(theta[SHOOT_GAIN_IDX]))
     drift_gain = float(np.tanh(theta[DRIFT_GAIN_IDX]))
+    peek_gain = float(np.tanh(theta[PEEK_GAIN_IDX]))
 
     # Score every detection (if any) up front -- best_det feeds BOTH the
     # shoot decision below and the aim blend, so "no valid target" is
@@ -224,8 +267,19 @@ def act_vision_schedule(
         detection_term = float(np.clip(best_conf, 0.0, 1.0))
     shoot_logit = base_shoot_logit + SHOOT_DETECTION_SCALE * shoot_gain * detection_term
     shoot = bool(shoot_logit > 0.0)
+
+    # Peek: same shape of confidence-shaped additive nudge as shoot above,
+    # so a visible target can pull the agent OUT of cover instead of
+    # waiting for the open-loop schedule's fixed exposure window. Shares
+    # the same force-override bar as shoot -- if we're confident enough to
+    # force-fire, we're confident enough to force-expose (ammo_left == 0
+    # still hard-overrides peek back to False afterward, in
+    # env_timecrisis.py).
+    peek_logit = base_peek_logit + PEEK_DETECTION_SCALE * peek_gain * detection_term
+    peek = bool(peek_logit > 0.0)
     if best_det is not None and best_conf >= VISION_FORCE_SHOOT_CONFIDENCE:
         shoot = True
+        peek = True
 
     if best_det is None:
         # No usable target this tick -- fall back to base aim.

@@ -34,6 +34,17 @@ class TrainingLogger:
         # but for tanh(shoot_gain_logit), the detection-presence blend into
         # the shoot decision.
         "mean_shoot_gain", "theta_shoot_gain",
+        # Drift-gain tracking (learned edge-drift correction gain). Was
+        # already computed/passed by es_train.py but missing from FIELDS,
+        # so TrainingLogger.log() silently dropped it -- added here.
+        "mean_drift_gain", "theta_drift_gain",
+        # Peek-gain tracking (added 2026-09-09 alongside PEEK_GAIN_WARMSTART
+        # in config.py -- fixes shoot's confidence-based force-override
+        # being a no-op whenever the open-loop schedule's peek happened to
+        # be False that tick). Same shape as the shoot_gain pair above, but
+        # for tanh(peek_gain_logit), the detection-presence blend into the
+        # peek (exposure) decision.
+        "mean_peek_gain", "theta_peek_gain",
     ]
 
     def __init__(self, path: str):

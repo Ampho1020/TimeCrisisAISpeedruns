@@ -14,15 +14,15 @@ import numpy as np
 from config import (
     ACT_DIM, ALPHA, CHECKPOINT_EVERY, EPISODES_PER_CANDIDATE, GENERATIONS,
     HIDDEN, HUD_ENABLED, LOG_CSV, LOG_CSV_TIMESTAMPED, MAX_TICKS, OBS_DIM,
-    POLICY_MODE, POP_SIZE, SEED, SIGMA, SHOOT_GAIN_WARMSTART,
+    POLICY_MODE, POP_SIZE, SEED, SIGMA, PEEK_GAIN_WARMSTART, SHOOT_GAIN_WARMSTART,
     SHOT_PHASE_WARMSTART_ROW_STD, STAGNATION_PATIENCE, STAGNATION_SIGMA_MULT,
     STD_STAGNATION_THRESHOLD, VERBOSE_EPISODES, VISION_GAIN_WARMSTART,
     VISION_DRIFT_GAIN_WARMSTART,
 )
 from logger import TrainingLogger
 from policy import (
-    PARAM_COUNT, SCHEDULE_PARAM_COUNT, SHOOT_GAIN_IDX, VISION_SCHEDULE_GAIN_IDX,
-    DRIFT_GAIN_IDX,
+    PARAM_COUNT, SCHEDULE_PARAM_COUNT, PEEK_GAIN_IDX, SHOOT_GAIN_IDX,
+    VISION_SCHEDULE_GAIN_IDX, DRIFT_GAIN_IDX,
     VISION_SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_ROW_DIM,
 )
 from worker_pool import WorkerPool
@@ -88,6 +88,19 @@ def _mean_drift_gain(theta_batch: np.ndarray) -> float:
     return float(np.tanh(batch[:, DRIFT_GAIN_IDX]).mean())
 
 
+def _mean_peek_gain(theta_batch: np.ndarray) -> float:
+    """Mean tanh(peek_gain_logit) across every candidate in the batch --
+    same rationale/shape as _mean_shoot_gain above, but for the peek-side
+    detection-presence blend (see PEEK_GAIN_WARMSTART in config.py, added
+    2026-09-09 to fix shoot's confidence-based force-override being a
+    no-op whenever the open-loop schedule's peek happened to be False that
+    tick)."""
+    if POLICY_MODE != "vision_schedule":
+        return 0.0
+    batch = theta_batch if theta_batch.ndim > 1 else theta_batch[None, :]
+    return float(np.tanh(batch[:, PEEK_GAIN_IDX]).mean())
+
+
 def train(init_theta_path: str | None = None):
     if POP_SIZE % 2 != 0:
         raise ValueError("POP_SIZE must be even for mirrored sampling.")
@@ -145,6 +158,7 @@ def train(init_theta_path: str | None = None):
         theta[VISION_SCHEDULE_GAIN_IDX] = VISION_GAIN_WARMSTART  # vision_gain -> active from gen 0
         theta[SHOOT_GAIN_IDX] = SHOOT_GAIN_WARMSTART  # shoot_gain -> active from gen 0
         theta[DRIFT_GAIN_IDX] = VISION_DRIFT_GAIN_WARMSTART  # drift_gain -> no correction at gen 0
+        theta[PEEK_GAIN_IDX] = PEEK_GAIN_WARMSTART  # peek_gain -> active from gen 0
     else:
         # Warm-start the shoot logit to +2 and the peek logit to +1 (asymmetric,
         # 2026-08-04). Without some positive bias, ~50% of random seeds produce a
@@ -307,6 +321,8 @@ def train(init_theta_path: str | None = None):
             theta_shoot_gain = _mean_shoot_gain(theta)
             mean_drift_gain = _mean_drift_gain(candidates)
             theta_drift_gain = _mean_drift_gain(theta)
+            mean_peek_gain = _mean_peek_gain(candidates)
+            theta_peek_gain = _mean_peek_gain(theta)
 
             # --- diagnostics ---
             best_i = int(np.argmax(fitnesses))
@@ -353,7 +369,7 @@ def train(init_theta_path: str | None = None):
                 f"| aimdx {mean_aim_dx:.3f} "
                 f"| hitd {mean_hit_delta:.1f} "
                 f"| vgain {mean_vision_gain:+.3f} | sgain {mean_shoot_gain:+.3f} "
-                f"| dgain {mean_drift_gain:+.3f} "
+                f"| dgain {mean_drift_gain:+.3f} | pgain {mean_peek_gain:+.3f} "
                 f"| lanes L/M/R {mean_shot_left_frac:.0%}/{mean_shot_mid_frac:.0%}/{mean_shot_right_frac:.0%} ===",
                 flush=True,
             )
@@ -412,6 +428,8 @@ def train(init_theta_path: str | None = None):
                 "theta_shoot_gain": theta_shoot_gain,
                 "mean_drift_gain": mean_drift_gain,
                 "theta_drift_gain": theta_drift_gain,
+                "mean_peek_gain": mean_peek_gain,
+                "theta_peek_gain": theta_peek_gain,
             })
 
             if gen % CHECKPOINT_EVERY == 0:

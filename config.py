@@ -322,6 +322,15 @@ VISION_GAIN_WARMSTART = 1.2
 # better. Set to 0.0 to restore the old open-loop-only shoot decision.
 SHOOT_GAIN_WARMSTART = 1.2
 
+# Warm-start value for vision_schedule mode's single global
+# peek_gain_logit scalar (added 2026-09-09 alongside PEEK_DETECTION_SCALE --
+# see policy.py's note above VISION_SCHEDULE_ROW_DIM). Blends detection
+# PRESENCE into the peek (exposure) decision the same way SHOOT_GAIN_WARMSTART
+# does for shoot, so the agent is biased toward coming OUT of cover for a
+# visible target from generation 0 rather than discovering it from scratch.
+# Set to 0.0 to restore the old open-loop-only peek decision.
+PEEK_GAIN_WARMSTART = 1.2
+
 # Warm-start for vision_schedule's learned edge-drift correction gain.
 # 0.0 starts with no learned correction; ES can adapt positive/negative.
 VISION_DRIFT_GAIN_WARMSTART = 0.0
@@ -341,6 +350,18 @@ VISION_DRIFT_EDGE_START = 0.65
 # detections (less schedule-timed waiting). Keep moderate to avoid
 # over-firing on noisy detections.
 SHOOT_DETECTION_SCALE = 1.5
+
+# Scales how strongly live detection PRESENCE can nudge the peek (cover <->
+# exposed) decision in POLICY_MODE="vision_schedule" -- same shape as
+# SHOOT_DETECTION_SCALE above, but for peek_gain (added 2026-09-09 to fix
+# shoot's confidence-based force-override being a no-op whenever the
+# open-loop schedule's peek happened to be False that tick -- see
+# policy.act_vision_schedule):
+#   base_peek_logit + PEEK_DETECTION_SCALE * peek_gain * detection_term
+# Larger values make the agent come out of cover more readily when a
+# confident detection is present, instead of waiting for the open-loop
+# schedule's fixed exposure window.
+PEEK_DETECTION_SCALE = 1.5
 
 # Vision-priority overrides for "shoot what you see" behavior.
 # If the top detection is at/above this confidence, bypass the blended shoot
