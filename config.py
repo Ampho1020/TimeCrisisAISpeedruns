@@ -74,7 +74,19 @@ CONTINUE_SCREEN_STALE_TICKS = 3
 # cover/duck play can legitimately go a couple seconds without a new shot or
 # hit -- this should only fire once that stretch would be implausible for
 # live gameplay.
-CONTINUE_SCREEN_FALLBACK_TICKS = 45
+#
+# Raised 45 -> 180 (2026-09-10): the vision_schedule policy's shoot/peek
+# logits are now shared per SCHEDULE_BLOCK_TICKS=30-tick block (see below),
+# not per-tick, and shoot_logit gets NO warm-start bias -- so at gen 0 (and
+# beyond) it's a coin flip whether an entire 30-tick block fires at all. A
+# candidate can easily draw ~1.5 consecutive negative-shoot blocks (45
+# ticks) purely by chance, with no incoming damage either, while still being
+# on a perfectly normal live screen -- confirmed via live logs showing this
+# fallback firing "a lot" in early generations. 45 ticks (1.5 blocks) left
+# almost no margin against that; 180 ticks (6 blocks, ~15s) gives real
+# headroom for a few unlucky blocks in a row to resolve on their own, while
+# still catching a truly stuck screen well before the 900-tick/75s cap.
+CONTINUE_SCREEN_FALLBACK_TICKS = 180
 
 # -----------------------------
 # ES hyperparameters
