@@ -6,21 +6,20 @@ import numpy as np
 
 from bridge_client import BridgeClient
 from config import (
-    ACCURACY_BONUS_WEIGHT, AMMO_MAX_ROUNDS, CENTER_BAND, CENTER_CAMP_PENALTY,
-    CLEAR_BONUS, CLIP_SHIFT_BONUS, CONTINUE_SCREEN_FALLBACK_TICKS,
+    ACCURACY_BONUS_WEIGHT, AMMO_MAX_ROUNDS,
+    CLEAR_BONUS, CONTINUE_SCREEN_FALLBACK_TICKS,
     CONTINUE_SCREEN_STALE_TICKS, CURSOR_X_MAX,
     CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN, COVER_HESITATION_PENALTY,
     DAMAGE_PENALTY,
-    DRY_FIRE_PENALTY, EDGE_BAND, EDGE_SCATTER_PENALTY, FAIL_PENALTY,
+    FAIL_PENALTY,
     EXPOSED_NO_SHOT_PENALTY,
     FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
-    MAX_TICKS, MISS_CORRECTION_BONUS, MOVE_EPS, MULTI_CLEAR_BONUS,
+    MAX_TICKS, MULTI_CLEAR_BONUS,
     PEEK_LOCK_IN_TICKS, PEEK_LOCK_OUT_TICKS, PEEK_TRAVERSE_TICKS,
     POLICY_MODE, PORT, RAM, REACTION_LATENCY_NORM_TICKS, REACTION_LATENCY_PENALTY,
-    RELOAD_BONUS, REPEATED_MISS_PENALTY,
-    SAME_EPS, SCREEN_CLEAR_TIMER_BUMP, SHOOT_PULSE_EVERY_N_FRAMES,
-    SHOT_SLOT_DIVERSITY_BONUS,
-    SHOT_SLOT_DIVERSITY_SCALE, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
+    RELOAD_BONUS,
+    SCREEN_CLEAR_TIMER_BUMP, SHOOT_PULSE_EVERY_N_FRAMES,
+    STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
     VISION_CAPTURE_EVERY_N_TICKS, VISION_DETECTOR_DEVICE, VISION_ONNX_MODEL_PATH,
     VISION_PROFILE, VISION_PROFILE_PRINT_EVERY, VISION_TORCH_MODEL_PATH,
 )
@@ -70,104 +69,6 @@ def shot_phase_features(ammo_left: int) -> tuple[float, float]:
 def core_watchdog_snapshot(cur: dict[str, int]) -> tuple[int, int, int, int]:
     """Return the menu-watchdog counters only, excluding aim/cursor RAM."""
     return cur["shots_fired"], cur["shots_hit"], cur["timer"], cur["life"]
-
-
-def compute_miss_correction_metrics(shots: list[dict[str, float | bool]]) -> dict[str, float]:
-    """Measure whether a shot sequence shows corrective aim shifts and avoids
-    repeated-miss / camping patterns.
-
-    The metrics are intentionally simple: they look at the sequence of aim
-    points from successful and unsuccessful shot ticks and summarize whether
-    the policy moved away from a miss instead of repeating the same spot."""
-    if not shots:
-        return {
-            "corrected": 0.0,
-            "repeated": 0.0,
-            "edge_camp": 0.0,
-            "center_camp": 0.0,
-            "unique_ratio": 0.0,
-            "clip_shift": 0.0,
-            "shot_slot_diversity": 0.0,
-        }
-
-    def chunks6(items: list[tuple[float, float]]) -> list[list[tuple[float, float]]]:
-        return [items[i:i + 6] for i in range(0, len(items), 6) if len(items[i:i + 6]) == 6]
-
-    def clip_shift_metric(clips: list[list[tuple[float, float]]]) -> float:
-        # NOTE: this takes the MIN of per-pair normalized shift scores, not
-        # the mean. An earlier mean-of-raw-distances version let ONE big
-        # shift (e.g. clip1 -> clip2) inflate the average enough to earn a
-        # decent reward even if every later clip then repeated clip2
-        # unchanged -- exactly the "shifts once, then locks into a fixed arc
-        # for all remaining reloads" symptom reported live (2026-08-06). The
-        # min forces EVERY consecutive clip pair to shift meaningfully, since
-        # a single repeated (near-zero-shift) pair now drags the whole
-        # episode's score down, not just dilutes an average.
-        if len(clips) < 2:
-            return 0.0
-        vals = []
-        for i in range(1, len(clips)):
-            prev, cur = clips[i - 1], clips[i]
-            dist = float(np.mean([
-                ((cur[j][0] - prev[j][0]) ** 2 + (cur[j][1] - prev[j][1]) ** 2) ** 0.5
-                for j in range(6)
-            ]))
-            vals.append(float(np.clip(dist / 0.15, 0.0, 1.0)))
-        return float(np.min(vals))
-
-    def shot_slot_diversity_metric(clips: list[list[tuple[float, float]]]) -> float:
-        """Score per-shot-slot coordinate diversity across clips.
-
-        If every clip repeats the same arc, each shot slot's variance across
-        clips is ~0. Higher values mean the same slot (shot 1, shot 2, ...)
-        lands at different coordinates on different clips.
-        """
-        if len(clips) < 2:
-            return 0.0
-        slot_spreads = []
-        for j in range(6):
-            xs = np.asarray([clip[j][0] for clip in clips], dtype=np.float64)
-            ys = np.asarray([clip[j][1] for clip in clips], dtype=np.float64)
-            slot_spreads.append(float(np.sqrt(xs.var() + ys.var())))
-        mean_slot_spread = float(np.mean(slot_spreads))
-        return float(np.clip(mean_slot_spread / SHOT_SLOT_DIVERSITY_SCALE, 0.0, 1.0))
-
-    corrected = 0.0
-    repeated = 0.0
-    edge_camp = 0.0
-    center_camp = 0.0
-    n = max(len(shots) - 2, 1)
-    for i in range(len(shots) - 2):
-        a, b, c = shots[i], shots[i + 1], shots[i + 2]
-        move_ab = ((b["aim_x"] - a["aim_x"]) ** 2 + (b["aim_y"] - a["aim_y"]) ** 2) ** 0.5
-        move_bc = ((c["aim_x"] - b["aim_x"]) ** 2 + (c["aim_y"] - b["aim_y"]) ** 2) ** 0.5
-        if (not a["hit"]) and move_ab >= MOVE_EPS and (b["hit"] or c["hit"]):
-            corrected += 1.0
-        if (not a["hit"]) and (not b["hit"]) and move_ab <= SAME_EPS:
-            repeated += 1.0
-        if (a["aim_x"] <= EDGE_BAND or a["aim_x"] >= 1.0 - EDGE_BAND or
-                a["aim_y"] <= EDGE_BAND or a["aim_y"] >= 1.0 - EDGE_BAND):
-            edge_camp += 1.0
-        if abs(a["aim_x"] - 0.5) <= CENTER_BAND and abs(a["aim_y"] - 0.5) <= CENTER_BAND:
-            center_camp += 1.0
-
-    corrected /= n
-    repeated /= n
-    edge_camp /= n
-    center_camp /= n
-    uniq = len({(round(s["aim_x"], 3), round(s["aim_y"], 3)) for s in shots}) / max(len(shots), 1)
-    clips = chunks6([(s["aim_x"], s["aim_y"]) for s in shots])
-    clip_shift = clip_shift_metric(clips)
-    shot_slot_diversity = shot_slot_diversity_metric(clips)
-    return {
-        "corrected": float(corrected),
-        "repeated": float(repeated),
-        "edge_camp": float(edge_camp),
-        "center_camp": float(center_camp),
-        "unique_ratio": float(uniq),
-        "clip_shift": float(clip_shift),
-        "shot_slot_diversity": float(shot_slot_diversity),
-    }
 
 
 def peek_hold_reward(
@@ -879,7 +780,6 @@ class TimeCrisisEnv:
         aim_x_per_tick = []
         aim_y_per_tick = []
         hit_delta_per_tick = []
-        shot_events = []
         reaction_latencies = []
 
         while True:
@@ -903,12 +803,6 @@ class TimeCrisisEnv:
             aim_x_per_tick.append(info["aim_x"])
             aim_y_per_tick.append(info["aim_y"])
             hit_delta_per_tick.append(float(info.get("hit_delta", self.hit_delta)))
-            if info["shots_fired_delta"] > 0:
-                shot_events.append({
-                    "aim_x": float(info["aim_x"]),
-                    "aim_y": float(info["aim_y"]),
-                    "hit": bool(info["shots_hit_delta"] > 0),
-                })
             dry_fire_ticks += int(info["dry_fire"])
             no_shot_exposed_ticks += int(info.get("no_shot_exposed", False))
             hesitated_cover_ticks += int(info.get("hesitated_cover", False))
@@ -1018,19 +912,11 @@ class TimeCrisisEnv:
         mean_reaction_latency = float(np.mean(reaction_latencies)) if reaction_latencies else 0.0
         mean_reaction_latency_norm = mean_reaction_latency / REACTION_LATENCY_NORM_TICKS
 
-        miss_metrics = compute_miss_correction_metrics(shot_events)
-        fitness += MISS_CORRECTION_BONUS * miss_metrics["corrected"]
-        fitness -= REPEATED_MISS_PENALTY * miss_metrics["repeated"]
-        fitness -= EDGE_SCATTER_PENALTY * miss_metrics["edge_camp"]
-        fitness -= CENTER_CAMP_PENALTY * miss_metrics["center_camp"]
         fitness += ACCURACY_BONUS_WEIGHT * accuracy
-        fitness += CLIP_SHIFT_BONUS * miss_metrics["clip_shift"]
-        fitness += SHOT_SLOT_DIVERSITY_BONUS * miss_metrics["shot_slot_diversity"]
         fitness -= HIT_DELTA_PENALTY * mean_hit_delta_norm
         fitness -= REACTION_LATENCY_PENALTY * mean_reaction_latency_norm
 
         fitness += HIT_REWARD * total_hits
-        fitness -= DRY_FIRE_PENALTY * dry_fire_ticks
         fitness -= EXPOSED_NO_SHOT_PENALTY * no_shot_exposed_ticks
         fitness -= COVER_HESITATION_PENALTY * hesitated_cover_ticks
         fitness += RELOAD_BONUS * reload_correct_count
@@ -1079,13 +965,6 @@ class TimeCrisisEnv:
             "hit_rate_left": hit_rate_left,
             "hit_rate_mid": hit_rate_mid,
             "hit_rate_right": hit_rate_right,
-            "miss_corrected": miss_metrics["corrected"],
-            "miss_repeated": miss_metrics["repeated"],
-            "miss_edge_camp": miss_metrics["edge_camp"],
-            "miss_center_camp": miss_metrics["center_camp"],
-            "miss_unique_ratio": miss_metrics["unique_ratio"],
-            "miss_clip_shift": miss_metrics["clip_shift"],
-            "miss_shot_slot_diversity": miss_metrics["shot_slot_diversity"],
             "mean_hit_delta": mean_hit_delta,
             "mean_hit_delta_norm": mean_hit_delta_norm,
             "mean_reaction_latency": mean_reaction_latency,

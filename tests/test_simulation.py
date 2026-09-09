@@ -32,7 +32,6 @@ from config import (
 import env_timecrisis
 from env_timecrisis import (
     TimeCrisisEnv,
-    compute_miss_correction_metrics,
     core_watchdog_snapshot,
     normalize_cursor,
     u16_delta,
@@ -3995,97 +3994,13 @@ class DryFireBehaviorSuite(unittest.TestCase):
         )
 
 
-class MissCorrectionMetricsSuite(unittest.TestCase):
-    """Verify the miss-correction reward diagnostics are computed as intended."""
-
-    def test_metrics_detect_corrective_and_repeated_miss_patterns(self):
-        shots = [
-            {"aim_x": 0.50, "aim_y": 0.50, "hit": False},
-            {"aim_x": 0.535, "aim_y": 0.50, "hit": False},
-            {"aim_x": 0.540, "aim_y": 0.50, "hit": False},
-            {"aim_x": 0.60, "aim_y": 0.50, "hit": True},
-            {"aim_x": 0.62, "aim_y": 0.50, "hit": True},
-        ]
-
-        metrics = compute_miss_correction_metrics(shots)
-
-        self.assertGreater(metrics["corrected"], 0.0)
-        self.assertGreater(metrics["repeated"], 0.0)
-        self.assertGreater(metrics["center_camp"], 0.0)
-
-    def test_clip_shift_rewards_aim_variation_between_magazines(self):
-        """Two 6-shot magazines aimed at very different spots should score a
-        much higher clip_shift than two magazines aimed at the same spot --
-        this is the metric that directly targets the "same arc every reload"
-        symptom, now wired into production fitness via CLIP_SHIFT_BONUS."""
-        same_spot_shots = [
-            {"aim_x": 0.3, "aim_y": 0.3, "hit": False} for _ in range(12)
-        ]
-        shifted_shots = (
-            [{"aim_x": 0.2, "aim_y": 0.2, "hit": False} for _ in range(6)]
-            + [{"aim_x": 0.8, "aim_y": 0.8, "hit": False} for _ in range(6)]
-        )
-
-        same_metrics = compute_miss_correction_metrics(same_spot_shots)
-        shifted_metrics = compute_miss_correction_metrics(shifted_shots)
-
-        self.assertGreater(shifted_metrics["clip_shift"], same_metrics["clip_shift"])
-
-    def test_clip_shift_penalizes_shift_once_then_repeat_pattern(self):
-        """Regression for the live-reported symptom (2026-08-06): arc1 shifts
-        to a different arc2, but arc3+ then keep repeating arc2 unchanged.
-        A mean-of-raw-distances metric let this pattern still score a decent
-        clip_shift (one big jump dilutes across several zero-shift pairs but
-        doesn't zero out the average) -- the fix takes the MIN across all
-        consecutive clip pairs, so any single repeated pair should drag the
-        whole score down close to 0, regardless of how many clips came before."""
-        shift_once_then_repeat = (
-            [{"aim_x": 0.2, "aim_y": 0.2, "hit": False} for _ in range(6)]      # arc1
-            + [{"aim_x": 0.8, "aim_y": 0.8, "hit": False} for _ in range(6)]    # arc2 (differs)
-            + [{"aim_x": 0.8, "aim_y": 0.8, "hit": False} for _ in range(6)]    # arc3 (repeats arc2)
-            + [{"aim_x": 0.8, "aim_y": 0.8, "hit": False} for _ in range(6)]    # arc4 (repeats arc2)
-        )
-
-        metrics = compute_miss_correction_metrics(shift_once_then_repeat)
-
-        self.assertLess(metrics["clip_shift"], 0.1)
-
-    def test_shot_slot_diversity_rewards_slot_variation_across_clips(self):
-        """If the same shot slot lands at different coordinates across clips,
-        shot_slot_diversity should be higher than for repeated identical arcs."""
-        repeated_arc = (
-            [{"aim_x": 0.20, "aim_y": 0.20, "hit": False} for _ in range(6)]
-            + [{"aim_x": 0.20, "aim_y": 0.20, "hit": False} for _ in range(6)]
-        )
-        varied_slots = [
-            # clip 1
-            {"aim_x": 0.20, "aim_y": 0.20, "hit": False},
-            {"aim_x": 0.30, "aim_y": 0.20, "hit": False},
-            {"aim_x": 0.40, "aim_y": 0.20, "hit": False},
-            {"aim_x": 0.50, "aim_y": 0.20, "hit": False},
-            {"aim_x": 0.60, "aim_y": 0.20, "hit": False},
-            {"aim_x": 0.70, "aim_y": 0.20, "hit": False},
-            # clip 2 (slot-wise shifted)
-            {"aim_x": 0.25, "aim_y": 0.25, "hit": False},
-            {"aim_x": 0.35, "aim_y": 0.25, "hit": False},
-            {"aim_x": 0.45, "aim_y": 0.25, "hit": False},
-            {"aim_x": 0.55, "aim_y": 0.25, "hit": False},
-            {"aim_x": 0.65, "aim_y": 0.25, "hit": False},
-            {"aim_x": 0.75, "aim_y": 0.25, "hit": False},
-        ]
-
-        repeated_metrics = compute_miss_correction_metrics(repeated_arc)
-        varied_metrics = compute_miss_correction_metrics(varied_slots)
-
-        self.assertGreater(
-            varied_metrics["shot_slot_diversity"],
-            repeated_metrics["shot_slot_diversity"],
-        )
-
-    def test_shot_slot_diversity_is_zero_with_fewer_than_two_clips(self):
-        one_clip = [{"aim_x": 0.4, "aim_y": 0.5, "hit": False} for _ in range(6)]
-        metrics = compute_miss_correction_metrics(one_clip)
-        self.assertEqual(metrics["shot_slot_diversity"], 0.0)
+# NOTE: MissCorrectionMetricsSuite (compute_miss_correction_metrics and its
+# CLIP_SHIFT_BONUS/SHOT_SLOT_DIVERSITY_BONUS/MISS_CORRECTION_BONUS/
+# REPEATED_MISS_PENALTY/EDGE_SCATTER_PENALTY/CENTER_CAMP_PENALTY consumers)
+# was removed 2026-09-09 during the pre-retrain dimension review (see repo
+# memory). That whole family targeted "same aim arc every reload", a symptom
+# from the pre-vision-blending era -- superseded by vision_gain now blending
+# aim toward the actual detected enemy centroid every tick.
 
 
 class MultiSpotTargetingSuite(unittest.TestCase):

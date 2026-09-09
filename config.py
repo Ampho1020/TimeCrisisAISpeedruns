@@ -500,19 +500,14 @@ PEEK_LOCK_IN_TICKS = 1
 # to run dry and learn to duck instead of dry-firing.
 AMMO_MAX_ROUNDS = 6
 
-# Penalty per tick the agent is fully exposed with an EMPTY clip (ammo_left
-# == 0 at the start of the tick) instead of ducking back into cover to
-# reload. This no longer fires just because the agent chose not to shoot --
-# only true "should have ducked, gun is empty" ticks count.
-#
-# NOTE (2026-08-04): env_timecrisis.py's step() now HARD-ENFORCES the duck
-# the instant ammo_left hits 0 (overrides the policy's own peek output --
-# see the comment there), because relying on this penalty alone to teach
-# that behavior kept failing in real training (agents mag-dumped and stayed
-# exposed anyway). With the override in place, dry_fire_ticks should always
-# be 0 in practice -- this penalty is now a harmless backstop/diagnostic, not
-# the primary mechanism. Left in place in case the override ever has a gap.
-DRY_FIRE_PENALTY = 2.0
+# Diagnostic-only counter (see dry_fire_ticks in env_timecrisis.py):
+# env_timecrisis.py's step() HARD-ENFORCES a duck the instant ammo_left hits
+# 0 (overrides the policy's own peek output), so dry_fire_ticks is always 0
+# in practice. There used to be a DRY_FIRE_PENALTY fitness weight backing
+# this up, but since it could only ever multiply by 0 it was pure dead
+# weight in the fitness formula -- removed 2026-09-09 during the pre-retrain
+# dimension review (see repo memory). dry_fire_ticks itself is kept purely
+# as a regression diagnostic (DryFireBehaviorSuite asserts it stays 0).
 
 # Bravery shaping for vision_schedule mode. Both terms are applied only when
 # an ENEMY detection is visible on the tick.
@@ -520,18 +515,6 @@ DRY_FIRE_PENALTY = 2.0
 # - COVER_HESITATION_PENALTY: stayed in cover with ammo while enemy visible.
 EXPOSED_NO_SHOT_PENALTY = 25.0
 COVER_HESITATION_PENALTY = 30.0
-
-# Miss-correction shaping: reward sequences that recover from a miss by
-# shifting aim instead of repeating the same spot, and penalize repeated
-# misses / edge-center camping patterns that tend to waste shots.
-MISS_CORRECTION_BONUS = 180.0
-REPEATED_MISS_PENALTY = 60.0
-MOVE_EPS = 0.03
-SAME_EPS = 0.015
-EDGE_BAND = 0.08
-CENTER_BAND = 0.04
-EDGE_SCATTER_PENALTY = 30.0
-CENTER_CAMP_PENALTY = 30.0
 
 # hit_delta shaping: per-frame counter of how long we've gone without a hit.
 # The counter resets to 0 on any confirmed hit and increments by 1 on every
@@ -573,29 +556,20 @@ REACTION_LATENCY_PENALTY = 60.0
 # of an already-trained checkpoint (theta_*.npy) without re-running training.
 ACCURACY_BONUS_WEIGHT = 1000.0
 
-# Direct reward for clip_shift (aim variation between consecutive magazines/
-# reloads) -- targets the "same aim arc every reload" symptom specifically.
-# Sim-validated (repo memory "Clip-shift reward probe", 2026-08-06): a 5-seed
-# x 30-gen A/B on top of the miss-correction+accuracy formula above found
-# weight=60 actually made clip_shift WORSE (0.057 -> 0.049) while weight=150
-# improved clear rate (60% -> 80%), mean_acc (0.069 -> 0.092), AND clip_shift
-# (0.057 -> 0.076) together, with no metric regressing -- a clean win, not a
-# trade-off. Earlier naive diversity-reward attempts (a reload-parity obs bit,
-# a raw clip-novelty bonus) both hurt training in prior probes, so don't
-# assume this generalizes to other diversity-reward designs without testing.
-CLIP_SHIFT_BONUS = 150.0
-
-# Direct reward for per-shot-slot diversity across clips (same shot index,
-# different coordinates). This specifically targets the "same 6-shot arch
-# every reload" behavior even when a policy still earns decent clip_shift by
-# making only occasional whole-clip moves.
-#
-# The metric is normalized in env_timecrisis.py as:
-#   mean_slot_std = mean_j sqrt(var(x_j across clips) + var(y_j across clips))
-#   shot_slot_diversity = clip(mean_slot_std / SHOT_SLOT_DIVERSITY_SCALE, 0, 1)
-# where j is shot index in the 6-shot clip.
-SHOT_SLOT_DIVERSITY_BONUS = 120.0
-SHOT_SLOT_DIVERSITY_SCALE = 0.08
+# Removed 2026-09-09 (pre-retrain dimension review, see repo memory):
+# MISS_CORRECTION_BONUS/REPEATED_MISS_PENALTY/MOVE_EPS/SAME_EPS/EDGE_BAND/
+# CENTER_BAND/EDGE_SCATTER_PENALTY/CENTER_CAMP_PENALTY and CLIP_SHIFT_BONUS/
+# SHOT_SLOT_DIVERSITY_BONUS/SHOT_SLOT_DIVERSITY_SCALE (and the whole
+# compute_miss_correction_metrics() machinery in env_timecrisis.py that fed
+# them) all sim-validated in 2026-08-06 against an era where aim was either a
+# static MLP output or a purely open-loop table with no real target-tracking
+# -- the entire point was to force artificial arc variation since the policy
+# had no way to know where the enemy actually was. That's no longer true:
+# vision_gain (see VISION_GAIN_WARMSTART) now blends aim toward the ACTUAL
+# detected enemy centroid every tick, so forcing "shift away from last aim"
+# on top of that can fight against correct behavior (penalizing the agent
+# for consistently re-aiming at a real, consistently-placed target). Dropped
+# as dead weight/architecturally-superseded rather than re-validated.
 
 # Flat bonus (NOT scaled by shots fired) awarded exactly once, on the tick
 # the agent ducks back into cover with an empty clip (ammo_left == 0).
