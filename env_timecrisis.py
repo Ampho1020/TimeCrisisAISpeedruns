@@ -401,6 +401,7 @@ class TimeCrisisEnv:
                 cursor_y_norm=normalize_cursor(
                     self.prev.get("cursor_y", CURSOR_Y_MIN), CURSOR_Y_MIN, CURSOR_Y_MAX,
                 ),
+                ammo_left_norm=self.ammo_left / AMMO_MAX_ROUNDS,
             )
             enemy_visible = any(
                 int(det.class_id) == 0 for det in (self.last_detections or [])
@@ -517,6 +518,7 @@ class TimeCrisisEnv:
                     cursor_y_norm=normalize_cursor(
                         self.prev.get("cursor_y", CURSOR_Y_MIN), CURSOR_Y_MIN, CURSOR_Y_MAX,
                     ),
+                    ammo_left_norm=self.ammo_left / AMMO_MAX_ROUNDS,
                 )
                 aim_x = min(1.0, max(0.0, 0.5 + float(aim_x_bias)))
                 aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
@@ -697,6 +699,17 @@ class TimeCrisisEnv:
             reload_correct = self.ammo_left == 0
             self.ammo_left = AMMO_MAX_ROUNDS
 
+        # Free reload at every screen transition (2026-09-10, confirmed by
+        # user): the real game always starts a new screen from cover with a
+        # full magazine, regardless of ammo left or peek state when the
+        # previous screen cleared. Without this, a screen clearing with
+        # leftover ammo would carry a STALE (lower) count into the new
+        # screen, which could wrongly trip the ammo_left==0 forced-cover
+        # override further above partway through the new screen even though
+        # the real character already has a full clip.
+        if clear_this_tick:
+            self.ammo_left = AMMO_MAX_ROUNDS
+
         self.ticks += 1
 
         phase = self.phase_infer.infer(TickSignals(
@@ -722,6 +735,14 @@ class TimeCrisisEnv:
         else:
             self.peek_ticks = 1
         self.prev_peek = peek
+        # Same free-transition reset as the ammo refill above: the new
+        # screen also always starts fully in cover, so the next tick's
+        # peek-lock/traverse bookkeeping must reflect that rather than
+        # whatever exposure state carried over from the moment of the clear.
+        if clear_this_tick:
+            self.prev_peek = False
+            self.peek_lock = 0
+            self.peek_ticks = 0
         peek_phase_next = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if peek else -1.0)
         obs = self._build_obs(
             self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left,

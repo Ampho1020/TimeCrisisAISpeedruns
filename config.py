@@ -400,6 +400,32 @@ VISION_FORCE_SHOOT_CONFIDENCE = 0.70
 # follow vision aggressively instead of staying near the open-loop base aim.
 VISION_MIN_BLEND_GAIN = 0.60
 
+# Ammo-awareness (added 2026-09-10). Real players ration a magazine across
+# multiple enemies instead of dumping it all into whichever target happens
+# to be in front of them -- this and SWITCH_LOCK_DIST_NORM below are the two
+# learned mechanisms that let the vision-schedule policy approximate that,
+# see policy.act_vision_schedule.
+#
+# Scales how strongly ammo scarcity can suppress (or, if ES learns a
+# positive gain, encourage) firing, same additive-nudge shape as
+# SHOOT_DETECTION_SCALE above:
+#   ... + AMMO_CONSERVE_SCALE * ammo_gain * (1 - ammo_left_norm)
+# ammo_left_norm = ammo_left / AMMO_MAX_ROUNDS, so the term is 0 with a full
+# clip and grows toward AMMO_CONSERVE_SCALE * ammo_gain as the clip empties.
+AMMO_CONSERVE_SCALE = 1.5
+
+# Normalized screen-space distance (0-1, same units as detection cx_norm/
+# cy_norm) below which the cursor counts as "already locked onto" the
+# current best-scoring detection -- i.e. the aim has been tracking/settled
+# on this same spot for a while (repeated blending pulls the cursor toward
+# a persistently-visible target over consecutive ticks). Used by
+# switch_gain in policy.act_vision_schedule to decide whether to swap to
+# the second-best-scoring detection instead of continuing to spend ammo on
+# a target the aim has already converged onto. Smaller = only counts as
+# "locked on" when the cursor is very tightly settled on the target;
+# larger = triggers a possible switch sooner.
+SWITCH_LOCK_DIST_NORM = 0.15
+
 # Vision-target aim offset for ENEMY detections. The detector supplies both
 # centroid and aim target; for enemies we bias toward upper torso/head instead
 # of geometric center so limb/shield center-mass misses happen less often.
@@ -674,9 +700,18 @@ GUNCON_CALIB = {
     "center_x": 0.5,
     "center_y": 0.5,
 
-    # Identity mapping so vision target coordinates map 1:1 to the cursor.
-    # If extreme-edge tearing returns, step down slightly (e.g. 0.99/0.98).
-    "scale_x": 1.0,
+    # Restored 2026-09-10: was dropped to identity (1.0) on 2026-09-01 in
+    # favor of relying on policy.py's learned ``drift_gain`` alone (a
+    # per-tick correction that only activates within the outer ~17.5% of
+    # each edge -- see VISION_DRIFT_EDGE_START -- and only reached
+    # tanh(logit)~=0.24 after a full 80-gen run). Live eval showed a
+    # persistent, consistent leftward miss near the right edge -- exactly
+    # the "edge drift" this static fix was originally verified (via
+    # DuckStation) to correct. Restoring it as the base hardware-level
+    # correction; drift_gain still layers a learned fine-adjustment on top
+    # (different pipeline stage -- this corrects the raw input mapping,
+    # drift_gain corrects target-vs-cursor blend upstream of it).
+    "scale_x": 0.94,
     "scale_y": 1.0,    # Y already perfect
     "offset_x": 0.0,
     "offset_y": 0.0,

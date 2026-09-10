@@ -4,10 +4,11 @@ open-loop per-tick action-schedule alternative (see config.POLICY_MODE)."""
 import numpy as np
 
 from config import (
-    ACT_DIM, HIDDEN, MAX_TICKS, NUM_ENEMY_CLASSES, OBS_DIM,
+    ACT_DIM, AMMO_CONSERVE_SCALE, HIDDEN, MAX_TICKS, NUM_ENEMY_CLASSES, OBS_DIM,
     PEEK_DETECTION_SCALE,
     SCHEDULE_BLOCK_TICKS,
     SHOOT_DETECTION_SCALE,
+    SWITCH_LOCK_DIST_NORM,
     VISION_DRIFT_EDGE_START,
     VISION_FORCE_SHOOT_CONFIDENCE,
     VISION_MIN_BLEND_GAIN,
@@ -114,15 +115,25 @@ VISION_SCHEDULE_BLOCK_DIM = 2    # per-block: (shoot_logit, peek_logit)
 NUM_SCHEDULE_BLOCKS = (MAX_TICKS + SCHEDULE_BLOCK_TICKS - 1) // SCHEDULE_BLOCK_TICKS
 VISION_SCHEDULE_AIM_TABLE_SIZE = MAX_TICKS * VISION_SCHEDULE_AIM_DIM
 VISION_SCHEDULE_BLOCK_TABLE_SIZE = NUM_SCHEDULE_BLOCKS * VISION_SCHEDULE_BLOCK_DIM
+# 2026-09-10: added two more global scalars, ammo_gain_logit and
+# switch_gain_logit, appended after peek_gain_logit -- see the
+# "ammo-awareness" block in act_vision_schedule's docstring below. Both are
+# zero-init-safe (gain=0 reproduces old behaviour byte-identically), but
+# this is still a breaking layout change (PARAM_COUNT grew by 2) --
+# existing theta_*.npy checkpoints are NOT compatible and must be
+# discarded/retrained.
 VISION_SCHEDULE_PARAM_COUNT = (
     VISION_SCHEDULE_AIM_TABLE_SIZE + VISION_SCHEDULE_BLOCK_TABLE_SIZE
-    + NUM_ENEMY_CLASSES + 4
+    + NUM_ENEMY_CLASSES + 6
 )
-# Indexes of global scalars in tail order: vision_gain, shoot_gain, drift_gain, peek_gain.
-VISION_SCHEDULE_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 4
-SHOOT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 3
-DRIFT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 2
-PEEK_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 1
+# Indexes of global scalars in tail order:
+# vision_gain, shoot_gain, drift_gain, peek_gain, ammo_gain, switch_gain.
+VISION_SCHEDULE_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 6
+SHOOT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 5
+DRIFT_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 4
+PEEK_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 3
+AMMO_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 2
+SWITCH_GAIN_IDX = VISION_SCHEDULE_PARAM_COUNT - 1
 
 
 def _unpack(theta: np.ndarray):
@@ -185,6 +196,7 @@ def act_vision_schedule(
     detections,
     cursor_x_norm: float | None = None,
     cursor_y_norm: float | None = None,
+    ammo_left_norm: float | None = None,
 ):
     """Vision-conditioned open-loop action selection.
 
@@ -213,15 +225,24 @@ def act_vision_schedule(
                 blending detection PRESENCE into the peek (exposure) decision
                 -- same idea as shoot_gain, but for whether to come OUT of
                 cover at all.
+            * ``AMMO_GAIN_IDX``: one shared ``ammo_gain_logit`` scalar,
+                letting ammo scarcity suppress (or encourage) firing.
+            * ``SWITCH_GAIN_IDX``: one shared ``switch_gain_logit`` scalar,
+                letting ammo scarcity + "cursor already settled on this
+                target" bias target selection toward the second-best
+                detection instead of the best one.
 
     ``detections`` is a list of ``detector.Detection`` objects (may be
     empty). With zero-init ``vision_gain``/``shoot_gain``/``peek_gain``/
-    ``class_priority`` this reproduces plain schedule-mode behaviour exactly
-    on generation 0.
+    ``ammo_gain``/``switch_gain``/``class_priority`` this reproduces plain
+    schedule-mode behaviour exactly on generation 0.
 
     If detections are present, we score each one by
-    ``confidence * softmax(class_priority)[class_id]`` and pick the top
-    scorer (``best_det``). That drives THREE independent blends:
+    ``confidence * softmax(class_priority)[class_id]`` and rank them --
+    ``best_det`` is the top scorer, ``second_det`` the runner-up (if any).
+    An ammo-aware target-switch check (see 4. below) may swap ``best_det``
+    for ``second_det`` before the shoot/peek/aim blends run. That drives
+    FOUR independent blends:
 
     1. Shoot -- a +1/-1 nudge (present/absent) scaled by shoot_gain, added
        to the tick's base shoot_logit before the threshold:
@@ -232,6 +253,8 @@ def act_vision_schedule(
        This is what lets the trigger react to "is a target actually in
        view right now" instead of firing purely on the open-loop tick
        schedule (see the 2026-08-17 note above VISION_SCHEDULE_BLOCK_DIM).
+       On top of this, an ammo-conservation term (see 4. below) can
+       additionally suppress or encourage firing based on ammo scarcity.
 
     2. Peek -- the SAME shape of nudge, scaled by peek_gain, added to the
        tick's base peek_logit before the threshold:
@@ -254,6 +277,41 @@ def act_vision_schedule(
         blended_x_01 = clip(base_x_01 + gain * (det.cx_norm - base_x_01), 0, 1)
         aim_x_bias = blended_x_01 - 0.5                # env re-adds 0.5
 
+    4. Ammo-awareness (added 2026-09-10) -- two learned mechanisms so the
+       agent can ration its magazine across multiple enemies the way a
+       real player would, instead of always dumping every round into
+       whichever target currently scores highest:
+
+           ammo_gain = tanh(ammo_gain_logit)                        # in [-1, 1]
+           ammo_scarcity = 1.0 - ammo_left_norm                     # in [0, 1], 0 = full clip
+           shoot_logit += AMMO_CONSERVE_SCALE * ammo_gain * ammo_scarcity
+
+       lets ES learn to hold fire (negative ammo_gain) as the clip empties,
+       reserving rounds for a better shot, or -- if ES finds it more
+       effective -- fire more freely as ammo drops (positive ammo_gain,
+       "use it or lose it" before a reload).
+
+       Separately, since detections carry no identity across frames (no
+       per-enemy tracking), we can't directly ask "have I already put N
+       rounds into THIS specific enemy". Instead we use the cursor's
+       CURRENT position as a proxy for "how long have I been aimed at the
+       current best target" -- repeated blending pulls the cursor toward a
+       persistently-visible target over consecutive ticks, so a cursor
+       already resting very close to best_det implies it's been the
+       target for a while:
+
+           switch_gain = tanh(switch_gain_logit)                    # in [-1, 1]
+           dist = ||cursor - best_det position||                    # normalized screen units
+           closeness = clip(1 - dist / SWITCH_LOCK_DIST_NORM, 0, 1)  # 1 = cursor already settled on it
+           switch_score = switch_gain * closeness * ammo_scarcity
+           if switch_score > 0 and a second_det exists: target second_det instead of best_det
+
+       This only ever fires when there IS a second valid detection to
+       switch to, so with one enemy on screen it's a no-op regardless of
+       switch_gain. Both terms are zero when ``ammo_left_norm`` is not
+       supplied (e.g. older call sites/tests), matching the zero-init
+       safety pattern used by every other gain here.
+
     Returning the biases in [-1, 1] keeps the contract identical to
     ``act()`` / ``act_schedule()`` so ``env_timecrisis.step`` doesn't need a
     special case for aim conversion. Negative gain lets ES also learn to
@@ -275,27 +333,61 @@ def act_vision_schedule(
     shoot_gain = float(np.tanh(theta[SHOOT_GAIN_IDX]))
     drift_gain = float(np.tanh(theta[DRIFT_GAIN_IDX]))
     peek_gain = float(np.tanh(theta[PEEK_GAIN_IDX]))
+    ammo_gain = float(np.tanh(theta[AMMO_GAIN_IDX]))
+    switch_gain = float(np.tanh(theta[SWITCH_GAIN_IDX]))
 
     # Score every detection (if any) up front -- best_det feeds BOTH the
     # shoot decision below and the aim blend, so "no valid target" is
     # handled identically (best_det is None) whether detections was empty
-    # or every entry had an out-of-range class_id.
+    # or every entry had an out-of-range class_id. second_det (runner-up
+    # score) is tracked alongside for the ammo-aware target-switch below.
     best_det = None
     best_conf = 0.0
+    second_det = None
+    second_conf = 0.0
     if detections:
         priority_start = VISION_SCHEDULE_AIM_TABLE_SIZE + VISION_SCHEDULE_BLOCK_TABLE_SIZE
         priority_raw = theta[priority_start:priority_start + NUM_ENEMY_CLASSES]
         priority = _softmax(np.asarray(priority_raw, dtype=np.float64))
         best_score = -np.inf
+        second_score = -np.inf
         for det in detections:
             cid = int(det.class_id)
             if cid < 0 or cid >= NUM_ENEMY_CLASSES:
                 continue
             score = float(det.confidence) * float(priority[cid])
             if score > best_score:
+                second_score, second_det, second_conf = best_score, best_det, best_conf
                 best_score = score
                 best_det = det
                 best_conf = float(det.confidence)
+            elif score > second_score:
+                second_score = score
+                second_det = det
+                second_conf = float(det.confidence)
+
+    # Ammo-aware target switch: if the cursor is already sitting right on
+    # top of best_det (implying it's been the target for a while) and ammo
+    # is running low, bias toward spreading remaining rounds onto the
+    # runner-up detection instead of continuing to spend them on the same
+    # target. See "4. Ammo-awareness" in the docstring above.
+    ammo_scarcity = 0.0
+    if ammo_left_norm is not None:
+        ammo_scarcity = float(np.clip(1.0 - ammo_left_norm, 0.0, 1.0))
+    if (
+        best_det is not None
+        and second_det is not None
+        and ammo_scarcity > 0.0
+        and cursor_x_norm is not None
+        and cursor_y_norm is not None
+    ):
+        best_x = float(getattr(best_det, "aim_x_norm", best_det.cx_norm))
+        best_y = float(getattr(best_det, "aim_y_norm", best_det.cy_norm))
+        dist = float(np.hypot(cursor_x_norm - best_x, cursor_y_norm - best_y))
+        closeness = float(np.clip(1.0 - dist / SWITCH_LOCK_DIST_NORM, 0.0, 1.0))
+        switch_score = switch_gain * closeness * ammo_scarcity
+        if switch_score > 0.0:
+            best_det, best_conf = second_det, second_conf
 
     # Shoot: base open-loop logit plus a confidence-shaped additive nudge.
     # Safety behavior for existing checkpoints:
@@ -306,7 +398,11 @@ def act_vision_schedule(
     detection_term = 0.0
     if best_det is not None:
         detection_term = float(np.clip(best_conf, 0.0, 1.0))
-    shoot_logit = base_shoot_logit + SHOOT_DETECTION_SCALE * shoot_gain * detection_term
+    shoot_logit = (
+        base_shoot_logit
+        + SHOOT_DETECTION_SCALE * shoot_gain * detection_term
+        + AMMO_CONSERVE_SCALE * ammo_gain * ammo_scarcity
+    )
     shoot = bool(shoot_logit > 0.0)
 
     # Peek: same shape of confidence-shaped additive nudge as shoot above,
