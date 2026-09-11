@@ -20,6 +20,7 @@ class RamMap:
     life:        int = 0x0B20C0
     cursor_x:    int = 0x0B1C74
     cursor_y:    int = 0x0B1C78
+    ammo:        int = 0x0B1DDC  # rounds remaining in the current clip (found 2026-09-11)
 
 RAM = RamMap()
 
@@ -541,9 +542,15 @@ PEEK_LOCK_IN_TICKS = 1
 # flat, count-independent event reward, see below) touch shooting behaviour.
 
 # Rounds per clip. Time Crisis' Guncon always starts a screen with a full 6-
-# round clip; we mirror that in software (ammo_left is not read from RAM --
-# there's no known counter for it) so the policy can observe when it's about
-# to run dry and learn to duck instead of dry-firing.
+# round clip; ammo_left is read directly from RAM (RAM.ammo, found 2026-09-11)
+# so the policy can observe when it's about to run dry and learn to duck
+# instead of dry-firing. Previously this was software-simulated (decrement on
+# shot, instant refill to full the moment the character started ducking) --
+# that instant refill, combined with the short PEEK_LOCK_IN_TICKS duck-hold,
+# let agents pop back out of cover before the real in-game reload animation
+# actually finished (software said "full" well before the real clip was).
+# Reading the true RAM value in env_timecrisis.py's _read_core() removes that
+# whole class of bug regardless of how long the real reload actually takes.
 AMMO_MAX_ROUNDS = 6
 
 # Diagnostic-only counter (see dry_fire_ticks in env_timecrisis.py):

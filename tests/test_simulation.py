@@ -77,9 +77,11 @@ class SimulatedGame:
       * a magazine capped at AMMO_MAX_ROUNDS: once empty, further trigger
         pulls have no game-side effect (no shots_fired/shots_hit increment)
         until the character ducks back into cover, which reloads a full clip.
-        This is an independent implementation from env_timecrisis.py's own
-        software ammo_left tracker -- if the two ever disagree it signals a
-        real bug rather than the sim just trivially agreeing with itself.
+        env_timecrisis.py no longer simulates ammo in software (2026-09-11) --
+        it reads this same ``self.ammo`` counter back via RAM.ammo through
+        read_u16() below, exactly as it reads real hardware RAM in
+        production, so this sim value IS the single source of truth rather
+        than a second independent tracker.
       * incoming damage while exposed
       * death (life == 0) and timeout (timer <= TIMEOUT_THRESHOLD)
     """
@@ -195,6 +197,7 @@ class SimulatedGame:
         if addr == RAM.shots_hit:   return self.shots_hit
         if addr == RAM.timer:       return self.timer
         if addr == RAM.life:        return self.life
+        if addr == RAM.ammo:        return self.ammo
         if addr == RAM.cursor_x:
             return int(round(CURSOR_X_MIN + self._aim_x * (CURSOR_X_MAX - CURSOR_X_MIN)))
         if addr == RAM.cursor_y:
@@ -423,6 +426,7 @@ class TimedSpotGame:
         if addr == RAM.shots_hit:   return self.shots_hit
         if addr == RAM.timer:       return self.timer
         if addr == RAM.life:        return self.life
+        if addr == RAM.ammo:        return self.ammo
         if addr == RAM.cursor_x:
             return int(round(CURSOR_X_MIN + self._aim_x * (CURSOR_X_MAX - CURSOR_X_MIN)))
         if addr == RAM.cursor_y:
