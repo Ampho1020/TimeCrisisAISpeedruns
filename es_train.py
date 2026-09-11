@@ -22,7 +22,7 @@ from config import (
 from logger import TrainingLogger
 from policy import (
     PARAM_COUNT, SCHEDULE_PARAM_COUNT, PEEK_GAIN_IDX, SHOOT_GAIN_IDX,
-    VISION_SCHEDULE_GAIN_IDX, DRIFT_GAIN_IDX,
+    VISION_SCHEDULE_GAIN_IDX, DRIFT_GAIN_IDX, AMMO_GAIN_IDX,
     VISION_SCHEDULE_PARAM_COUNT,
     VISION_SCHEDULE_AIM_TABLE_SIZE, VISION_SCHEDULE_BLOCK_DIM,
     VISION_SCHEDULE_BLOCK_TABLE_SIZE, NUM_SCHEDULE_BLOCKS,
@@ -167,6 +167,11 @@ def train(init_theta_path: str | None = None):
         theta[SHOOT_GAIN_IDX] = SHOOT_GAIN_WARMSTART  # shoot_gain -> active from gen 0
         theta[DRIFT_GAIN_IDX] = VISION_DRIFT_GAIN_WARMSTART  # drift_gain -> no correction at gen 0
         theta[PEEK_GAIN_IDX] = PEEK_GAIN_WARMSTART  # peek_gain -> active from gen 0
+        # ammo_gain -> explicit zero-init (was previously left at raw
+        # rng.normal(0, 0.1) noise from the initial theta allocation, which
+        # contradicted policy.py's documented "zero-init safety" contract
+        # for this scalar -- fixed 2026-09-11).
+        theta[AMMO_GAIN_IDX] = 0.0
     else:
         # Warm-start the shoot logit to +2 and the peek logit to +1 (asymmetric,
         # 2026-08-04). Without some positive bias, ~50% of random seeds produce a

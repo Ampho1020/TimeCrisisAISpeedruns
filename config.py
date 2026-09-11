@@ -395,36 +395,44 @@ PEEK_DETECTION_SCALE = 1.5
 # Vision-priority overrides for "shoot what you see" behavior.
 # If the top detection is at/above this confidence, bypass the blended shoot
 # logit and force shoot=True (subject to env-side ammo/peek guards).
-VISION_FORCE_SHOOT_CONFIDENCE = 0.70
+VISION_FORCE_SHOOT_CONFIDENCE = 0.50
 # Minimum blend gain when a confident detection is present. This makes aim
 # follow vision aggressively instead of staying near the open-loop base aim.
 VISION_MIN_BLEND_GAIN = 0.60
 
-# Ammo-awareness (added 2026-09-10). Real players ration a magazine across
-# multiple enemies instead of dumping it all into whichever target happens
-# to be in front of them -- this and SWITCH_LOCK_DIST_NORM below are the two
-# learned mechanisms that let the vision-schedule policy approximate that,
-# see policy.act_vision_schedule.
-#
-# Scales how strongly ammo scarcity can suppress (or, if ES learns a
+# Ammo-awareness (added 2026-09-10). Real players ration a magazine instead
+# of dumping it all into whichever target happens to be in front of them --
+# this scales how strongly ammo scarcity can suppress (or, if ES learns a
 # positive gain, encourage) firing, same additive-nudge shape as
 # SHOOT_DETECTION_SCALE above:
 #   ... + AMMO_CONSERVE_SCALE * ammo_gain * (1 - ammo_left_norm)
 # ammo_left_norm = ammo_left / AMMO_MAX_ROUNDS, so the term is 0 with a full
 # clip and grows toward AMMO_CONSERVE_SCALE * ammo_gain as the clip empties.
+#
+# A companion mechanism, switch_gain (biasing target selection toward the
+# runner-up detection as ammo got scarce, governed by a since-removed
+# SWITCH_LOCK_DIST_NORM constant), was added alongside this on 2026-09-10
+# and reverted on 2026-09-11 -- it could redirect aim onto a
+# GRENADE/PROJECTILE detection instead of another ENEMY, which caused a
+# measurable live-training regression. See policy.act_vision_schedule's
+# docstring / repo memory for details if revisiting this.
+# Second live run (2026-09-11) with switch_gain removed but ammo_gain retained
+# showed a clear improvement (clear_rate 0.875 -> 0.917, mean_acc 0.49 -> 0.53, mean_hits 3.5 -> 4.0) -- ammo-awareness is useful
+# Changed AMMO_CONSERVE_SCALE 1.5 -> 0.8 (2026-09-11), then reverted back to
+# 1.5 the same day: resumed a fresh run from the checkpoint above (tuned
+# under 1.5) while the config was already at 0.8, and observed candidates
+# sometimes not firing at all and staying exposed without ducking. Root
+# cause was NOT a code bug -- env_timecrisis.py's ammo_left==0 -> peek=False
+# override is unconditional and independent of this scale -- but reusing a
+# checkpoint whose ammo_gain was evolved/selected under 1.5 while
+# reinterpreting it at 0.8 (roughly half the effective magnitude) shifts the
+# population's effective firing threshold out from under weights ES never
+# tuned for that value, surfacing the known "stays exposed, rarely fires"
+# collapse mode discussed under SHOOT_GAIN_WARMSTART above. Reverted to 1.5
+# to match the checkpoint this was last validated against; if 0.8 (or any
+# other value) is tried again, retrain from scratch under it rather than
+# resuming an existing checkpoint tuned for a different scale.
 AMMO_CONSERVE_SCALE = 1.5
-
-# Normalized screen-space distance (0-1, same units as detection cx_norm/
-# cy_norm) below which the cursor counts as "already locked onto" the
-# current best-scoring detection -- i.e. the aim has been tracking/settled
-# on this same spot for a while (repeated blending pulls the cursor toward
-# a persistently-visible target over consecutive ticks). Used by
-# switch_gain in policy.act_vision_schedule to decide whether to swap to
-# the second-best-scoring detection instead of continuing to spend ammo on
-# a target the aim has already converged onto. Smaller = only counts as
-# "locked on" when the cursor is very tightly settled on the target;
-# larger = triggers a possible switch sooner.
-SWITCH_LOCK_DIST_NORM = 0.15
 
 # Vision-target aim offset for ENEMY detections. The detector supplies both
 # centroid and aim target; for enemies we bias toward upper torso/head instead
@@ -434,7 +442,7 @@ SWITCH_LOCK_DIST_NORM = 0.15
 ENEMY_AIM_Y_FRACTION = 0.26
 # If an enemy bbox is wide (likely shield-side posture), shift x away from
 # dead-center toward an inner-side shoulder point to avoid shielded center.
-ENEMY_SHIELD_WIDE_ASPECT = 0.90
+ENEMY_SHIELD_WIDE_ASPECT = 0.60
 # Set to 0.0 to disable lateral side-shift; top-center aiming is usually
 # safer on shielded enemies when shield orientation is not explicitly known.
 ENEMY_SHIELD_X_OFFSET_FRAC = 0.0
