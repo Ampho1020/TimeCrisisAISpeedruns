@@ -6,7 +6,8 @@ import numpy as np
 
 from bridge_client import BridgeClient
 from config import (
-    ACCURACY_BONUS_WEIGHT, AMMO_MAX_ROUNDS,
+    ACCURACY_BONUS_WEIGHT, AMMO_MAX_ROUNDS, AMMO_SHOT_COST,
+    CLEAR_ACCURACY_GATE_FLOOR, CLEAR_ACCURACY_GATE_TARGET,
     CLEAR_BONUS, CONTINUE_SCREEN_FALLBACK_TICKS,
     CONTINUE_SCREEN_STALE_TICKS, CURSOR_X_MAX,
     CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN, COVER_HESITATION_PENALTY,
@@ -14,7 +15,7 @@ from config import (
     FAIL_PENALTY,
     EXPOSED_NO_SHOT_PENALTY,
     FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
-    MAX_TICKS, MULTI_CLEAR_BONUS,
+    MAX_TICKS, MISS_PENALTY, MULTI_CLEAR_BONUS,
     PEEK_LOCK_IN_TICKS, PEEK_LOCK_OUT_TICKS, PEEK_TRAVERSE_TICKS,
     POLICY_MODE, PORT, RAM, REACTION_LATENCY_NORM_TICKS, REACTION_LATENCY_PENALTY,
     RELOAD_BONUS,
@@ -132,6 +133,14 @@ class TimeCrisisEnv:
         self.stale_core_ticks: int = 0  # consecutive ticks with identical core RAM snapshot
         self.stale_shots_life_ticks: int = 0  # consecutive ticks with frozen shots/life only (timer-independent)
         self.ammo_left: int = AMMO_MAX_ROUNDS
+        # Confirmed-empty latch: True only once RAM.ammo has been observed
+        # counting DOWN to 0 through firing (a real >0 -> 0 transition), and
+        # cleared again the moment any >0 value is read back. The hard cover
+        # override below keys off THIS, not the raw live value, so a resting 0
+        # (freshly loaded savestate still in cover, mid reload-animation frames,
+        # or a transient u16 sample) can't force the agent into cover -- that
+        # false-positive trapped the entire ES population from generation 0.
+        self.clip_empty: bool = False
         self.hit_delta: int = 0  # frames since the last confirmed hit
         self.reaction_no_shot_streak: int = 0  # ticks a target has been visible with no shot fired since
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
@@ -328,6 +337,10 @@ class TimeCrisisEnv:
         self.stale_core_ticks = 0
         self.stale_shots_life_ticks = 0
         self.ammo_left = self.prev["ammo"]
+        # Start every screen NOT confirmed-empty regardless of what RAM.ammo
+        # happens to read at the load_state instant (see __init__): the clip is
+        # only ever latched empty by an observed >0 -> 0 firing transition.
+        self.clip_empty = False
         self.hit_delta = 0
         self.reaction_no_shot_streak = 0
         self.prev_aim_x_bias = 0.0
@@ -438,7 +451,17 @@ class TimeCrisisEnv:
         # immediately. The policy is still free to choose exactly when to peek
         # out and when to duck early (e.g. before emptying the clip); this only
         # removes the strictly-dominated "stay out with 0 ammo" option.
-        if self.ammo_left == 0:
+        #
+        # 2026-09-12: this now keys off self.clip_empty (a confirmed >0 -> 0
+        # firing transition) instead of the raw live RAM.ammo value. Gating on
+        # the raw value made the override fire whenever RAM.ammo momentarily
+        # read 0 for a NON-firing reason -- a savestate loaded while still in
+        # cover, the frames during the real reload animation, or a noisy u16
+        # sample -- which pinned the whole population in a cover<->peek flicker
+        # from generation 0 (flat, negative fitness, no ES progress at all).
+        # The confirmed-empty latch only forces cover when the clip was truly
+        # shot dry, restoring the good-run behaviour.
+        if self.clip_empty:
             peek = False
 
         # Minimum hold lock: BOTH transitions (into cover and out of cover) have
@@ -488,11 +511,13 @@ class TimeCrisisEnv:
             self.prev["shots_fired"], self.prev["shots_hit"], self.prev["life"],
         )
         timer_at_tick_start = self.prev["timer"]
-        # Snapshot ammo as of the START of this tick (before the frame loop
-        # below keeps self.ammo_left continuously synced to live RAM.ammo)
-        # for the post-loop "was the clip actually empty when the agent
-        # decided to duck" diagnostics further down.
-        ammo_at_tick_start = self.ammo_left
+        # Snapshot the CONFIRMED-empty state as of the START of this tick
+        # (before the frame loop below updates self.clip_empty from live
+        # RAM.ammo transitions) for the post-loop "was the clip actually empty
+        # when the agent decided to duck" diagnostics further down. Keyed off
+        # the latch rather than a raw RAM.ammo == 0 sample so those
+        # penalties/bonuses can't fire on a spurious 0 either.
+        clip_empty_at_tick_start = self.clip_empty
 
         for f in range(FRAME_SKIP):
             # Per-frame vision refresh (eval only, see __init__): re-capture
@@ -595,6 +620,16 @@ class TimeCrisisEnv:
                 timed_out_guess = True
 
             self.prev = post
+            # Update the confirmed-empty latch from this frame's RAM.ammo
+            # transition (see self.clip_empty in __init__): any observed >0
+            # value clears it (a real refill / full clip), a >0 -> 0 step
+            # latches it (the round count actually counted down through
+            # firing), and a resting 0 -> 0 is left untouched so a savestate or
+            # reload-animation frame that simply reads 0 never latches empty.
+            if post["ammo"] > 0:
+                self.clip_empty = False
+            elif pre["ammo"] > 0:
+                self.clip_empty = True
             self.ammo_left = post["ammo"]
             # Only bail out of the inner frame loop for TERMINAL outcomes
             # (death or timeout). A clear no longer breaks: we want the
@@ -671,12 +706,15 @@ class TimeCrisisEnv:
         # ammo_left is tracked, rather than the old total_fired == 0 proxy
         # which also (wrongly) fired whenever the policy simply chose not to
         # shoot with ammo still available.
-        ammo_before_tick = ammo_at_tick_start
-        dry_fire = bool(shoot_allowed and ammo_before_tick == 0)
+        # Empty-clip checks key off the CONFIRMED-empty latch as of tick start
+        # (clip_empty_at_tick_start) rather than a raw RAM.ammo == 0 sample, so
+        # they can't mis-fire on a spurious 0 -- same rationale as the hard
+        # peek override above.
+        dry_fire = bool(shoot_allowed and clip_empty_at_tick_start)
         no_shot_exposed = bool(
-            shoot_allowed and ammo_before_tick > 0 and enemy_visible and total_fired == 0
+            shoot_allowed and (not clip_empty_at_tick_start) and enemy_visible and total_fired == 0
         )
-        hesitated_cover = bool((not peek) and ammo_before_tick > 0 and enemy_visible)
+        hesitated_cover = bool((not peek) and (not clip_empty_at_tick_start) and enemy_visible)
 
         # Reaction latency: how many ticks a target has been visible without
         # a shot being fired at it yet (see REACTION_LATENCY_PENALTY in
@@ -704,7 +742,7 @@ class TimeCrisisEnv:
         # the real game's own RAM naturally reflects a full clip once it
         # actually reloads or starts a new screen, however long that takes.
         ending_peek = (peek != self.prev_peek) and not peek
-        reload_correct = bool(ending_peek and ammo_before_tick == 0)
+        reload_correct = bool(ending_peek and clip_empty_at_tick_start)
 
         self.ticks += 1
 
@@ -846,6 +884,16 @@ class TimeCrisisEnv:
         # check screens_cleared.
         screens_cleared = int(getattr(self, "screens_cleared", 0))
 
+        # Accuracy of the whole episode, needed up-front to gate the clear
+        # reward (see CLEAR_ACCURACY_GATE_FLOOR/TARGET in config.py). Computed
+        # here rather than lower down so the dominant clear term can scale by
+        # it; the later diagnostics block reuses this same value.
+        accuracy = float(total_hits / max(total_fired, 1))
+        # Gate ramps FLOOR -> 1.0 as accuracy climbs to TARGET, then saturates.
+        clear_accuracy_gate = CLEAR_ACCURACY_GATE_FLOOR + (
+            1.0 - CLEAR_ACCURACY_GATE_FLOOR
+        ) * min(accuracy / max(CLEAR_ACCURACY_GATE_TARGET, 1e-9), 1.0)
+
         if screens_cleared > 0:
             fitness = CLEAR_BONUS - elapsed - DAMAGE_PENALTY * total_life_loss
         else:
@@ -857,6 +905,18 @@ class TimeCrisisEnv:
         # incentive to push for one more screen every time. See MULTI_CLEAR_BONUS
         # in config.py for the full "why quadratic" rationale.
         fitness += MULTI_CLEAR_BONUS * screens_cleared * screens_cleared
+        # Accuracy-gate the DOMINANT clear reward so a sloppy clear scores
+        # strictly less than a clean one (2026-09-13 Strategy A fix). Applied
+        # only on cleared episodes -- the accuracy portion of the reward earned
+        # so far (CLEAR_BONUS + MULTI_CLEAR_BONUS*screens**2, minus the elapsed/
+        # damage costs already netted in) is scaled down when accuracy is low.
+        # We scale only the positive clear component to avoid perversely
+        # *reducing* the elapsed/damage penalties at low accuracy.
+        if screens_cleared > 0:
+            clear_component = (
+                CLEAR_BONUS + MULTI_CLEAR_BONUS * screens_cleared * screens_cleared
+            )
+            fitness -= clear_component * (1.0 - clear_accuracy_gate)
         # Diagnostics only (NOT added to fitness): peek_hold_score, peek_flips
         # and ticks_in_cover used to feed reward shaping (COVER_HOLD_REWARD,
         # COVER_FLIP_PENALTY, COVER_TIME_PENALTY); that noisy shaping was
@@ -923,7 +983,7 @@ class TimeCrisisEnv:
         hit_rate_mid = float(hits_mid / max(shots_mid, 1))
         hit_rate_right = float(hits_right / max(shots_right, 1))
 
-        accuracy = float(total_hits / max(total_fired, 1))
+        accuracy = float(total_hits / max(total_fired, 1))  # already gated above
         mean_hit_delta = float(np.mean(hit_delta_per_tick)) if hit_delta_per_tick else 0.0
         mean_hit_delta_norm = mean_hit_delta / HIT_DELTA_NORM_FRAMES
         mean_reaction_latency = float(np.mean(reaction_latencies)) if reaction_latencies else 0.0
@@ -934,6 +994,15 @@ class TimeCrisisEnv:
         fitness -= REACTION_LATENCY_PENALTY * mean_reaction_latency_norm
 
         fitness += HIT_REWARD * total_hits
+        # Per-miss penalty (see MISS_PENALTY in config.py): charge each wasted
+        # shot so accuracy is directly selected for, countering the
+        # spray-and-survive optimum where misses were free.
+        fitness -= MISS_PENALTY * max(0, total_fired - total_hits)
+        # Per-shot ammo cost (see AMMO_SHOT_COST in config.py): every round
+        # fired costs fitness, hit or miss, so bullets are scarce and the agent
+        # must value trigger discipline -- the mechanical complement to the
+        # accuracy gate that caps the spray volume the RAM-ammo change enabled.
+        fitness -= AMMO_SHOT_COST * total_fired
         fitness -= EXPOSED_NO_SHOT_PENALTY * no_shot_exposed_ticks
         fitness -= COVER_HESITATION_PENALTY * hesitated_cover_ticks
         fitness += RELOAD_BONUS * reload_correct_count

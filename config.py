@@ -379,7 +379,16 @@ VISION_DRIFT_EDGE_START = 0.65
 # Larger values make the trigger react more immediately to confident
 # detections (less schedule-timed waiting). Keep moderate to avoid
 # over-firing on noisy detections.
-SHOOT_DETECTION_SCALE = 1.5
+#
+# 2026-09-13 (accuracy-regression structural fix): 1.5 -> 0.8. The incremental
+# rebalance (halved penalties + peek lock) fixed the flicker at gen 0 but ES
+# still drove accuracy flat (~0.13) by re-converging on spray-and-survive: at
+# 1.5 with a warm-started shoot_gain (~0.83), essentially ANY detection with
+# conf>~0.5 pushed shoot_logit positive, so the trigger fired almost every
+# exposed tick. Halving it makes firing far more selective (the open-loop base
+# shoot_logit and a genuinely confident target must agree), which is the
+# prerequisite for the per-miss penalty below to actually raise accuracy.
+SHOOT_DETECTION_SCALE = 0.8
 
 # Scales how strongly live detection PRESENCE can nudge the peek (cover <->
 # exposed) decision in POLICY_MODE="vision_schedule" -- same shape as
@@ -396,7 +405,14 @@ PEEK_DETECTION_SCALE = 1.5
 # Vision-priority overrides for "shoot what you see" behavior.
 # If the top detection is at/above this confidence, bypass the blended shoot
 # logit and force shoot=True (subject to env-side ammo/peek guards).
-VISION_FORCE_SHOOT_CONFIDENCE = 0.50
+# 2026-09-13 (accuracy-regression rebalance): nudged 0.50 -> 0.60 so the
+# force-fire/force-peek override only triggers on clearly-confident detections
+# instead of firing before the aim has settled on marginal (0.5) ones.
+# 2026-09-13 (structural fix): raised further 0.60 -> 0.75 -- at 0.60 the
+# override still force-fired on middling detections before the aim locked,
+# feeding the spray. 0.75 reserves the force-fire for targets we're clearly
+# on, letting the (now less aggressive) blended shoot logit govern the rest.
+VISION_FORCE_SHOOT_CONFIDENCE = 0.75
 # Minimum blend gain when a confident detection is present. This makes aim
 # follow vision aggressively instead of staying near the open-loop base aim.
 VISION_MIN_BLEND_GAIN = 0.60
@@ -461,6 +477,22 @@ DAMAGE_PENALTY     = 300.0   # deliberately harsh: a hit is never worth it
 HIT_REWARD         = 5.0     # per confirmed hit, all episodes; teaches aim
 FAIL_PENALTY       = 200.0
 
+# Per-MISS penalty (added 2026-09-13, accuracy-regression structural fix).
+# accuracy = hits / fired collapsed to ~0.13 because misses were FREE: ES
+# maximised the dominant MULTI_CLEAR_BONUS * screens**2 survival term by
+# spraying (more shots -> more chance to clear a screen) with no downside to
+# the wasted rounds. This charges each missed shot (fired - hits) a flat cost,
+# the exact inverse of the "reward raw shot count" magdump-hack the project
+# deliberately avoids -- penalising WASTE, not rewarding volume, so the agent
+# is pushed toward firing only when a shot is likely to land. Deliberately
+# moderate: HIT_REWARD is +5 per hit, so at MISS_PENALTY=4 the hit/miss terms
+# alone break even around ~44% accuracy (gold-run territory) while still
+# leaving necessary clearing fire net-positive -- kept well below a level that
+# would tip the population into the documented "never expose / never fire"
+# cover-collapse local optimum (see SIGMA note above). Tune up if accuracy
+# stays low, down if clears/exposure collapse.
+MISS_PENALTY       = 4.0
+
 # Multi-screen fitness (added 2026-08-10 alongside vision_schedule).
 # Time Crisis' Area 1 has SEVERAL discrete "screens" (cover swaps); before
 # this change the episode terminated on the FIRST screen clear (phase_infer
@@ -498,6 +530,64 @@ FAIL_PENALTY       = 200.0
 MULTI_CLEAR_BONUS = 1000.0
 SCREEN_CLEAR_TIMER_BUMP = 10
 
+# Accuracy gate on the DOMINANT clear reward (added 2026-09-13, third-pass
+# accuracy-regression fix -- "Strategy A"). Two prior fixes (peek-lock
+# re-enable + softened penalties, then MISS_PENALTY + firing selectivity)
+# both FAILED: over 13 gens accuracy stayed flat at ~0.13 while ES re-converged
+# on spray-and-survive every time. Root cause proven numerically: for a fixed
+# screen count the fitness is ~entirely (CLEAR_BONUS + MULTI_CLEAR_BONUS*
+# screens**2) -- e.g. +5000 for a 2-screen clear -- while EVERY accuracy term
+# combined (ACCURACY_BONUS_WEIGHT*acc, HIT_REWARD*hits, -MISS_PENALTY*misses)
+# moves fitness by only a few hundred points. Side-penalties can never
+# compete with a +4000 quadratic, so ES throws accuracy away for free.
+#
+# The fix makes the DOMINANT term itself care about accuracy: the clear reward
+# is multiplied by a gate that ramps from CLEAR_ACCURACY_GATE_FLOOR at 0%
+# accuracy up to 1.0 once accuracy reaches CLEAR_ACCURACY_GATE_TARGET:
+#     gate = FLOOR + (1 - FLOOR) * min(accuracy / TARGET, 1.0)
+# For a FIXED screen count a cleaner run now scores strictly higher (e.g. at
+# 2 screens: acc 0.13 -> 5000*0.60 = 3000 vs acc 0.40 -> 5000*1.0 = 5000, a
+# +2000 gradient -- comparable to an entire extra screen), so ES finally feels
+# a strong pull toward the clean-clear basin the 2026-08-17 gold run occupied
+# (which reached 33-49% acc WITH 2-4 screens, proving high acc and high screens
+# are compatible). More screens are still always preferred; they must now just
+# be cleared cleanly. FLOOR is kept above 0 so a genuinely hard screen with
+# unavoidably lower accuracy still yields net-positive clear reward and the
+# agent is never taught to stop clearing. Gate applies ONLY on cleared
+# episodes (screens>0); failed episodes keep the HIT_REWARD/MISS_PENALTY
+# gradient so pre-first-clear aim learning is unaffected. Tune FLOOR down for a
+# stronger accuracy pull, up if clearing collapses.
+#
+# 2026-09-13 SECOND TUNE (fourth-pass): FLOOR 0.40 -> 0.05 after the FLOOR=0.40
+# run (233438) STILL failed to move accuracy (flat ~0.12, slope -0.0006). At
+# FLOOR=0.40 a sloppy 2-screen clear still scored 2975 -- above a clean
+# 1-screen clear (2000) -- so ES kept spraying. At FLOOR=0.05 the sloppy
+# 2-screen clear (acc 0.10) drops to 5000*0.2875 = ~1437, now BELOW the clean
+# 1-screen (2000), finally flipping the ordering so ES is forced up the
+# accuracy gradient. FLOOR kept a hair above 0 to avoid an exactly-zero clear
+# reward degeneracy; clearing even at low accuracy still nets > -FAIL_PENALTY so
+# the agent is never taught to stop clearing. Paired with AMMO_SHOT_COST below.
+CLEAR_ACCURACY_GATE_FLOOR  = 0.05
+CLEAR_ACCURACY_GATE_TARGET = 0.40
+
+# Per-SHOT ammo cost (added 2026-09-13, fourth-pass -- "tighter ammo economy").
+# Every round fired costs fitness, hit OR miss, so bullets are a scarce
+# resource the agent must spend wisely -- the mechanical complement to the
+# accuracy gate above. Diagnosis: the agent sprays ~120 rounds/episode (~20
+# pop-duck-reload cycles at AMMO_MAX_ROUNDS=6) vs the 2026-08-17 gold run's
+# ~70-90 (~11-15 cycles); accuracy = RAM hits/fired is genuinely ~0.13 vs gold
+# 0.33-0.49. MISS_PENALTY alone only charges misses (an after-the-fact cost);
+# a flat per-shot cost also makes the agent value trigger DISCIPLINE up front
+# (don't pull unless the shot is likely to land), directly capping the spray
+# volume the RAM-ammo change (2026-09-11) let survival exploit. Sizing: at
+# HIT_REWARD=5 a hit still nets +3 after the cost, so necessary aimed fire stays
+# net-positive, while a wild shot now costs 2 (or 6 with MISS_PENALTY) -- the
+# ~120-shot spray pays ~240 on top of its miss penalty, the ~75-shot aimed run
+# only ~150. Kept moderate so the agent never under-fires into a failed clear
+# (clearing always beats -FAIL_PENALTY). Tune UP if spraying persists, DOWN if
+# clears collapse from under-firing.
+AMMO_SHOT_COST = 2.0
+
 # Peeking out is a HOLD, not a tap: the ~0.2s (~12-frame) in/out traverse only
 # completes if the button is held through it. PEEK_TRAVERSE_TICKS is a game-
 # mechanics constant -- it is NOT a reward shaping knob. It sets the
@@ -532,7 +622,18 @@ PEEK_TRAVERSE_TICKS = 3     # ticks (x FRAME_SKIP frames) to clear the traverse
 #
 # OUT controls cover -> exposed transitions (agent wants to look out).
 # IN controls exposed -> cover transitions (agent ducks/reloads).
-PEEK_LOCK_OUT_TICKS = 0
+#
+# 2026-09-13 (accuracy-regression rebalance): OUT raised 0 -> 2. At 0 the
+# lock was effectively DISABLED -- env_timecrisis.py computes
+# peek_lock = max(0, lock_ticks - 1), so both 0 (OUT) and 1 (IN) resolved to
+# a 0-tick hold, giving NO minimum dwell in either direction. That let the
+# policy pop out, fire, and duck within a single tick -- the 1-tick
+# cover<->expose flicker that drove mean_peek_flips to ~45 (vs ~25 in the
+# 2026-08-17 gold run, which held a real 3-tick lock) and helped tank
+# accuracy. OUT=2 forces at least a 2-tick exposure window (aim can settle +
+# a shot can land) before a duck is allowed, killing the pop-fire-duck
+# oscillation, while IN stays at 1 to keep re-expose latency low.
+PEEK_LOCK_OUT_TICKS = 2
 PEEK_LOCK_IN_TICKS = 1
 
 # NOTE: we deliberately do NOT reward raw shots fired (nor per-shot reload/
@@ -566,8 +667,14 @@ AMMO_MAX_ROUNDS = 6
 # an ENEMY detection is visible on the tick.
 # - EXPOSED_NO_SHOT_PENALTY: exposed with ammo but no shot landed that tick.
 # - COVER_HESITATION_PENALTY: stayed in cover with ammo while enemy visible.
-EXPOSED_NO_SHOT_PENALTY = 25.0
-COVER_HESITATION_PENALTY = 30.0
+# 2026-09-13 (accuracy-regression rebalance): both halved (25->12.5, 30->15).
+# These two "bravery" penalties reward firing-more / exposing-more, which the
+# audit tied to the spray-and-pray collapse (mean_acc ~0.13 vs the 2026-08-17
+# gold run's 0.33-0.49, which carried NEITHER penalty). Halving relieves the
+# spray pressure while still discouraging outright cowering; the accuracy is
+# meant to come back from ACCURACY_BONUS_WEIGHT + HIT_REWARD as in the gold run.
+EXPOSED_NO_SHOT_PENALTY = 12.5
+COVER_HESITATION_PENALTY = 15.0
 
 # hit_delta shaping: per-frame counter of how long we've gone without a hit.
 # The counter resets to 0 on any confirmed hit and increments by 1 on every
@@ -575,7 +682,10 @@ COVER_HESITATION_PENALTY = 30.0
 # hit_delta_norm and penalized in fitness (below) so the agent is nudged away
 # from long dry streaks.
 HIT_DELTA_NORM_FRAMES = 300.0
-HIT_DELTA_PENALTY = 80.0
+# 2026-09-13 (accuracy-regression rebalance): halved 80 -> 40. Penalizing dry
+# streaks pushes the trigger to fire faster, which dilutes accuracy -- softened
+# as part of the spray-pressure rollback (see EXPOSED_NO_SHOT_PENALTY above).
+HIT_DELTA_PENALTY = 40.0
 
 # Reaction-latency shaping (recommendation #3 from the 2026-09-09 peek_gain
 # follow-up). Neither HIT_DELTA_PENALTY above (time since the last HIT) nor
@@ -596,7 +706,10 @@ HIT_DELTA_PENALTY = 80.0
 # into mean_reaction_latency, normalizes by REACTION_LATENCY_NORM_TICKS,
 # and penalizes the result.
 REACTION_LATENCY_NORM_TICKS = 20.0
-REACTION_LATENCY_PENALTY = 60.0
+# 2026-09-13 (accuracy-regression rebalance): halved 60 -> 30. Same rationale as
+# HIT_DELTA_PENALTY above -- "fire as fast as possible" pressure trades accuracy
+# for reaction time; softened to let deliberate, aimed shots win again.
+REACTION_LATENCY_PENALTY = 30.0
 
 # Accuracy-shaped fitness bonus (rewards hit RATE, not just hit COUNT).
 # Sim-validated (repo memory "Miss-correction objective probe", 2026-08-06):

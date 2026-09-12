@@ -81,6 +81,10 @@ def main():
         print(f"damage     : {info['damage']:.0f}")
         print(f"accuracy   : {info['accuracy']:.1%} "
               f"({info['shots_hit']}/{info['shots_fired']})")
+        print(f"dry_fire   : {info['dry_fire_ticks']} ticks")
+        print(f"reload ok  : {info['reload_correct_count']}")
+        print(f"no_shot exposed : {info['no_shot_exposed_ticks']} ticks, "
+              f"hesitated cover : {info['hesitated_cover_ticks']} ticks")
         if args.dump_frames:
             print(f"frames     : {env._dump_frame_counter} saved to {args.dump_frames}")
     finally:
