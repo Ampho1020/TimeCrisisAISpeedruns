@@ -417,6 +417,22 @@ VISION_FORCE_SHOOT_CONFIDENCE = 0.75
 # follow vision aggressively instead of staying near the open-loop base aim.
 VISION_MIN_BLEND_GAIN = 0.60
 
+# Aim-on-target trigger gate (added 2026-09-13). When a detection is present,
+# the trigger only fires if the cursor is already within this normalized
+# Euclidean distance of the target's aim point -- i.e. "aim first, then shoot".
+# Motivation: run 20260913_180345 (reload fix + Torch detector) recovered
+# engagement (cover 37-55, clears 1.0-1.6) but accuracy stayed flat ~0.11 with
+# mean_aim_span ~0.70 -- the open-loop schedule kept firing while the cursor
+# careened across ~70% of the screen chasing detections, so most shots went off
+# mid-sweep. This gate converts the good detector into accuracy by suppressing
+# fire until the cursor lands on the enemy. It does NOT block firing when no
+# detection is present (the open-loop schedule still governs blind spots), and
+# the force-shoot override is also gated on it so it can't leak off-target
+# shots. cursor/target are in [0,1]x[0,1]; 0.15 ~= within 15% of the normalized
+# frame of the enemy centroid. Tunable: lower for stricter accuracy (risk
+# under-firing if aim can't reach), raise if the agent holds fire too much.
+AIM_ON_TARGET_RADIUS = 0.15
+
 # Ammo-awareness (added 2026-09-10). Real players ration a magazine instead
 # of dumping it all into whichever target happens to be in front of them --
 # this scales how strongly ammo scarcity can suppress (or, if ES learns a
@@ -657,6 +673,22 @@ PEEK_LOCK_IN_TICKS = 1
 # the RAM-ammo dependency was the cause. RAM.ammo stays defined in RamMap (used
 # only by the test sim fakes now) but no longer drives control.
 AMMO_MAX_ROUNDS = 6
+
+# Reload duration, in decision ticks (x FRAME_SKIP frames each). A reload only
+# completes after the character has been in cover (peek == False) for this many
+# CONSECUTIVE ticks -- long enough for the real duck-traverse + reload animation
+# to run in-game. 2026-09-13: added to fix a software/real DESYNC bug. The old
+# model refilled the software clip on the FIRST cover tick (a single ~5-frame
+# duck), so the agent popped straight back out believing it was full while the
+# REAL gun was still empty -- it then dry-fired ("looks out with an empty
+# magazine and spams the trigger"). Holding the reload for RELOAD_DUCK_TICKS
+# ticks keeps ammo_left == 0 until the real gun has actually reloaded; because
+# the `ammo_left == 0 -> peek = False` override in step() fires every tick while
+# empty, the agent is automatically HELD in cover for the whole reload. At
+# FRAME_SKIP=5 this is ~15 frames of cover (traverse-down ~12f + reload), which
+# matches the observed in-game reload. Tunable; raise if the gun is still empty
+# on re-expose, lower if reloads feel sluggish.
+RELOAD_DUCK_TICKS = 3
 
 # Diagnostic-only counter (see dry_fire_ticks in env_timecrisis.py):
 # env_timecrisis.py's step() HARD-ENFORCES a duck the instant ammo_left hits

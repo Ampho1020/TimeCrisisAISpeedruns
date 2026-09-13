@@ -4,7 +4,8 @@ open-loop per-tick action-schedule alternative (see config.POLICY_MODE)."""
 import numpy as np
 
 from config import (
-    ACT_DIM, AMMO_CONSERVE_SCALE, HIDDEN, MAX_TICKS, NUM_ENEMY_CLASSES, OBS_DIM,
+    ACT_DIM, AMMO_CONSERVE_SCALE, AIM_ON_TARGET_RADIUS, HIDDEN, MAX_TICKS,
+    NUM_ENEMY_CLASSES, OBS_DIM,
     PEEK_DETECTION_SCALE,
     SCHEDULE_BLOCK_TICKS,
     SHOOT_DETECTION_SCALE,
@@ -367,6 +368,25 @@ def act_vision_schedule(
     )
     shoot = bool(shoot_logit > 0.0)
 
+    # Aim-on-target trigger gate (2026-09-13, see AIM_ON_TARGET_RADIUS in
+    # config.py). "Aim first, then shoot": when we can see a target, only allow
+    # the trigger once the cursor is already within AIM_ON_TARGET_RADIUS of that
+    # target's aim point. This kills the mid-sweep spray (run 180345: aim_span
+    # ~0.70, acc ~0.11) that fired while the cursor careened toward a detection.
+    # No detection -> aim_on_target stays True so the open-loop schedule still
+    # governs firing on blind spots (never suppresses baseline schedule fire).
+    aim_on_target = True
+    if (
+        best_det is not None
+        and cursor_x_norm is not None
+        and cursor_y_norm is not None
+    ):
+        tgt_x = float(getattr(best_det, "aim_x_norm", best_det.cx_norm))
+        tgt_y = float(getattr(best_det, "aim_y_norm", best_det.cy_norm))
+        dist = float(np.hypot(float(cursor_x_norm) - tgt_x, float(cursor_y_norm) - tgt_y))
+        aim_on_target = dist <= AIM_ON_TARGET_RADIUS
+        shoot = shoot and aim_on_target
+
     # Peek: 2026-09-13 ENGAGEMENT-FIX EXPERIMENT -- restored to the gold
     # (pre-2026-09-09) schedule-only decision. The 2026-09-09 "peek reactive"
     # change added BOTH a soft peek_gain nudge (base_peek_logit +
@@ -382,7 +402,7 @@ def act_vision_schedule(
     # If clears recover in training this confirms force-peek as the cause; to
     # restore the old behavior re-add the peek_gain nudge and `peek = True`.
     peek = bool(base_peek_logit > 0.0)
-    if best_det is not None and best_conf >= VISION_FORCE_SHOOT_CONFIDENCE:
+    if best_det is not None and best_conf >= VISION_FORCE_SHOOT_CONFIDENCE and aim_on_target:
         shoot = True
 
     if best_det is None:

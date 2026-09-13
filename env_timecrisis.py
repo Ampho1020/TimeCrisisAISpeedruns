@@ -18,7 +18,7 @@ from config import (
     MAX_TICKS, MISS_PENALTY, MULTI_CLEAR_BONUS,
     PEEK_LOCK_IN_TICKS, PEEK_LOCK_OUT_TICKS, PEEK_TRAVERSE_TICKS,
     POLICY_MODE, PORT, RAM, REACTION_LATENCY_NORM_TICKS, REACTION_LATENCY_PENALTY,
-    RELOAD_BONUS,
+    RELOAD_BONUS, RELOAD_DUCK_TICKS,
     SCREEN_CLEAR_TIMER_BUMP, SHOOT_PULSE_EVERY_N_FRAMES,
     STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
     VISION_CAPTURE_EVERY_N_TICKS, VISION_DETECTOR_DEVICE, VISION_ONNX_MODEL_PATH,
@@ -37,7 +37,7 @@ def u16_delta(new_v: int, old_v: int) -> int:
         d -= 65536
     return d
 
-
+stema
 def normalize_cursor(raw_value: int, lo: int, hi: int) -> float:
     """Map inclusive cursor RAM coordinates to normalized screen space [0, 1]."""
     if hi <= lo:
@@ -133,6 +133,7 @@ class TimeCrisisEnv:
         self.stale_core_ticks: int = 0  # consecutive ticks with identical core RAM snapshot
         self.stale_shots_life_ticks: int = 0  # consecutive ticks with frozen shots/life only (timer-independent)
         self.ammo_left: int = AMMO_MAX_ROUNDS
+        self.cover_ticks: int = 0  # consecutive ticks in cover (peek False); drives the reload hold
         self.hit_delta: int = 0  # frames since the last confirmed hit
         self.reaction_no_shot_streak: int = 0  # ticks a target has been visible with no shot fired since
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
@@ -327,6 +328,7 @@ class TimeCrisisEnv:
         self.stale_core_ticks = 0
         self.stale_shots_life_ticks = 0
         self.ammo_left = AMMO_MAX_ROUNDS
+        self.cover_ticks = 0
         self.hit_delta = 0
         self.reaction_no_shot_streak = 0
         self.prev_aim_x_bias = 0.0
@@ -713,17 +715,26 @@ class TimeCrisisEnv:
         else:
             self.reaction_no_shot_streak = 0
 
-        # Ammo bookkeeping (2026-09-13: reverted to the pre-regression software
-        # model -- see AMMO_MAX_ROUNDS in config.py). Consume rounds fired this
-        # tick (only ever nonzero while shoot_allowed, i.e. fully exposed), then
-        # -- on the exact tick the character ducks back into cover -- award a
-        # flat, count-independent RELOAD_BONUS if the clip was empty, and refill
-        # to a full clip. Using a flat bonus (not scaled by shots fired) avoids
-        # incentivising magdumping just to inflate the reload reward.
+        # Ammo bookkeeping (2026-09-13: cover-based reload, fixes the software/
+        # real DESYNC that made the agent "look out with an empty magazine and
+        # spam the trigger"). Consume rounds fired this tick, then reload ONLY
+        # after the character has been in cover (peek == False) for
+        # RELOAD_DUCK_TICKS consecutive ticks -- long enough for the real
+        # duck-traverse + reload animation to actually run in-game. The previous
+        # model refilled on the FIRST cover tick (a single ~5-frame duck), so the
+        # software clip read "full" while the REAL gun was still empty; the agent
+        # popped straight back out and dry-fired. Because ammo_left stays 0 until
+        # the reload completes, the `ammo_left == 0 -> peek = False` override
+        # above keeps the agent HELD in cover for the whole reload automatically
+        # -- no separate hold state needed. RELOAD_BONUS (flat, count-independent)
+        # still fires the moment an EMPTY clip completes its reload.
         self.ammo_left = max(0, self.ammo_left - total_fired)
-        ending_peek = (peek != self.prev_peek) and not peek
+        if not peek:
+            self.cover_ticks += 1
+        else:
+            self.cover_ticks = 0
         reload_correct = False
-        if ending_peek:
+        if self.cover_ticks >= RELOAD_DUCK_TICKS and self.ammo_left < AMMO_MAX_ROUNDS:
             reload_correct = self.ammo_left == 0
             self.ammo_left = AMMO_MAX_ROUNDS
 
@@ -737,6 +748,7 @@ class TimeCrisisEnv:
         # character already has a full clip.
         if clear_this_tick:
             self.ammo_left = AMMO_MAX_ROUNDS
+            self.cover_ticks = 0
 
         self.ticks += 1
 
