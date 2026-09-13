@@ -367,18 +367,23 @@ def act_vision_schedule(
     )
     shoot = bool(shoot_logit > 0.0)
 
-    # Peek: same shape of confidence-shaped additive nudge as shoot above,
-    # so a visible target can pull the agent OUT of cover instead of
-    # waiting for the open-loop schedule's fixed exposure window. Shares
-    # the same force-override bar as shoot -- if we're confident enough to
-    # force-fire, we're confident enough to force-expose (ammo_left == 0
-    # still hard-overrides peek back to False afterward, in
-    # env_timecrisis.py).
-    peek_logit = base_peek_logit + PEEK_DETECTION_SCALE * peek_gain * detection_term
-    peek = bool(peek_logit > 0.0)
+    # Peek: 2026-09-13 ENGAGEMENT-FIX EXPERIMENT -- restored to the gold
+    # (pre-2026-09-09) schedule-only decision. The 2026-09-09 "peek reactive"
+    # change added BOTH a soft peek_gain nudge (base_peek_logit +
+    # PEEK_DETECTION_SCALE * peek_gain * detection_term) AND the hard peek
+    # force-override below (peek=True whenever best_conf >=
+    # VISION_FORCE_SHOOT_CONFIDENCE). In Time Crisis an enemy is visible nearly
+    # every tick, so both mechanisms pinned peek=True and the agent stopped
+    # ducking entirely -- cover_time 32->2, peek_flips 22->4 at warm-start,
+    # collapsing clears from 1.0 to 0.33 (see git 5133145 / repo memory). Peek
+    # now follows ONLY the open-loop schedule again, exactly as the 2026-08-17
+    # gold run did. force-SHOOT is deliberately kept. peek_gain stays in the
+    # theta layout (computed above, unused here) so checkpoint shape is stable.
+    # If clears recover in training this confirms force-peek as the cause; to
+    # restore the old behavior re-add the peek_gain nudge and `peek = True`.
+    peek = bool(base_peek_logit > 0.0)
     if best_det is not None and best_conf >= VISION_FORCE_SHOOT_CONFIDENCE:
         shoot = True
-        peek = True
 
     if best_det is None:
         # No usable target this tick -- fall back to base aim.

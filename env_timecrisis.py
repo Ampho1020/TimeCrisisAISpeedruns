@@ -133,14 +133,6 @@ class TimeCrisisEnv:
         self.stale_core_ticks: int = 0  # consecutive ticks with identical core RAM snapshot
         self.stale_shots_life_ticks: int = 0  # consecutive ticks with frozen shots/life only (timer-independent)
         self.ammo_left: int = AMMO_MAX_ROUNDS
-        # Confirmed-empty latch: True only once RAM.ammo has been observed
-        # counting DOWN to 0 through firing (a real >0 -> 0 transition), and
-        # cleared again the moment any >0 value is read back. The hard cover
-        # override below keys off THIS, not the raw live value, so a resting 0
-        # (freshly loaded savestate still in cover, mid reload-animation frames,
-        # or a transient u16 sample) can't force the agent into cover -- that
-        # false-positive trapped the entire ES population from generation 0.
-        self.clip_empty: bool = False
         self.hit_delta: int = 0  # frames since the last confirmed hit
         self.reaction_no_shot_streak: int = 0  # ticks a target has been visible with no shot fired since
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
@@ -272,7 +264,7 @@ class TimeCrisisEnv:
         if batch is not None:
             vals = batch([
                 RAM.shots_fired, RAM.shots_hit, RAM.timer,
-                RAM.life, RAM.cursor_x, RAM.cursor_y, RAM.ammo,
+                RAM.life, RAM.cursor_x, RAM.cursor_y,
             ])
             return {
                 "shots_fired": vals[0],
@@ -281,7 +273,6 @@ class TimeCrisisEnv:
                 "life":        vals[3],
                 "cursor_x":    vals[4],
                 "cursor_y":    vals[5],
-                "ammo":        vals[6],
             }
         return {
             "shots_fired": self.client.read_u16(RAM.shots_fired),
@@ -290,7 +281,6 @@ class TimeCrisisEnv:
             "life":        self.client.read_u16(RAM.life),
             "cursor_x":    self.client.read_u16(RAM.cursor_x),
             "cursor_y":    self.client.read_u16(RAM.cursor_y),
-            "ammo":        self.client.read_u16(RAM.ammo),
         }
 
     @staticmethod
@@ -336,11 +326,7 @@ class TimeCrisisEnv:
         self.peek_locked_value = False
         self.stale_core_ticks = 0
         self.stale_shots_life_ticks = 0
-        self.ammo_left = self.prev["ammo"]
-        # Start every screen NOT confirmed-empty regardless of what RAM.ammo
-        # happens to read at the load_state instant (see __init__): the clip is
-        # only ever latched empty by an observed >0 -> 0 firing transition.
-        self.clip_empty = False
+        self.ammo_left = AMMO_MAX_ROUNDS
         self.hit_delta = 0
         self.reaction_no_shot_streak = 0
         self.prev_aim_x_bias = 0.0
@@ -452,16 +438,12 @@ class TimeCrisisEnv:
         # out and when to duck early (e.g. before emptying the clip); this only
         # removes the strictly-dominated "stay out with 0 ammo" option.
         #
-        # 2026-09-12: this now keys off self.clip_empty (a confirmed >0 -> 0
-        # firing transition) instead of the raw live RAM.ammo value. Gating on
-        # the raw value made the override fire whenever RAM.ammo momentarily
-        # read 0 for a NON-firing reason -- a savestate loaded while still in
-        # cover, the frames during the real reload animation, or a noisy u16
-        # sample -- which pinned the whole population in a cover<->peek flicker
-        # from generation 0 (flat, negative fitness, no ES progress at all).
-        # The confirmed-empty latch only forces cover when the clip was truly
-        # shot dry, restoring the good-run behaviour.
-        if self.clip_empty:
+        # 2026-09-13: reverted to keying off the SOFTWARE-tracked self.ammo_left
+        # (decrement-on-shot, refill-on-duck/clear below) instead of the live
+        # RAM.ammo value / clip_empty latch. The RAM.ammo read (added 2026-09-11)
+        # coincided with the accuracy regression, so we are testing the software
+        # model in isolation as the pre-regression gold run used it.
+        if self.ammo_left == 0:
             peek = False
 
         # Minimum hold lock: BOTH transitions (into cover and out of cover) have
@@ -511,13 +493,10 @@ class TimeCrisisEnv:
             self.prev["shots_fired"], self.prev["shots_hit"], self.prev["life"],
         )
         timer_at_tick_start = self.prev["timer"]
-        # Snapshot the CONFIRMED-empty state as of the START of this tick
-        # (before the frame loop below updates self.clip_empty from live
-        # RAM.ammo transitions) for the post-loop "was the clip actually empty
-        # when the agent decided to duck" diagnostics further down. Keyed off
-        # the latch rather than a raw RAM.ammo == 0 sample so those
-        # penalties/bonuses can't fire on a spurious 0 either.
-        clip_empty_at_tick_start = self.clip_empty
+        # Snapshot ammo as of the START of this tick (before the software ammo
+        # bookkeeping below decrements it) for the post-loop "was the clip
+        # actually empty when the agent decided to duck" diagnostics further down.
+        ammo_at_tick_start = self.ammo_left
 
         for f in range(FRAME_SKIP):
             # Per-frame vision refresh (eval only, see __init__): re-capture
@@ -620,17 +599,6 @@ class TimeCrisisEnv:
                 timed_out_guess = True
 
             self.prev = post
-            # Update the confirmed-empty latch from this frame's RAM.ammo
-            # transition (see self.clip_empty in __init__): any observed >0
-            # value clears it (a real refill / full clip), a >0 -> 0 step
-            # latches it (the round count actually counted down through
-            # firing), and a resting 0 -> 0 is left untouched so a savestate or
-            # reload-animation frame that simply reads 0 never latches empty.
-            if post["ammo"] > 0:
-                self.clip_empty = False
-            elif pre["ammo"] > 0:
-                self.clip_empty = True
-            self.ammo_left = post["ammo"]
             # Only bail out of the inner frame loop for TERMINAL outcomes
             # (death or timeout). A clear no longer breaks: we want the
             # remaining frames to run so the game can start rendering the
@@ -720,15 +688,14 @@ class TimeCrisisEnv:
         # ammo_left is tracked, rather than the old total_fired == 0 proxy
         # which also (wrongly) fired whenever the policy simply chose not to
         # shoot with ammo still available.
-        # Empty-clip checks key off the CONFIRMED-empty latch as of tick start
-        # (clip_empty_at_tick_start) rather than a raw RAM.ammo == 0 sample, so
-        # they can't mis-fire on a spurious 0 -- same rationale as the hard
-        # peek override above.
-        dry_fire = bool(shoot_allowed and clip_empty_at_tick_start)
+        # Empty-clip checks key off the software ammo count as of tick start
+        # (ammo_at_tick_start), matching the pre-regression gold-run behaviour.
+        ammo_before_tick = ammo_at_tick_start
+        dry_fire = bool(shoot_allowed and ammo_before_tick == 0)
         no_shot_exposed = bool(
-            shoot_allowed and (not clip_empty_at_tick_start) and enemy_visible and total_fired == 0
+            shoot_allowed and ammo_before_tick > 0 and enemy_visible and total_fired == 0
         )
-        hesitated_cover = bool((not peek) and (not clip_empty_at_tick_start) and enemy_visible)
+        hesitated_cover = bool((not peek) and ammo_before_tick > 0 and enemy_visible)
 
         # Reaction latency: how many ticks a target has been visible without
         # a shot being fired at it yet (see REACTION_LATENCY_PENALTY in
@@ -746,17 +713,30 @@ class TimeCrisisEnv:
         else:
             self.reaction_no_shot_streak = 0
 
-        # Ammo bookkeeping (2026-09-11: switched to real RAM.ammo instead of
-        # software-simulating consumption/reload -- see AMMO_MAX_ROUNDS in
-        # config.py). self.ammo_left is now kept continuously in sync with
-        # RAM.ammo inside the frame loop above (self.ammo_left = post["ammo"]),
-        # so it already reflects the TRUE in-game clip state here -- no manual
-        # decrement, no instant "refill to full the moment peek->False" hack,
-        # and no separate free-reload-on-screen-clear special case needed:
-        # the real game's own RAM naturally reflects a full clip once it
-        # actually reloads or starts a new screen, however long that takes.
+        # Ammo bookkeeping (2026-09-13: reverted to the pre-regression software
+        # model -- see AMMO_MAX_ROUNDS in config.py). Consume rounds fired this
+        # tick (only ever nonzero while shoot_allowed, i.e. fully exposed), then
+        # -- on the exact tick the character ducks back into cover -- award a
+        # flat, count-independent RELOAD_BONUS if the clip was empty, and refill
+        # to a full clip. Using a flat bonus (not scaled by shots fired) avoids
+        # incentivising magdumping just to inflate the reload reward.
+        self.ammo_left = max(0, self.ammo_left - total_fired)
         ending_peek = (peek != self.prev_peek) and not peek
-        reload_correct = bool(ending_peek and clip_empty_at_tick_start)
+        reload_correct = False
+        if ending_peek:
+            reload_correct = self.ammo_left == 0
+            self.ammo_left = AMMO_MAX_ROUNDS
+
+        # Free reload at every screen transition (2026-09-10, confirmed by
+        # user): the real game always starts a new screen from cover with a
+        # full magazine, regardless of ammo left or peek state when the
+        # previous screen cleared. Without this, a screen clearing with
+        # leftover ammo would carry a STALE (lower) count into the new screen,
+        # which could wrongly trip the ammo_left==0 forced-cover override
+        # further above partway through the new screen even though the real
+        # character already has a full clip.
+        if clear_this_tick:
+            self.ammo_left = AMMO_MAX_ROUNDS
 
         self.ticks += 1
 
