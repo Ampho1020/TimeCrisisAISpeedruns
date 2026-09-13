@@ -674,6 +674,20 @@ class TimeCrisisEnv:
         if self.stale_core_ticks >= CONTINUE_SCREEN_STALE_TICKS:
             timed_out_guess = True
             continue_screen_guess = True
+            # Reaching here means the direct life/timer terminal checks in the
+            # frame loop MISSED a death/timeout (dead_guess/timed_out_guess were
+            # both still False when all four core counters froze). That should
+            # not normally happen -- log it so any real continue-screen escape
+            # is visible in the worker output, mirroring the slow fallback below.
+            print(
+                "[env_timecrisis] core-stale watchdog fired "
+                f"({self.stale_core_ticks} ticks, all counters frozen) -- "
+                "primary life/timer terminal check was MISSED; "
+                f"life={self.prev['life']} timer={self.prev['timer']} "
+                f"shots_fired={self.prev['shots_fired']} "
+                f"shots_hit={self.prev['shots_hit']}.",
+                flush=True,
+            )
 
         # Second, slower fallback that ignores ``timer`` entirely (see
         # CONTINUE_SCREEN_FALLBACK_TICKS in config.py): catches the case where
