@@ -567,7 +567,9 @@ SCREEN_CLEAR_TIMER_BUMP = 10
 # accuracy gradient. FLOOR kept a hair above 0 to avoid an exactly-zero clear
 # reward degeneracy; clearing even at low accuracy still nets > -FAIL_PENALTY so
 # the agent is never taught to stop clearing. Paired with AMMO_SHOT_COST below.
-CLEAR_ACCURACY_GATE_FLOOR  = 0.05
+# TEMP 2026-09-13: reverted the fourth-pass staged fix (0.05 -> 0.40) for a
+# baseline diagnostic 10-gen run. Restore to 0.05 to re-enable the harsher gate.
+CLEAR_ACCURACY_GATE_FLOOR  = 0.40
 CLEAR_ACCURACY_GATE_TARGET = 0.40
 
 # Per-SHOT ammo cost (added 2026-09-13, fourth-pass -- "tighter ammo economy").
@@ -586,7 +588,9 @@ CLEAR_ACCURACY_GATE_TARGET = 0.40
 # only ~150. Kept moderate so the agent never under-fires into a failed clear
 # (clearing always beats -FAIL_PENALTY). Tune UP if spraying persists, DOWN if
 # clears collapse from under-firing.
-AMMO_SHOT_COST = 2.0
+# TEMP 2026-09-13: disabled (2.0 -> 0.0) for the baseline diagnostic 10-gen run
+# (fitness -= 0 * total_fired is a no-op). Restore to 2.0 to re-enable.
+AMMO_SHOT_COST = 0.0
 
 # Peeking out is a HOLD, not a tap: the ~0.2s (~12-frame) in/out traverse only
 # completes if the button is held through it. PEEK_TRAVERSE_TICKS is a game-
