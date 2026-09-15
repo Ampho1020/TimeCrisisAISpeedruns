@@ -134,9 +134,17 @@ class FakeBizHawk(threading.Thread):
 
 class BridgeClientTests(unittest.TestCase):
     def test_apply_guncon_calibration_scales_x_once(self):
-        x, y = apply_guncon_calibration(1.0, 0.25)
-        self.assertAlmostEqual(x, 0.97)
-        self.assertAlmostEqual(y, 0.25)
+        # Derive the expectation from GUNCON_CALIB so this test validates the
+        # transform (applied exactly once, about center) rather than pinning a
+        # specific tuned constant -- the values are re-measured empirically by
+        # calibrate_guncon.py and may change per emulator/build.
+        from config import GUNCON_CALIB as c
+        aim_x, aim_y = 0.8, 0.25  # off-center but not at the clip edge
+        x, y = apply_guncon_calibration(aim_x, aim_y)
+        exp_x = c["center_x"] + (aim_x - c["center_x"]) * c["scale_x"] + c["offset_x"]
+        exp_y = c["center_y"] + (aim_y - c["center_y"]) * c["scale_y"] + c["offset_y"]
+        self.assertAlmostEqual(x, exp_x)
+        self.assertAlmostEqual(y, exp_y)
 
     def test_bridge_client_accepts_connection_and_sends_explicit_aim(self):
         host, port = "127.0.0.1", get_free_port()
@@ -157,7 +165,10 @@ class BridgeClientTests(unittest.TestCase):
 
         self.assertIsNone(fake.error)
         self.assertEqual(fake.commands[0], "read_u16 0x1234")
-        self.assertEqual(fake.commands[1], "set_input 1 0 0.9700 0.2500")
+        # Expected aim is whatever the live calibration produces (applied once
+        # on the send path), not a hardcoded constant -- see GUNCON_CALIB.
+        cx, cy = apply_guncon_calibration(1.0, 0.25)
+        self.assertEqual(fake.commands[1], f"set_input 1 0 {cx:.4f} {cy:.4f}")
         self.assertEqual(fake.commands[2], "frame")
 
     def test_read_u16_multi_batches_addresses_into_one_round_trip(self):

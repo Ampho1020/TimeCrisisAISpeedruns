@@ -864,21 +864,28 @@ GUNCON_CALIB = {
     "center_x": 0.5,
     "center_y": 0.5,
 
-    # Restored 2026-09-10: was dropped to identity (1.0) on 2026-09-01 in
-    # favor of relying on policy.py's learned ``drift_gain`` alone (a
-    # per-tick correction that only activates within the outer ~17.5% of
-    # each edge -- see VISION_DRIFT_EDGE_START -- and only reached
-    # tanh(logit)~=0.24 after a full 80-gen run). Live eval showed a
-    # persistent, consistent leftward miss near the right edge -- exactly
-    # the "edge drift" this static fix was originally verified (via
-    # DuckStation) to correct. Restoring it as the base hardware-level
-    # correction; drift_gain still layers a learned fine-adjustment on top
-    # (different pipeline stage -- this corrects the raw input mapping,
-    # drift_gain corrects target-vs-cursor blend upstream of it).
-    "scale_x": 0.94,
-    "scale_y": 1.0,    # Y already perfect
-    "offset_x": 0.0,
-    "offset_y": 0.0,
+    # 2026-09-15: values MEASURED empirically by calibrate_guncon.py, which
+    # drives the axes to known positions and reads the real on-screen reticle
+    # back from RAM cursor_x/cursor_y. The uncorrected device mapping (identity
+    # calibration) was, with R^2 = 1.0000 on both axes:
+    #     X:  reticle = 1.0872 * written - 0.0970
+    #     Y:  reticle = 1.0390 * written - 0.0043
+    # The dominant fault was the X OFFSET of -0.097 (a flat ~9.7% leftward shift
+    # of EVERY shot), which the previous config never corrected (offset_x=0.0);
+    # the old scale_x=0.94 additionally compressed right-side aim further left.
+    # Net: an enemy at x=0.80 landed the reticle at ~0.753 (~4.7% screen left of
+    # target) -- the "always shoots to the left of him" symptom on right-side
+    # enemies. Solving reticle(T(v)) = v for the correcting transform
+    # T(v) = center + (v-center)*scale + offset gives scale = 1/slope,
+    # offset = (0.5 - intercept)/slope - 0.5. These values make the written aim
+    # land where intended end-to-end (validated by re-running the probe). The
+    # earlier scale_x=0.94 note below is superseded -- it was a DuckStation-
+    # derived guess that did not transfer to this Nymashock/BizHawk build.
+    # policy.py's learned drift_gain still layers a fine-adjustment on top.
+    "scale_x": 0.9198,
+    "scale_y": 0.9625,
+    "offset_x": 0.0491,
+    "offset_y": -0.0146,
     "min_x": 0.0,
     "max_x": 1.0,
     "min_y": 0.0,

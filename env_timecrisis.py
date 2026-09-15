@@ -37,7 +37,7 @@ def u16_delta(new_v: int, old_v: int) -> int:
         d -= 65536
     return d
 
-stema
+
 def normalize_cursor(raw_value: int, lo: int, hi: int) -> float:
     """Map inclusive cursor RAM coordinates to normalized screen space [0, 1]."""
     if hi <= lo:
