@@ -76,6 +76,8 @@ learn to shift aim across ticks.
 | `logger.py` | CSV logger, flushes every generation |
 | `es_train.py` | ES training loop with stagnation kick |
 | `run_eval.py` | Load a checkpoint and watch one episode |
+| `inspect_vision.py` | Visualize detector output on live frames or dumped PNGs |
+| `calibrate_guncon.py` | Automated GunCon X/Y calibration probe (measures + solves the transform) |
 | `plot_progress.py` | Plot training curves from the CSV |
 | `bizhawk_bridge.lua` | Lua side: RAM reads, input injection, savestates, HUD |
 | `tests/` | Unit tests (`test_bridge_client.py`, `test_simulation.py`) |
