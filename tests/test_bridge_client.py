@@ -1,9 +1,41 @@
 import socket
+import struct
 import threading
 import time
 import unittest
 
+import numpy as np
+
 from bridge_client import BridgeClient, apply_guncon_calibration
+
+
+def _make_bmp(width: int, height: int, fill_rgb=(11, 22, 33)) -> bytes:
+    """Produce a valid uncompressed 32bpp BI_RGB BMP filled with a solid color.
+
+    Height is stored as POSITIVE (bottom-up per BMP spec, matching vision.py's
+    decode_bmp expectations). Layout mirrors what BizHawk's
+    ``comm.socketServerScreenShot`` produces (32bpp XRGB, uncompressed), so
+    FakeBizHawk can stand in for the real emulator on the receiving end.
+    """
+    row_bytes = width * 4  # already a multiple of 4 for 32bpp
+    pixel_bytes = bytearray(row_bytes * height)
+    r, g, b = fill_rgb
+    for i in range(0, len(pixel_bytes), 4):
+        pixel_bytes[i:i + 4] = bytes((b, g, r, 0))  # BGRA layout on disk
+    pixel_offset = 54
+    file_size = pixel_offset + len(pixel_bytes)
+    header = bytearray(54)
+    header[0:2] = b"BM"
+    struct.pack_into("<I", header, 2, file_size)
+    struct.pack_into("<I", header, 10, pixel_offset)
+    struct.pack_into("<I", header, 14, 40)  # DIB header size
+    struct.pack_into("<i", header, 18, width)
+    struct.pack_into("<i", header, 22, height)
+    struct.pack_into("<H", header, 26, 1)   # planes
+    struct.pack_into("<H", header, 28, 32)  # bit count
+    struct.pack_into("<I", header, 30, 0)   # BI_RGB
+    struct.pack_into("<I", header, 34, len(pixel_bytes))
+    return bytes(header) + bytes(pixel_bytes)
 
 
 def get_free_port():
@@ -31,6 +63,12 @@ class FakeBizHawk(threading.Thread):
         self.port = port
         self.commands = []
         self.error = None
+        # Optional canned screenshot response for the "screenshot" command.
+        # If set, servicing that command sends this BMP payload framed with
+        # the standard "{N} <bytes>" length prefix -- exactly mirroring
+        # BizHawk's real comm.socketServerScreenShot() behaviour (no trailing
+        # OK reply, the framed BMP IS the reply).
+        self.screenshot_bytes: bytes | None = None
 
     @staticmethod
     def _frame(payload):
@@ -71,10 +109,22 @@ class FakeBizHawk(threading.Thread):
                         sock.sendall(self._frame("ERR unknown_cmd"))
                         continue
                     self.commands.append(line)
-                    if line.startswith("read_u16 "):
+                    if line.startswith("read_u16_multi "):
+                        n = len(line.split()) - 1
+                        reply = "OK " + " ".join(str(4660 + i) for i in range(n))
+                    elif line.startswith("read_u16 "):
                         reply = "OK 4660"
                     elif line == "frame":
                         reply = "OK 99"
+                    elif line == "screenshot":
+                        # Match the real bridge: send the framed BMP as the
+                        # SOLE reply (no trailing OK). If no canned bytes are
+                        # set, fall back to a tiny default so any test that
+                        # accidentally issues "screenshot" without configuring
+                        # a payload fails loudly on decode rather than hanging.
+                        payload = self.screenshot_bytes or b""
+                        sock.sendall(f"{len(payload)} ".encode("utf-8") + payload)
+                        continue
                     else:
                         reply = "OK"
                     sock.sendall(self._frame(reply))
@@ -84,9 +134,17 @@ class FakeBizHawk(threading.Thread):
 
 class BridgeClientTests(unittest.TestCase):
     def test_apply_guncon_calibration_scales_x_once(self):
-        x, y = apply_guncon_calibration(1.0, 0.25)
-        self.assertAlmostEqual(x, 0.97)
-        self.assertAlmostEqual(y, 0.25)
+        # Derive the expectation from GUNCON_CALIB so this test validates the
+        # transform (applied exactly once, about center) rather than pinning a
+        # specific tuned constant -- the values are re-measured empirically by
+        # calibrate_guncon.py and may change per emulator/build.
+        from config import GUNCON_CALIB as c
+        aim_x, aim_y = 0.8, 0.25  # off-center but not at the clip edge
+        x, y = apply_guncon_calibration(aim_x, aim_y)
+        exp_x = c["center_x"] + (aim_x - c["center_x"]) * c["scale_x"] + c["offset_x"]
+        exp_y = c["center_y"] + (aim_y - c["center_y"]) * c["scale_y"] + c["offset_y"]
+        self.assertAlmostEqual(x, exp_x)
+        self.assertAlmostEqual(y, exp_y)
 
     def test_bridge_client_accepts_connection_and_sends_explicit_aim(self):
         host, port = "127.0.0.1", get_free_port()
@@ -107,8 +165,118 @@ class BridgeClientTests(unittest.TestCase):
 
         self.assertIsNone(fake.error)
         self.assertEqual(fake.commands[0], "read_u16 0x1234")
-        self.assertEqual(fake.commands[1], "set_input 1 0 0.9700 0.2500")
+        # Expected aim is whatever the live calibration produces (applied once
+        # on the send path), not a hardcoded constant -- see GUNCON_CALIB.
+        cx, cy = apply_guncon_calibration(1.0, 0.25)
+        self.assertEqual(fake.commands[1], f"set_input 1 0 {cx:.4f} {cy:.4f}")
         self.assertEqual(fake.commands[2], "frame")
+
+    def test_read_u16_multi_batches_addresses_into_one_round_trip(self):
+        """read_u16_multi must send exactly one framed command containing
+        every address (proving it's a single round trip, not N separate
+        read_u16 calls) and parse the space-separated reply back into a
+        list in the same order the addresses were requested."""
+        host, port = "127.0.0.1", get_free_port()
+        fake = FakeBizHawk(host, port)
+        fake.start()
+
+        client = BridgeClient(host, port, timeout=2.0)
+        self.addCleanup(client.close)
+        client.connect()
+        fake.commands.clear()
+
+        values = client.read_u16_multi([0x1000, 0x2000, 0x3000])
+        client.close()
+        fake.join(timeout=2.0)
+
+        self.assertIsNone(fake.error)
+        self.assertEqual(len(fake.commands), 1)
+        self.assertEqual(fake.commands[0], "read_u16_multi 0x1000 0x2000 0x3000")
+        self.assertEqual(values, [4660, 4661, 4662])
+
+    def test_get_screenshot_reads_framed_bmp_and_decodes_to_rgb(self):
+        """BridgeClient.get_screenshot() must consume the length-prefixed BMP
+        exactly (no trailing OK reply, no double-framing) and hand it off to
+        vision.decode_bmp to produce a valid HxWx3 uint8 RGB array. This is
+        the Phase 1 round-trip gate for the vision plan -- if this passes,
+        the same wire code will handle the real BizHawk BMP."""
+        host, port = "127.0.0.1", get_free_port()
+        fake = FakeBizHawk(host, port)
+        fake.screenshot_bytes = _make_bmp(8, 4, fill_rgb=(11, 22, 33))
+        fake.start()
+
+        client = BridgeClient(host, port, timeout=2.0)
+        self.addCleanup(client.close)
+        client.connect()
+        fake.commands.clear()
+
+        frame = client.get_screenshot()
+        self.assertEqual(frame.shape, (4, 8, 3))
+        self.assertEqual(frame.dtype, np.uint8)
+        # Every pixel must decode to the (11, 22, 33) RGB fill regardless of
+        # bottom-up BMP row order -- catches any accidental BGR mix-up or
+        # payload-alignment bug in _recv_message_bytes.
+        self.assertTrue(np.all(frame[:, :, 0] == 11))
+        self.assertTrue(np.all(frame[:, :, 1] == 22))
+        self.assertTrue(np.all(frame[:, :, 2] == 33))
+
+        # After the screenshot, ordinary text commands must still work: the
+        # bytes primitive must have left the recv buffer empty and not
+        # de-synced the framing for the next text-mode reply.
+        self.assertEqual(client.frame(), 99)
+        client.close()
+        fake.join(timeout=2.0)
+        self.assertIsNone(fake.error)
+        self.assertEqual(fake.commands, ["screenshot", "frame"])
+
+    def test_get_screenshot_accepts_png_payload_from_real_bizhawk(self):
+        """BizHawk's ``NetworkingTakeScreenshot`` callback in MainForm.cs
+        actually returns PNG-encoded bytes, not raw BMP -- see the IMAGE
+        FORMAT NOTE on ``BridgeClient.get_screenshot``. The BMP-only
+        pre-2026-08-10 decoder blew up as
+        ``ValueError("Not a BMP file (missing 'BM' magic)")`` the first
+        time it hit a real emulator. Pin the fix (cv2.imdecode auto-
+        detects the container) so it can't regress: a framed PNG payload
+        must round-trip to the same HxWx3 uint8 RGB shape+dtype as the
+        BMP round-trip above."""
+        import cv2  # local: same lazy-import contract as
+                    # bridge_client._decode_image_bytes
+
+        # Build a real PNG in-memory (blue-green-red order is BGR for cv2)
+        rgb = np.zeros((4, 8, 3), dtype=np.uint8)
+        rgb[:, :, 0] = 200  # R
+        rgb[:, :, 1] = 100  # G
+        rgb[:, :, 2] = 50   # B
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        ok, buf = cv2.imencode(".png", bgr)
+        self.assertTrue(ok)
+        png_bytes = buf.tobytes()
+        self.assertEqual(png_bytes[:4], b"\x89PNG")  # sanity: real PNG magic
+
+        host, port = "127.0.0.1", get_free_port()
+        fake = FakeBizHawk(host, port)
+        fake.screenshot_bytes = png_bytes
+        fake.start()
+
+        client = BridgeClient(host, port, timeout=2.0)
+        self.addCleanup(client.close)
+        client.connect()
+        fake.commands.clear()
+
+        frame = client.get_screenshot()
+        self.assertEqual(frame.shape, (4, 8, 3))
+        self.assertEqual(frame.dtype, np.uint8)
+        self.assertTrue(np.all(frame[:, :, 0] == 200))
+        self.assertTrue(np.all(frame[:, :, 1] == 100))
+        self.assertTrue(np.all(frame[:, :, 2] == 50))
+
+        # And ordinary text commands still work after -- same
+        # buffer-alignment invariant the BMP test above pins.
+        self.assertEqual(client.frame(), 99)
+        client.close()
+        fake.join(timeout=2.0)
+        self.assertIsNone(fake.error)
+        self.assertEqual(fake.commands, ["screenshot", "frame"])
 
 
 class PeekHoldRewardTest(unittest.TestCase):

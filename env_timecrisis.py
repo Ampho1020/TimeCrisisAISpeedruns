@@ -1,17 +1,31 @@
-"""Scalar-only environment wrapper (v1: no vision yet)."""
+
+
+import time
 
 import numpy as np
 
 from bridge_client import BridgeClient
 from config import (
-    AMMO_MAX_ROUNDS, CLEAR_BONUS, PEEK_TRAVERSE_TICKS, DAMAGE_PENALTY,
-    CONTINUE_SCREEN_STALE_TICKS,
-    CURSOR_X_MAX, CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN,
-    DRY_FIRE_PENALTY, FAIL_PENALTY, FRAME_SKIP, HOST, HIT_REWARD, MAX_TICKS,
-    PORT, RAM, RELOAD_BONUS, STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
+    ACCURACY_BONUS_WEIGHT, AMMO_MAX_ROUNDS, AMMO_SHOT_COST,
+    CLEAR_ACCURACY_GATE_FLOOR, CLEAR_ACCURACY_GATE_TARGET,
+    CLEAR_BONUS, CONTINUE_SCREEN_FALLBACK_TICKS,
+    CONTINUE_SCREEN_STALE_TICKS, CURSOR_X_MAX,
+    CURSOR_X_MIN, CURSOR_Y_MAX, CURSOR_Y_MIN, COVER_HESITATION_PENALTY,
+    DAMAGE_PENALTY,
+    FAIL_PENALTY,
+    EXPOSED_NO_SHOT_PENALTY,
+    FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
+    MAX_TICKS, MISS_PENALTY, MULTI_CLEAR_BONUS,
+    PEEK_LOCK_IN_TICKS, PEEK_LOCK_OUT_TICKS, PEEK_TRAVERSE_TICKS,
+    POLICY_MODE, PORT, RAM, REACTION_LATENCY_NORM_TICKS, REACTION_LATENCY_PENALTY,
+    RELOAD_BONUS, RELOAD_DUCK_TICKS,
+    SCREEN_CLEAR_TIMER_BUMP, SHOOT_PULSE_EVERY_N_FRAMES,
+    STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
+    VISION_CAPTURE_EVERY_N_TICKS, VISION_DETECTOR_DEVICE, VISION_ONNX_MODEL_PATH,
+    VISION_PROFILE, VISION_PROFILE_PRINT_EVERY, VISION_TORCH_MODEL_PATH,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
-from policy import act
+from policy import act, act_schedule, act_vision_schedule
 
 
 def u16_delta(new_v: int, old_v: int) -> int:
@@ -30,6 +44,27 @@ def normalize_cursor(raw_value: int, lo: int, hi: int) -> float:
         return 0.0
     clipped = min(max(int(raw_value), lo), hi)
     return float((clipped - lo) / (hi - lo))
+
+
+def shot_phase_features(ammo_left: int) -> tuple[float, float]:
+    """Return (sin, cos) of the current shot-in-clip phase angle.
+
+    Uses shot_idx = AMMO_MAX_ROUNDS - ammo_left so the angle advances by
+    2*pi/AMMO_MAX_ROUNDS with each shot; when ammo refills back to the max
+    at the reload transition, the angle wraps back to 0 (sin=0, cos=1) --
+    same value as the first shot of a clip. Non-smooth per-shot signal
+    (see config.py OBS_DIM comment) intended to break the "same 6-shot arc
+    every clip" symptom by giving the policy an explicit cue for which
+    shot in the clip is currently loaded, independent of the smooth
+    ammo_norm ramp already in the observation.
+    """
+    idx = AMMO_MAX_ROUNDS - int(ammo_left)
+    if idx < 0:
+        idx = 0
+    elif idx >= AMMO_MAX_ROUNDS:
+        idx = AMMO_MAX_ROUNDS - 1
+    angle = 2.0 * np.pi * idx / AMMO_MAX_ROUNDS
+    return float(np.sin(angle)), float(np.cos(angle))
 
 
 def core_watchdog_snapshot(cur: dict[str, int]) -> tuple[int, int, int, int]:
@@ -70,9 +105,23 @@ def peek_hold_reward(
 
 
 class TimeCrisisEnv:
-    def __init__(self, host=HOST, port=PORT, state_slot=STATE_SLOT):
+    def __init__(self, host=HOST, port=PORT, state_slot=STATE_SLOT, per_frame_vision: bool = False):
         self.client = BridgeClient(host, port)
         self.state_slot = state_slot
+        # When True (set by run_eval.py, never by training/worker_pool.py),
+        # the vision_schedule branch below re-captures a screenshot and
+        # re-runs the detector + aim blend on EVERY raw emulator frame
+        # inside the FRAME_SKIP inner loop, instead of once per decision
+        # tick (cached across VISION_CAPTURE_EVERY_N_TICKS ticks). This makes
+        # standalone evaluation react to the freshest possible frame each
+        # 1/60s, like a human player watching the screen continuously,
+        # instead of the training-time batched cadence tuned for ES
+        # wall-clock cost. shoot/peek/base-aim still come from the fixed
+        # per-tick theta row (that granularity is inherent to the trained
+        # table and unaffected by this flag) -- only the vision-informed aim
+        # blend gets refreshed every frame. Substantially slower (many more
+        # detector calls per episode) so it's opt-in and only used for eval.
+        self.per_frame_vision = per_frame_vision
         self.phase_infer = PhaseInferer(vote_window=3)
         self.prev: dict[str, int] = {}
         self.start_timer = 0
@@ -82,11 +131,84 @@ class TimeCrisisEnv:
         self.peek_lock: int = 0   # minimum hold: any transition holds for PEEK_TRAVERSE_TICKS
         self.peek_locked_value: bool = False   # what state the lock is holding
         self.stale_core_ticks: int = 0  # consecutive ticks with identical core RAM snapshot
+        self.stale_shots_life_ticks: int = 0  # consecutive ticks with frozen shots/life only (timer-independent)
         self.ammo_left: int = AMMO_MAX_ROUNDS
+        self.cover_ticks: int = 0  # consecutive ticks in cover (peek False); drives the reload hold
+        self.hit_delta: int = 0  # frames since the last confirmed hit
+        self.reaction_no_shot_streak: int = 0  # ticks a target has been visible with no shot fired since
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
         self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
+        # Multi-screen tracking (see reset() for the full comment).
+        self.screens_cleared: int = 0
+        # Set to a directory path (via ``run_eval.py --dump-frames <dir>``) to
+        # save one PNG per decision tick during ``episode_fitness()``. Purely
+        # diagnostic / used to produce the labelling corpus for the Phase 2
+        # offline YOLO fine-tune workflow documented at the bottom of
+        # detector.py -- has NO effect on training or fitness. Default None
+        # (no capture, zero per-tick overhead).
+        self.dump_frames_dir: str | None = None
+        self._dump_frame_counter: int = 0
+        # Vision-conditioned schedule mode (POLICY_MODE="vision_schedule"):
+        # build the detector once (ONNX if VISION_ONNX_MODEL_PATH points at a
+        # real file, else the classical CV baseline -- see
+        # detector.build_detector). Every VISION_CAPTURE_EVERY_N_TICKS the
+        # env captures a fresh screenshot + refreshes ``last_detections``;
+        # between captures the cached detections are reused so we don't
+        # pay a full BMP + inference cost on every single tick. Under the
+        # other POLICY_MODEs (mlp / schedule) the detector is not built at
+        # all so the schedule/mlp code paths pay zero import/init cost.
+        if POLICY_MODE == "vision_schedule":
+            from detector import build_detector
+            self.detector = build_detector(
+                VISION_ONNX_MODEL_PATH or None,
+                torch_model_path=VISION_TORCH_MODEL_PATH or None,
+                device=VISION_DETECTOR_DEVICE,
+            )
+        else:
+            self.detector = None
+        self.last_detections: list | None = None
+        # VISION_PROFILE diagnostics (config.py): rolling per-tick timing
+        # buffers, only ever appended to when VISION_PROFILE is True (see
+        # _profile_reset/_profile_maybe_print below). Zero cost otherwise.
+        self._profile_shot_ms: list[float] = []
+        self._profile_detect_ms: list[float] = []
+        self._profile_tick_ms: list[float] = []
+        self._profile_setinput_ms: list[float] = []
+        self._profile_stepframes_ms: list[float] = []
+        self._profile_readcore_ms: list[float] = []
 
-    # -- lifecycle ------------------------------------------------------
+    def _profile_reset(self) -> None:
+        self._profile_shot_ms = []
+        self._profile_detect_ms = []
+        self._profile_tick_ms = []
+        self._profile_setinput_ms = []
+        self._profile_stepframes_ms = []
+        self._profile_readcore_ms = []
+
+    def _profile_maybe_print(self) -> None:
+        """Print a rolling mean/max timing summary every
+        VISION_PROFILE_PRINT_EVERY ticks, then clear the buffers so each
+        printed window reflects only the ticks since the last print (a live
+        rolling view, not a cumulative episode-long average)."""
+        if len(self._profile_tick_ms) < VISION_PROFILE_PRINT_EVERY:
+            return
+
+        def _stats(vals: list[float]) -> str:
+            if not vals:
+                return "n/a"
+            return f"mean={sum(vals) / len(vals):.1f}ms max={max(vals):.1f}ms"
+
+        print(
+            f"[vision_profile] tick={self.ticks} n={len(self._profile_tick_ms)} "
+            f"| screenshot {_stats(self._profile_shot_ms)} "
+            f"| detect {_stats(self._profile_detect_ms)} "
+            f"| set_input {_stats(self._profile_setinput_ms)} "
+            f"| step_frames {_stats(self._profile_stepframes_ms)} "
+            f"| read_core {_stats(self._profile_readcore_ms)} "
+            f"| full_tick {_stats(self._profile_tick_ms)}",
+            flush=True,
+        )
+        self._profile_reset()
 
     def connect(self):
         self.client.connect()
@@ -100,9 +222,59 @@ class TimeCrisisEnv:
     def close(self):
         self.client.close()
 
+    def _dump_current_frame(self) -> None:
+        """Capture one frame via the bridge and save it as a PNG under
+        ``self.dump_frames_dir``. Guarded by a broad try/except so a
+        transient screenshot failure never aborts the surrounding episode
+        or training run (this is a diagnostic path, not a fitness input).
+
+        File name pattern: ``frame_XXXXXX.png`` (six-digit zero-padded
+        tick counter) so the natural sort matches the tick order the
+        frames were captured in.
+        """
+        try:
+            import os
+            frame = self.client.get_screenshot()
+            os.makedirs(self.dump_frames_dir, exist_ok=True)
+            path = os.path.join(
+                self.dump_frames_dir,
+                f"frame_{self._dump_frame_counter:06d}.png",
+            )
+            # cv2 expects BGR; convert once.
+            import cv2
+            bgr = frame[:, :, [2, 1, 0]]
+            cv2.imwrite(path, bgr)
+            self._dump_frame_counter += 1
+        except Exception as exc:  # pragma: no cover -- diagnostic path
+            print(
+                f"[env] frame dump failed at tick {self.ticks}: {exc!r}",
+                flush=True,
+            )
+
     # -- RAM ------------------------------------------------------------
 
     def _read_core(self):
+        # Prefer a single batched round trip (BridgeClient.read_u16_multi,
+        # added 2026-09-05 -- see repo memory) over six sequential
+        # read_u16() calls: each command pays a fixed Lua-loop round-trip
+        # cost regardless of payload, so batching collapses ~75-90ms/frame
+        # down to ~13ms/frame. Falls back to individual read_u16() calls for
+        # any client that doesn't implement the batched method (e.g. the
+        # in-process simulation fakes in tests/test_simulation.py).
+        batch = getattr(self.client, "read_u16_multi", None)
+        if batch is not None:
+            vals = batch([
+                RAM.shots_fired, RAM.shots_hit, RAM.timer,
+                RAM.life, RAM.cursor_x, RAM.cursor_y,
+            ])
+            return {
+                "shots_fired": vals[0],
+                "shots_hit":   vals[1],
+                "timer":       vals[2],
+                "life":        vals[3],
+                "cursor_x":    vals[4],
+                "cursor_y":    vals[5],
+            }
         return {
             "shots_fired": self.client.read_u16(RAM.shots_fired),
             "shots_hit":   self.client.read_u16(RAM.shots_hit),
@@ -115,8 +287,11 @@ class TimeCrisisEnv:
     @staticmethod
     def _build_obs(cur, last_hit: int, last_miss: int, peek_phase: float = 0.0,
                    ammo_left: int = AMMO_MAX_ROUNDS,
-                   prev_aim_x_bias: float = 0.0, prev_aim_y_bias: float = 0.0) -> np.ndarray:
+                   prev_aim_x_bias: float = 0.0, prev_aim_y_bias: float = 0.0,
+                   hit_delta: int = 0) -> np.ndarray:
         fired = max(cur["shots_fired"], 1)
+        shot_sin, shot_cos = shot_phase_features(ammo_left)
+        hit_delta_norm = float(np.clip(hit_delta / HIT_DELTA_NORM_FRAMES, 0.0, 1.0))
         return np.array([
             cur["timer"] / 10000.0,
             cur["life"] / 100.0,
@@ -125,12 +300,15 @@ class TimeCrisisEnv:
             cur["shots_hit"] / fired,
             float(last_hit),
             float(last_miss),
+            hit_delta_norm,
             peek_phase,
             ammo_left / AMMO_MAX_ROUNDS,
             prev_aim_x_bias,
             prev_aim_y_bias,
             normalize_cursor(cur.get("cursor_x", CURSOR_X_MIN), CURSOR_X_MIN, CURSOR_X_MAX),
             normalize_cursor(cur.get("cursor_y", CURSOR_Y_MIN), CURSOR_Y_MIN, CURSOR_Y_MAX),
+            shot_sin,
+            shot_cos,
         ], dtype=np.float32)
 
     # -- episode --------------------------------------------------------
@@ -148,20 +326,97 @@ class TimeCrisisEnv:
         self.peek_lock = 0
         self.peek_locked_value = False
         self.stale_core_ticks = 0
+        self.stale_shots_life_ticks = 0
         self.ammo_left = AMMO_MAX_ROUNDS
+        self.cover_ticks = 0
+        self.hit_delta = 0
+        self.reaction_no_shot_streak = 0
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
         self.phase_infer.reset()
-        return self._build_obs(self.prev, 0, 0, 0.0, self.ammo_left, self.prev_aim_x_bias, self.prev_aim_y_bias)
+        # Multi-screen tracking (added 2026-08-10, reworked 2026-08-15). We
+        # count DISTINCT screen-clear events across the episode by comparing
+        # the timer at the END of each decision tick to what it was at the
+        # START of that same tick (see step() for why this is tick-granular,
+        # not per-frame/stateful).
+        self.screens_cleared = 0
+        # Vision state: discard the previous episode's background model
+        # (MOG2 in ClassicalDetector accumulates its own history across
+        # calls) and the cached detections. Guarded via getattr so sim
+        # subclasses that skip TimeCrisisEnv.__init__ still work.
+        detector = getattr(self, "detector", None)
+        if detector is not None:
+            detector.reset()
+        self.last_detections = None
+        self._profile_reset()
+        return self._build_obs(
+            self.prev, 0, 0, 0.0, self.ammo_left,
+            self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
+        )
 
     def step(self, theta: np.ndarray):
+        _tick_t0 = time.perf_counter() if VISION_PROFILE else 0.0
         peek_phase = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if self.prev_peek else -1.0)
-        shoot, peek, aim_x_bias, aim_y_bias = act(
-            theta, self._build_obs(
-                self.prev, 0, 0, peek_phase, self.ammo_left,
-                self.prev_aim_x_bias, self.prev_aim_y_bias,
+        enemy_visible = False
+        if POLICY_MODE == "schedule":
+            # Open-loop: action is read directly from theta[self.ticks],
+            # no observation consumed for action selection. `obs` is still
+            # built via self._build_obs(...) below purely for return-value/
+            # diagnostic parity with the closed-loop path -- not used here.
+            shoot, peek, aim_x_bias, aim_y_bias = act_schedule(theta, self.ticks)
+        elif POLICY_MODE == "vision_schedule":
+            # Vision-conditioned schedule: refresh detections on the capture
+            # cadence, then blend into the base aim via act_vision_schedule.
+            # In per_frame_vision mode (eval only) we always capture fresh
+            # here too -- this first capture backs the shoot/peek gating
+            # decision below; the frame loop further down re-captures again
+            # for every subsequent raw frame within this same tick.
+            _is_new_capture = (
+                getattr(self, "per_frame_vision", False)
+                or self.last_detections is None
+                or (self.ticks % VISION_CAPTURE_EVERY_N_TICKS) == 0
             )
-        )
+            if _is_new_capture:
+                try:
+                    if VISION_PROFILE:
+                        _t0 = time.perf_counter()
+                        frame = self.client.get_screenshot()
+                        self._profile_shot_ms.append((time.perf_counter() - _t0) * 1000.0)
+                        _t0 = time.perf_counter()
+                        self.last_detections = self.detector.detect(frame)
+                        self._profile_detect_ms.append((time.perf_counter() - _t0) * 1000.0)
+                    else:
+                        frame = self.client.get_screenshot()
+                        self.last_detections = self.detector.detect(frame)
+                except Exception as exc:  # pragma: no cover - defensive
+                    if self.last_detections is None:
+                        self.last_detections = []
+                    print(f"[env] vision capture failed: {exc!r}", flush=True)
+
+            shoot, peek, aim_x_bias, aim_y_bias = act_vision_schedule(
+                theta,
+                self.ticks,
+                self.last_detections or [],
+                cursor_x_norm=normalize_cursor(
+                    self.prev.get("cursor_x", CURSOR_X_MIN), CURSOR_X_MIN, CURSOR_X_MAX,
+                ),
+                cursor_y_norm=normalize_cursor(
+                    self.prev.get("cursor_y", CURSOR_Y_MIN), CURSOR_Y_MIN, CURSOR_Y_MAX,
+                ),
+                ammo_left_norm=self.ammo_left / AMMO_MAX_ROUNDS,
+            )
+            enemy_visible = any(
+                int(det.class_id) == 0 for det in (self.last_detections or [])
+            )
+        else:
+            shoot, peek, aim_x_bias, aim_y_bias = act(
+                theta, self._build_obs(
+                    self.prev, 0, 0, peek_phase, self.ammo_left,
+                    self.prev_aim_x_bias, self.prev_aim_y_bias,
+                    hit_delta=self.hit_delta,
+                )
+            )
         # Feed this tick's aim decision back as next tick's "previous aim" obs.
         # The policy is a plain feedforward net with no recurrence of its own;
         # without this it can't tell what it last aimed at and has no signal
@@ -184,6 +439,12 @@ class TimeCrisisEnv:
         # immediately. The policy is still free to choose exactly when to peek
         # out and when to duck early (e.g. before emptying the clip); this only
         # removes the strictly-dominated "stay out with 0 ammo" option.
+        #
+        # 2026-09-13: reverted to keying off the SOFTWARE-tracked self.ammo_left
+        # (decrement-on-shot, refill-on-duck/clear below) instead of the live
+        # RAM.ammo value / clip_empty latch. The RAM.ammo read (added 2026-09-11)
+        # coincided with the accuracy regression, so we are testing the software
+        # model in isolation as the pre-regression gold run used it.
         if self.ammo_left == 0:
             peek = False
 
@@ -198,14 +459,28 @@ class TimeCrisisEnv:
             self.peek_lock -= 1
         elif peek != self.prev_peek:
             # Any transition: lock the new state
-            self.peek_lock = PEEK_TRAVERSE_TICKS - 1  # -1 because this tick counts
+            lock_ticks = PEEK_LOCK_OUT_TICKS if peek else PEEK_LOCK_IN_TICKS
+            self.peek_lock = max(0, int(lock_ticks) - 1)  # -1 because this tick counts
             self.peek_locked_value = peek
 
-        # Gate the trigger: shots only register when the character is FULLY out of
-        # cover (A held for at least PEEK_TRAVERSE_TICKS consecutive ticks).  Firing
-        # during the transition animation silently fails in-game, so we block it here
-        # to avoid wasting the edge-trigger on a guaranteed miss.
-        shoot_allowed = peek and self.prev_peek and self.peek_ticks >= PEEK_TRAVERSE_TICKS
+        # Gate the trigger: only attempt to fire once we're not mid-transition
+        # (this tick AND last tick both chose "peek"). We used to also require
+        # self.peek_ticks >= PEEK_TRAVERSE_TICKS (a fixed, rough estimate of
+        # the ~12-frame traverse-out animation) before even sending the shoot
+        # button -- but that's an artificial delay we don't need: real
+        # in-game success/failure is decided by the emulator itself, not by
+        # us, and is read back ground-truth via shots_fired (RAM) regardless
+        # of what we assume here. Firing before the real animation completes
+        # just silently fails in-game (total_fired stays 0, no reward, no
+        # ammo consumed) -- removing the estimate only lets the agent attempt
+        # shots as early as the actual game allows instead of waiting out our
+        # guess, i.e. a "frame perfect" reload/re-expose cycle bounded by real
+        # game state (peek + ammo_left) rather than a hardcoded tick count.
+        # NOTE: this is independent from peek_lock above, which must stay --
+        # that lock prevents the AGENT from reversing the peek button mid
+        # traverse (a real in-game animation-reversal bug, confirmed live),
+        # not from firing too early.
+        shoot_allowed = peek
         # Full-range mapping: tanh bias [-1, 1] spans the full screen [0, 1].
         # Using 0.5× previously kept the cursor in [0.17, 0.83] with typical
         # small initial weights; 1.0× lets early exploration reach the edges.
@@ -213,28 +488,93 @@ class TimeCrisisEnv:
         aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
 
         total_fired = total_hit = total_life_loss = 0
-        cleared_guess = dead_guess = timed_out_guess = False
+        dead_guess = timed_out_guess = False
         continue_screen_guess = False
         tick_start_core = core_watchdog_snapshot(self.prev)
+        tick_start_shots_life = (
+            self.prev["shots_fired"], self.prev["shots_hit"], self.prev["life"],
+        )
         timer_at_tick_start = self.prev["timer"]
+        # Snapshot ammo as of the START of this tick (before the software ammo
+        # bookkeeping below decrements it) for the post-loop "was the clip
+        # actually empty when the agent decided to duck" diagnostics further down.
+        ammo_at_tick_start = self.ammo_left
 
         for f in range(FRAME_SKIP):
+            # Per-frame vision refresh (eval only, see __init__): re-capture
+            # + re-blend the aim on every raw frame after the first (which
+            # already got a fresh capture above) so aim tracks the latest
+            # frame instead of being frozen for the whole FRAME_SKIP-frame
+            # tick. shoot/peek/base-aim are NOT recomputed here -- they come
+            # from the fixed per-tick theta row and would be identical.
+            if getattr(self, "per_frame_vision", False) and POLICY_MODE == "vision_schedule" and f > 0:
+                try:
+                    if VISION_PROFILE:
+                        _t0 = time.perf_counter()
+                        frame_img = self.client.get_screenshot()
+                        self._profile_shot_ms.append((time.perf_counter() - _t0) * 1000.0)
+                        _t0 = time.perf_counter()
+                        self.last_detections = self.detector.detect(frame_img)
+                        self._profile_detect_ms.append((time.perf_counter() - _t0) * 1000.0)
+                    else:
+                        frame_img = self.client.get_screenshot()
+                        self.last_detections = self.detector.detect(frame_img)
+                except Exception as exc:  # pragma: no cover - defensive
+                    print(f"[env] per-frame vision capture failed: {exc!r}", flush=True)
+                _, _, aim_x_bias, aim_y_bias = act_vision_schedule(
+                    theta,
+                    self.ticks,
+                    self.last_detections or [],
+                    cursor_x_norm=normalize_cursor(
+                        self.prev.get("cursor_x", CURSOR_X_MIN), CURSOR_X_MIN, CURSOR_X_MAX,
+                    ),
+                    cursor_y_norm=normalize_cursor(
+                        self.prev.get("cursor_y", CURSOR_Y_MIN), CURSOR_Y_MIN, CURSOR_Y_MAX,
+                    ),
+                    ammo_left_norm=self.ammo_left / AMMO_MAX_ROUNDS,
+                )
+                aim_x = min(1.0, max(0.0, 0.5 + float(aim_x_bias)))
+                aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
+                self.prev_aim_x_bias = float(aim_x_bias)
+                self.prev_aim_y_bias = float(aim_y_bias)
+
             # Edge-trigger the shot: press briefly, release. Holding the
             # button for all 5 frames makes fire rate uncontrollable.
             # shoot_allowed ensures the trigger only fires when fully exposed.
+            pulse_every = max(2, int(SHOOT_PULSE_EVERY_N_FRAMES))
+            if VISION_PROFILE:
+                _t0 = time.perf_counter()
             self.client.set_input(
-                shoot=bool(shoot and shoot_allowed and f < 2),
+                shoot=bool(
+                    shoot
+                    and shoot_allowed
+                    and (f % pulse_every == 0)
+                ),
                 peek=peek,
                 aim_x=aim_x,
                 aim_y=aim_y,
             )
+            if VISION_PROFILE:
+                self._profile_setinput_ms.append((time.perf_counter() - _t0) * 1000.0)
 
             pre = self.prev
+            if VISION_PROFILE:
+                _t0 = time.perf_counter()
             self.client.step_frames(1)
+            if VISION_PROFILE:
+                self._profile_stepframes_ms.append((time.perf_counter() - _t0) * 1000.0)
+                _t0 = time.perf_counter()
             post = self._read_core()
+            if VISION_PROFILE:
+                self._profile_readcore_ms.append((time.perf_counter() - _t0) * 1000.0)
 
             total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
-            total_hit   += max(0, u16_delta(post["shots_hit"],   pre["shots_hit"]))
+            frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
+            total_hit += frame_hits
+            if frame_hits > 0:
+                self.hit_delta = 0
+            else:
+                self.hit_delta += 1
             life_d       = u16_delta(post["life"], pre["life"])
             if life_d < 0:
                 total_life_loss += -life_d
@@ -251,10 +591,6 @@ class TimeCrisisEnv:
             )
             if post["life"] == 0 or lethal_wrap:
                 dead_guess = True
-            # Heuristic clear detection: timer jumps discontinuously upward.
-            # Replace with a real flag if you ever find one.
-            if u16_delta(post["timer"], self.start_timer) > 100:
-                cleared_guess = True
             # Timeout: the countdown reached zero -> "continue?" screen. Detect
             # the zero-cross here (a large downward step across the tick also
             # counts, in case the timer skips the exact zero sample).
@@ -265,8 +601,32 @@ class TimeCrisisEnv:
                 timed_out_guess = True
 
             self.prev = post
-            if dead_guess or cleared_guess or timed_out_guess:
+            # Only bail out of the inner frame loop for TERMINAL outcomes
+            # (death or timeout). A clear no longer breaks: we want the
+            # remaining frames to run so the game can start rendering the
+            # NEXT screen this same tick, giving vision a fresh frame to
+            # capture next tick.
+            if dead_guess or timed_out_guess:
                 break
+
+        # Screen-clear detection (added 2026-08-10, reworked 2026-08-15):
+        # compare the timer at the END of this whole decision tick to what it
+        # was at the START of the tick -- tick-granular, not per-frame. Time
+        # Crisis' timer counts DOWN a few units/tick in normal play AND
+        # throughout the screen-to-screen transition itself (there is no
+        # "frozen" phase to key off), so a per-frame stateful "are we still
+        # inside a clear transition" flag is both unnecessary and unreliable
+        # (the timer's continuous countdown during the transition made a
+        # naive "re-arm once timer_step < 0" check fire far too early,
+        # letting a single clear's bonus roll get double-counted). The bonus
+        # roll conversion itself completes within a single tick, so one
+        # tick-level comparison against SCREEN_CLEAR_TIMER_BUMP is enough --
+        # this is also the single source of truth ``info["cleared"]`` derives
+        # from below, replacing the old separate cleared_guess heuristic.
+        tick_timer_delta = u16_delta(self.prev["timer"], timer_at_tick_start)
+        clear_this_tick = tick_timer_delta > SCREEN_CLEAR_TIMER_BUMP
+        if clear_this_tick:
+            self.screens_cleared += 1
 
         # Fallback continue/menu watchdog: if all core counters were frozen
         # across the entire decision tick, count it. Several consecutive frozen
@@ -274,7 +634,7 @@ class TimeCrisisEnv:
         # continue prompt) that escaped direct life/timer terminal detection.
         if (
             not dead_guess
-            and not cleared_guess
+            and not clear_this_tick
             and not timed_out_guess
             and core_watchdog_snapshot(self.prev) == tick_start_core
         ):
@@ -284,6 +644,45 @@ class TimeCrisisEnv:
         if self.stale_core_ticks >= CONTINUE_SCREEN_STALE_TICKS:
             timed_out_guess = True
             continue_screen_guess = True
+            # Reaching here means the direct life/timer terminal checks in the
+            # frame loop MISSED a death/timeout (dead_guess/timed_out_guess were
+            # both still False when all four core counters froze). That should
+            # not normally happen -- log it so any real continue-screen escape
+            # is visible in the worker output, mirroring the slow fallback below.
+            print(
+                "[env_timecrisis] core-stale watchdog fired "
+                f"({self.stale_core_ticks} ticks, all counters frozen) -- "
+                "primary life/timer terminal check was MISSED; "
+                f"life={self.prev['life']} timer={self.prev['timer']} "
+                f"shots_fired={self.prev['shots_fired']} "
+                f"shots_hit={self.prev['shots_hit']}.",
+                flush=True,
+            )
+
+        # Second, slower fallback that ignores ``timer`` entirely (see
+        # CONTINUE_SCREEN_FALLBACK_TICKS in config.py): catches the case where
+        # the continue-prompt countdown keeps the timer RAM address moving,
+        # which would otherwise prevent the watchdog above from ever firing.
+        current_shots_life = (
+            self.prev["shots_fired"], self.prev["shots_hit"], self.prev["life"],
+        )
+        if (
+            not dead_guess
+            and not clear_this_tick
+            and current_shots_life == tick_start_shots_life
+        ):
+            self.stale_shots_life_ticks += 1
+        else:
+            self.stale_shots_life_ticks = 0
+        if self.stale_shots_life_ticks >= CONTINUE_SCREEN_FALLBACK_TICKS:
+            timed_out_guess = True
+            continue_screen_guess = True
+            print(
+                "[env_timecrisis] shots/life-stale fallback fired "
+                f"({self.stale_shots_life_ticks} ticks) -- likely stuck on a "
+                "continue/menu screen the timer-based watchdog missed.",
+                flush=True,
+            )
 
         # Wasted exposure: penalise ticks where the agent is fully exposed with
         # an EMPTY clip (ammo_left was already 0 at the start of this tick)
@@ -291,21 +690,65 @@ class TimeCrisisEnv:
         # ammo_left is tracked, rather than the old total_fired == 0 proxy
         # which also (wrongly) fired whenever the policy simply chose not to
         # shoot with ammo still available.
-        ammo_before_tick = self.ammo_left
+        # Empty-clip checks key off the software ammo count as of tick start
+        # (ammo_at_tick_start), matching the pre-regression gold-run behaviour.
+        ammo_before_tick = ammo_at_tick_start
         dry_fire = bool(shoot_allowed and ammo_before_tick == 0)
+        no_shot_exposed = bool(
+            shoot_allowed and ammo_before_tick > 0 and enemy_visible and total_fired == 0
+        )
+        hesitated_cover = bool((not peek) and ammo_before_tick > 0 and enemy_visible)
 
-        # Ammo bookkeeping: consume rounds fired this tick (only ever nonzero
-        # while shoot_allowed, i.e. fully exposed), then -- on the exact tick
-        # the character ducks back into cover -- award a flat, count-
-        # independent RELOAD_BONUS if the clip was empty, and refill to a
-        # full clip. Using a flat bonus (not scaled by shots fired) avoids
-        # incentivising magdumping just to inflate the reload reward.
+        # Reaction latency: how many ticks a target has been visible without
+        # a shot being fired at it yet (see REACTION_LATENCY_PENALTY in
+        # config.py). Resets to 0 the instant a shot is fired while a target
+        # is visible -- reaction_latency below then reports the streak length
+        # right BEFORE that reset (0 means "fired the same tick it appeared").
+        # Also resets to 0 whenever no target is visible (nothing to react to).
+        reaction_latency = None
+        if enemy_visible:
+            if total_fired > 0:
+                reaction_latency = self.reaction_no_shot_streak
+                self.reaction_no_shot_streak = 0
+            else:
+                self.reaction_no_shot_streak += 1
+        else:
+            self.reaction_no_shot_streak = 0
+
+        # Ammo bookkeeping (2026-09-13: cover-based reload, fixes the software/
+        # real DESYNC that made the agent "look out with an empty magazine and
+        # spam the trigger"). Consume rounds fired this tick, then reload ONLY
+        # after the character has been in cover (peek == False) for
+        # RELOAD_DUCK_TICKS consecutive ticks -- long enough for the real
+        # duck-traverse + reload animation to actually run in-game. The previous
+        # model refilled on the FIRST cover tick (a single ~5-frame duck), so the
+        # software clip read "full" while the REAL gun was still empty; the agent
+        # popped straight back out and dry-fired. Because ammo_left stays 0 until
+        # the reload completes, the `ammo_left == 0 -> peek = False` override
+        # above keeps the agent HELD in cover for the whole reload automatically
+        # -- no separate hold state needed. RELOAD_BONUS (flat, count-independent)
+        # still fires the moment an EMPTY clip completes its reload.
         self.ammo_left = max(0, self.ammo_left - total_fired)
-        ending_peek = (peek != self.prev_peek) and not peek
+        if not peek:
+            self.cover_ticks += 1
+        else:
+            self.cover_ticks = 0
         reload_correct = False
-        if ending_peek:
+        if self.cover_ticks >= RELOAD_DUCK_TICKS and self.ammo_left < AMMO_MAX_ROUNDS:
             reload_correct = self.ammo_left == 0
             self.ammo_left = AMMO_MAX_ROUNDS
+
+        # Free reload at every screen transition (2026-09-10, confirmed by
+        # user): the real game always starts a new screen from cover with a
+        # full magazine, regardless of ammo left or peek state when the
+        # previous screen cleared. Without this, a screen clearing with
+        # leftover ammo would carry a STALE (lower) count into the new screen,
+        # which could wrongly trip the ammo_left==0 forced-cover override
+        # further above partway through the new screen even though the real
+        # character already has a full clip.
+        if clear_this_tick:
+            self.ammo_left = AMMO_MAX_ROUNDS
+            self.cover_ticks = 0
 
         self.ticks += 1
 
@@ -313,8 +756,14 @@ class TimeCrisisEnv:
             shots_fired_delta=total_fired,
             shots_hit_delta=total_hit,
             life_delta=-total_life_loss,
-            timer_delta=u16_delta(self.prev["timer"], timer_at_tick_start),
-            cleared_guess=cleared_guess,
+            timer_delta=tick_timer_delta,
+            # Multi-screen: a clear no longer forces Phase.TERMINAL (which is
+            # absorbing) -- we want the episode to keep running so ES can
+            # LEARN to chain screens for the quadratic MULTI_CLEAR_BONUS.
+            # Only death/timeout still end the episode; the "was there any
+            # clear" signal is captured by ``self.screens_cleared`` for the
+            # fitness formula (see info["cleared"] below).
+            cleared_guess=False,
             dead_guess=dead_guess or timed_out_guess,
             can_fire_probe=(total_fired > 0),
         ))
@@ -326,10 +775,19 @@ class TimeCrisisEnv:
         else:
             self.peek_ticks = 1
         self.prev_peek = peek
+        # Same free-transition reset as the ammo refill above: the new
+        # screen also always starts fully in cover, so the next tick's
+        # peek-lock/traverse bookkeeping must reflect that rather than
+        # whatever exposure state carried over from the moment of the clear.
+        if clear_this_tick:
+            self.prev_peek = False
+            self.peek_lock = 0
+            self.peek_ticks = 0
         peek_phase_next = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if peek else -1.0)
         obs = self._build_obs(
             self.prev, last_hit, last_miss, peek_phase_next, self.ammo_left,
             self.prev_aim_x_bias, self.prev_aim_y_bias,
+            hit_delta=self.hit_delta,
         )
 
         done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
@@ -337,18 +795,32 @@ class TimeCrisisEnv:
             "shots_fired_delta": total_fired,
             "shots_hit_delta": total_hit,
             "life_loss": total_life_loss,
-            "cleared": bool(cleared_guess and not dead_guess and not timed_out_guess),
+            # Single source of truth: derived directly from screens_cleared
+            # (no separate/second clear heuristic -- see the screen-clear
+            # detection comment above, 2026-08-15). "At least one screen
+            # cleared so far this episode", excluding a tick where the SAME
+            # tick also ended in death/timeout.
+            "cleared": bool(self.screens_cleared > 0 and not dead_guess and not timed_out_guess),
+            # Cumulative screen-clear count so far this episode.
+            "screens_cleared": int(self.screens_cleared),
             "dead": dead_guess,
             "timed_out": timed_out_guess,
             "continue_screen": continue_screen_guess,
             "peek": bool(peek),
             "phase": phase.name,
             "dry_fire": dry_fire,
+            "no_shot_exposed": no_shot_exposed,
+            "hesitated_cover": hesitated_cover,
+            "reaction_latency": reaction_latency,
             "reload_correct": reload_correct,
             "ammo_left": self.ammo_left,
+            "hit_delta": int(self.hit_delta),
             "aim_x": float(aim_x),
             "aim_y": float(aim_y),
         }
+        if VISION_PROFILE:
+            self._profile_tick_ms.append((time.perf_counter() - _tick_t0) * 1000.0)
+            self._profile_maybe_print()
         return obs, done, info
 
     def episode_fitness(self, theta: np.ndarray):
@@ -356,6 +828,8 @@ class TimeCrisisEnv:
         self.reset()
         total_hits = total_fired = total_life_loss = 0
         dry_fire_ticks = 0
+        no_shot_exposed_ticks = 0
+        hesitated_cover_ticks = 0
         reload_correct_count = 0
         cleared = False
         timed_out = dead = False
@@ -366,9 +840,17 @@ class TimeCrisisEnv:
         hits_per_tick = []
         aim_x_per_tick = []
         aim_y_per_tick = []
+        hit_delta_per_tick = []
+        reaction_latencies = []
 
         while True:
             _, done, info = self.step(theta)
+            if getattr(self, "dump_frames_dir", None) is not None:
+                # Optional per-tick frame dump for the offline YOLO fine-tune
+                # workflow (see detector.py footer). No-op unless
+                # dump_frames_dir was set on the env; getattr fallback keeps
+                # sim subclasses that skip TimeCrisisEnv.__init__ working.
+                self._dump_current_frame()
             total_hits      += info["shots_hit_delta"]
             total_fired     += info["shots_fired_delta"]
             total_life_loss += info["life_loss"]
@@ -381,17 +863,66 @@ class TimeCrisisEnv:
             hits_per_tick.append(info["shots_hit_delta"])
             aim_x_per_tick.append(info["aim_x"])
             aim_y_per_tick.append(info["aim_y"])
+            hit_delta_per_tick.append(float(info.get("hit_delta", self.hit_delta)))
             dry_fire_ticks += int(info["dry_fire"])
+            no_shot_exposed_ticks += int(info.get("no_shot_exposed", False))
+            hesitated_cover_ticks += int(info.get("hesitated_cover", False))
+            if info.get("reaction_latency") is not None:
+                reaction_latencies.append(int(info["reaction_latency"]))
             reload_correct_count += int(info["reload_correct"])
             if done:
                 break
 
-        elapsed = u16_delta(self.start_timer, self.prev["timer"])
+        # An episode ending mid-streak (a target still visible, no shot
+        # fired at it yet) would otherwise never contribute a sample --
+        # closing that loophole so a policy can't dodge this metric by
+        # simply never firing at a visible target.
+        if self.reaction_no_shot_streak > 0:
+            reaction_latencies.append(int(self.reaction_no_shot_streak))
 
-        if cleared:
+        elapsed = u16_delta(self.start_timer, self.prev["timer"])
+        # Read the cumulative screen-clear count from the env itself (not
+        # accumulated across ticks) -- self.screens_cleared is monotone within
+        # an episode and info["screens_cleared"] on the LAST tick already
+        # holds the final total. This is now the SOLE clear signal (info
+        # ["cleared"]/``cleared`` above is just a derived view of it -- see
+        # step()'s 2026-08-15 comment), so the branch below only needs to
+        # check screens_cleared.
+        screens_cleared = int(getattr(self, "screens_cleared", 0))
+
+        # Accuracy of the whole episode, needed up-front to gate the clear
+        # reward (see CLEAR_ACCURACY_GATE_FLOOR/TARGET in config.py). Computed
+        # here rather than lower down so the dominant clear term can scale by
+        # it; the later diagnostics block reuses this same value.
+        accuracy = float(total_hits / max(total_fired, 1))
+        # Gate ramps FLOOR -> 1.0 as accuracy climbs to TARGET, then saturates.
+        clear_accuracy_gate = CLEAR_ACCURACY_GATE_FLOOR + (
+            1.0 - CLEAR_ACCURACY_GATE_FLOOR
+        ) * min(accuracy / max(CLEAR_ACCURACY_GATE_TARGET, 1e-9), 1.0)
+
+        if screens_cleared > 0:
             fitness = CLEAR_BONUS - elapsed - DAMAGE_PENALTY * total_life_loss
         else:
             fitness = -FAIL_PENALTY
+        # QUADRATIC multi-screen bonus (added 2026-08-10 alongside
+        # vision_schedule). Rewards clearing more screens strictly-more per
+        # extra screen: gap between (N+1)-clear and N-clear fitness is
+        # (2N+1) * MULTI_CLEAR_BONUS -- so ES has an increasing marginal
+        # incentive to push for one more screen every time. See MULTI_CLEAR_BONUS
+        # in config.py for the full "why quadratic" rationale.
+        fitness += MULTI_CLEAR_BONUS * screens_cleared * screens_cleared
+        # Accuracy-gate the DOMINANT clear reward so a sloppy clear scores
+        # strictly less than a clean one (2026-09-13 Strategy A fix). Applied
+        # only on cleared episodes -- the accuracy portion of the reward earned
+        # so far (CLEAR_BONUS + MULTI_CLEAR_BONUS*screens**2, minus the elapsed/
+        # damage costs already netted in) is scaled down when accuracy is low.
+        # We scale only the positive clear component to avoid perversely
+        # *reducing* the elapsed/damage penalties at low accuracy.
+        if screens_cleared > 0:
+            clear_component = (
+                CLEAR_BONUS + MULTI_CLEAR_BONUS * screens_cleared * screens_cleared
+            )
+            fitness -= clear_component * (1.0 - clear_accuracy_gate)
         # Diagnostics only (NOT added to fitness): peek_hold_score, peek_flips
         # and ticks_in_cover used to feed reward shaping (COVER_HOLD_REWARD,
         # COVER_FLIP_PENALTY, COVER_TIME_PENALTY); that noisy shaping was
@@ -458,8 +989,28 @@ class TimeCrisisEnv:
         hit_rate_mid = float(hits_mid / max(shots_mid, 1))
         hit_rate_right = float(hits_right / max(shots_right, 1))
 
+        accuracy = float(total_hits / max(total_fired, 1))  # already gated above
+        mean_hit_delta = float(np.mean(hit_delta_per_tick)) if hit_delta_per_tick else 0.0
+        mean_hit_delta_norm = mean_hit_delta / HIT_DELTA_NORM_FRAMES
+        mean_reaction_latency = float(np.mean(reaction_latencies)) if reaction_latencies else 0.0
+        mean_reaction_latency_norm = mean_reaction_latency / REACTION_LATENCY_NORM_TICKS
+
+        fitness += ACCURACY_BONUS_WEIGHT * accuracy
+        fitness -= HIT_DELTA_PENALTY * mean_hit_delta_norm
+        fitness -= REACTION_LATENCY_PENALTY * mean_reaction_latency_norm
+
         fitness += HIT_REWARD * total_hits
-        fitness -= DRY_FIRE_PENALTY * dry_fire_ticks
+        # Per-miss penalty (see MISS_PENALTY in config.py): charge each wasted
+        # shot so accuracy is directly selected for, countering the
+        # spray-and-survive optimum where misses were free.
+        fitness -= MISS_PENALTY * max(0, total_fired - total_hits)
+        # Per-shot ammo cost (see AMMO_SHOT_COST in config.py): every round
+        # fired costs fitness, hit or miss, so bullets are scarce and the agent
+        # must value trigger discipline -- the mechanical complement to the
+        # accuracy gate that caps the spray volume the RAM-ammo change enabled.
+        fitness -= AMMO_SHOT_COST * total_fired
+        fitness -= EXPOSED_NO_SHOT_PENALTY * no_shot_exposed_ticks
+        fitness -= COVER_HESITATION_PENALTY * hesitated_cover_ticks
         fitness += RELOAD_BONUS * reload_correct_count
 
         # Hygiene reset: if this episode ended in a failed terminal state
@@ -475,17 +1026,20 @@ class TimeCrisisEnv:
 
         return float(fitness), {
             "cleared": cleared,
+            "screens_cleared": screens_cleared,
             "timed_out": bool(timed_out),
             "dead": bool(dead),
             "elapsed": float(elapsed),
             "damage": float(total_life_loss),
-            "accuracy": float(total_hits / max(total_fired, 1)),
+            "accuracy": accuracy,
             "shots_fired": int(total_fired),
             "shots_hit": int(total_hits),
             "peek_flips": int(peek_flips),
             "peek_hold_score": float(hold_score),
             "cover_time": int(ticks_in_cover),
             "dry_fire_ticks": int(dry_fire_ticks),
+            "no_shot_exposed_ticks": int(no_shot_exposed_ticks),
+            "hesitated_cover_ticks": int(hesitated_cover_ticks),
             "reload_correct_count": int(reload_correct_count),
             "continue_screen_count": int(continue_screen_count),
             "aim_x_std": aim_x_std,
@@ -503,4 +1057,8 @@ class TimeCrisisEnv:
             "hit_rate_left": hit_rate_left,
             "hit_rate_mid": hit_rate_mid,
             "hit_rate_right": hit_rate_right,
+            "mean_hit_delta": mean_hit_delta,
+            "mean_hit_delta_norm": mean_hit_delta_norm,
+            "mean_reaction_latency": mean_reaction_latency,
+            "mean_reaction_latency_norm": mean_reaction_latency_norm,
         }

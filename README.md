@@ -17,6 +17,17 @@ socket bridge.
   (one per socket port), reducing wall-clock time per generation roughly
   linearly. The emulators can be auto-launched or managed manually.
 
+## Vision class taxonomy
+
+- Detector/vision-schedule class IDs are now a 3-class schema:
+   - `0 = ENEMY`
+   - `1 = GRENADE`
+   - `2 = PROJECTILE`
+- This is a breaking change for `vision_schedule` checkpoints because the
+   class-priority tail in theta changed dimensionality.
+- Existing `.npy` checkpoints from the old 4-class schema are not compatible
+   with the current config and should be regenerated.
+
 ## RAM map (BizHawk `MainRAM` domain, all u16)
 
 | Value | Offset |

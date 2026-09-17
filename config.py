@@ -1,5 +1,6 @@
 """Central configuration. Edit values here, not in the other files."""
 
+import os
 from dataclasses import dataclass
 
 # -----------------------------
@@ -19,6 +20,7 @@ class RamMap:
     life:        int = 0x0B20C0
     cursor_x:    int = 0x0B1C74
     cursor_y:    int = 0x0B1C78
+    ammo:        int = 0x0B1DDC  # rounds remaining in the current clip (found 2026-09-11)
 
 RAM = RamMap()
 
@@ -59,9 +61,163 @@ TIMEOUT_TIMER_THRESHOLD = 60
 # frame-skip or RAM sampling gaps.
 CONTINUE_SCREEN_STALE_TICKS = 3
 
+# Second, slower fallback for the SAME "continue?" screen problem, but which
+# does not depend on the ``timer`` address at all. The fast watchdog above
+# requires shots_fired/shots_hit/timer/life to ALL be frozen -- but if the
+# "continue?" prompt's on-screen countdown reuses (or otherwise still
+# advances) the same RAM address we read as ``timer``, that snapshot never
+# repeats and the fast watchdog never fires, so the episode can sit on the
+# continue prompt indefinitely. shots_fired/shots_hit/life, by contrast,
+# cannot legitimately change while on a non-gameplay screen, so we track
+# those three alone (see ``stale_shots_life_ticks`` in env_timecrisis.py) and
+# force termination if they stay frozen this many consecutive ticks. This is
+# deliberately much longer than CONTINUE_SCREEN_STALE_TICKS because normal
+# cover/duck play can legitimately go a couple seconds without a new shot or
+# hit -- this should only fire once that stretch would be implausible for
+# live gameplay.
+#
+# Raised 45 -> 180 (2026-09-10): the vision_schedule policy's shoot/peek
+# logits are now shared per SCHEDULE_BLOCK_TICKS=30-tick block (see below),
+# not per-tick, and shoot_logit gets NO warm-start bias -- so at gen 0 (and
+# beyond) it's a coin flip whether an entire 30-tick block fires at all. A
+# candidate can easily draw ~1.5 consecutive negative-shoot blocks (45
+# ticks) purely by chance, with no incoming damage either, while still being
+# on a perfectly normal live screen -- confirmed via live logs showing this
+# fallback firing "a lot" in early generations. 45 ticks (1.5 blocks) left
+# almost no margin against that; 180 ticks (6 blocks, ~15s) gives real
+# headroom for a few unlucky blocks in a row to resolve on their own, while
+# still catching a truly stuck screen well before the 900-tick/75s cap.
+CONTINUE_SCREEN_FALLBACK_TICKS = 180
+
 # -----------------------------
 # ES hyperparameters
 # -----------------------------
+
+# Which action-selection paradigm theta represents:
+#   "mlp"      -- closed-loop: theta is feedforward-net weights, action
+#                 computed from the live observation every tick (policy.act).
+#   "schedule" -- open-loop: theta is a fixed per-tick action TABLE indexed
+#                 directly by the current tick, no observation consumed for
+#                 action selection at all (policy.act_schedule). This suits
+#                 this project's actual goal (one fixed savestate/level, not
+#                 a generalist policy) -- see repo memory "Open-loop schedule
+#                 search (2026-08-09): POSITIVE result" for the sim probe
+#                 that validated it: at GENERATIONS=80 schedule search won
+#                 5/5 seeds on fitness vs the closed-loop policy above
+#                 (clear_rate 0.667 vs 0.162, final_best 3170 vs -62.9).
+#                 Only validated at probe scale (pop=12) so far, not yet at
+#                 live POP_SIZE=30 -- watch early live generations closely.
+#   "vision_schedule" -- open-loop schedule PLUS a vision blend: theta
+#                 stores per-tick (shoot, peek, base_aim_x, base_aim_y) rows,
+#                 a global class-priority vector, AND one single global
+#                 vision_gain scalar shared across every tick (NOT a
+#                 per-tick column -- see policy.py's 2026-08-15 note for
+#                 why: "how much do I trust vision" is stable across an
+#                 episode, unlike aim position, and splitting it 900 ways
+#                 diluted ES's gradient signal for it so badly that the
+#                 population-mean metric looked flat for 20 generations
+#                 even though the underlying per-tick values had genuinely
+#                 moved). Each tick the env captures a frame every
+#                 VISION_CAPTURE_EVERY_N_TICKS ticks, runs detector.py's
+#                 classical/ONNX detector on it, picks the highest-priority
+#                 detection, and blends the detected centroid into the base
+#                 aim according to the shared learned gain. See
+#                 policy.act_vision_schedule and /memories/session/plan.md
+#                 (Phase 3-5) for the full design + sim-probe gate.
+#                 Vision_gain was originally zero-initialised so gen-0
+#                 behaviour matched pure "schedule" mode exactly (a
+#                 risk-controlled rollout while the detector was unproven).
+#                 Now that a real trained YOLO model is wired in (see
+#                 VISION_ONNX_MODEL_PATH), gen-0 warm-starts vision_gain to
+#                 VISION_GAIN_WARMSTART instead of 0 so vision is actively
+#                 part of the aim blend from generation 0 rather than
+#                 something ES has to discover from scratch -- ES can still
+#                 perturb it up/down/negative as usual.
+POLICY_MODE = "vision_schedule"
+
+# Class count for the vision-conditioned schedule's global class-priority
+# vector (see policy.act_vision_schedule). MUST equal detector.NUM_CLASSES
+# -- same enum backs both. If you change this, existing checkpoints become
+# incompatible because theta dimensionality changes.
+NUM_ENEMY_CLASSES = 3
+
+# Tick-block size for the vision_schedule shoot/peek columns (recommendation
+# #2 from the 2026-09-09 peek_gain follow-up -- see policy.py's
+# VISION_SCHEDULE_BLOCK_DIM notes). Now that shoot/peek are both reactive to
+# live detections (shoot_gain/peek_gain), the open-loop shoot_logit/
+# peek_logit columns mostly just need to supply a sane DEFAULT for "nothing
+# visible yet" rather than independently re-deriving 900 separate exposure/
+# firing windows -- a needlessly large, sparse search space for ES
+# (POP_SIZE=30) to explore. Grouping those two columns into one shared value
+# per SCHEDULE_BLOCK_TICKS-tick block (aim_x/aim_y stay per-tick, since
+# enemy position genuinely varies tick to tick) cuts the vision_schedule
+# table from MAX_TICKS*4=3600 to MAX_TICKS*2 + (MAX_TICKS/SCHEDULE_BLOCK_
+# TICKS)*2 = 1860 at the default value below (~48% of the old size).
+#
+# NOTE: this is a breaking layout change -- existing theta_*.npy checkpoints
+# are NOT compatible and must be discarded/retrained.
+SCHEDULE_BLOCK_TICKS = 30
+
+# How often (in decision ticks) TimeCrisisEnv captures a fresh screenshot +
+# runs detection under POLICY_MODE="vision_schedule". Between captures the
+# most recent detections are re-used, matching the cadence pattern from the
+# sim's TimedSpotVisionEnv probe. Was 3 (a wall-clock-cost compromise), but
+# the 2026-08-17 shoot_gain live run showed mean_shoot_gain/theta_shoot_gain
+# declining steadily across 80 generations (0.76 -> 0.67) while
+# mean_vision_gain climbed (0.76 -> 0.94) -- ES was learning to DISTRUST the
+# detection-presence shoot signal because it was stale (up to 2 ticks old)
+# relative to the noise-free, perfectly-deterministic open-loop per-tick
+# schedule (this env replays bit-identically from a fixed savestate, see
+# EPISODES_PER_CANDIDATE note below). Set to 1 so shoot_gain sees a fresh
+# detection every tick during training too, matching eval's per_frame_vision
+# cadence and removing ES's incentive to fall back to fixed-tick timing.
+# Costs an extra ~20-30ms/tick x2 in live BizHawk training wall clock.
+VISION_CAPTURE_EVERY_N_TICKS = 1
+
+# Path to a fine-tuned YOLO/RT-DETR ONNX model. Empty string / non-existent
+# file -> detector.build_detector() falls back to the classical MOG2 +
+# palette + connectedComponents pipeline. Set to a real ONNX export to use
+# ONNXDetector instead (see detector.ONNXDetector for the supported output
+# layouts -- both legacy raw-head and YOLOv10/YOLO26-style end-to-end
+# exports are auto-detected).
+#
+# best.onnx (2026-08-14): exported from runs/detect/train-21/weights/best.pt
+# (imgsz=320, 3-class ENEMY/GRENADE/PROJECTILE schema, trained on the full
+# gameplay-footage CVAT corpus). `yolo export model=best.pt format=onnx
+# imgsz=320 opset=12`.
+VISION_ONNX_MODEL_PATH = os.path.join(os.path.dirname(__file__), "best.onnx")
+
+# Path to the SAME fine-tuned model's raw ultralytics .pt weights (source of
+# best.onnx above). Added 2026-09-05: VISION_PROFILE timing showed
+# ONNXDetector (base `onnxruntime`, CPU-only -- `onnxruntime-gpu` isn't
+# installed, so CUDAExecutionProvider was never actually selectable despite
+# the code accepting a providers list) averaging ~85-90ms/detect() call and
+# dominating every decision tick (~715-944ms/tick measured live vs an ~83ms
+# real-time budget at FRAME_SKIP=5 @ 60Hz). `detector.build_detector()` now
+# prefers a torch/Ultralytics-backed GPU detector (TorchYoloDetector) when
+# this path exists AND `torch.cuda.is_available()`, reusing the venv's
+# already-working CUDA torch install instead of installing `onnxruntime-gpu`
+# (which would need its CUDA/cuDNN build matched against the existing torch
+# CUDA 13 libs). Falls back to ONNXDetector (CPU), then ClassicalDetector,
+# if torch/CUDA isn't available -- same "never hard-fail on missing model"
+# philosophy as VISION_ONNX_MODEL_PATH.
+VISION_TORCH_MODEL_PATH = os.path.join(os.path.dirname(__file__), "best.pt")
+VISION_DETECTOR_DEVICE = "cuda"  # passed to TorchYoloDetector's YOLO.to(...)
+
+# Diagnostic-only timing instrumentation for the vision_schedule path
+# (2026-09-05, chasing a "decisions feel slow live" report). When True,
+# TimeCrisisEnv.step() times each self.client.get_screenshot() call and
+# each self.detector.detect() call (wall-clock, time.perf_counter) plus the
+# full step() tick, and prints a rolling mean/max summary every
+# VISION_PROFILE_PRINT_EVERY ticks. Zero cost when False (no timing calls
+# made at all, not just suppressed prints). Does not affect training/fitness
+# in any way -- pure print-side diagnostics to find out whether screenshot
+# round-trip (BizHawk PNG encode + socket + cv2.imdecode) or detector
+# inference (ONNX/classical) is the actual bottleneck before optimizing
+# either one blind.
+VISION_PROFILE = False
+VISION_PROFILE_PRINT_EVERY = 30  # ticks between rolling-summary prints
+
 POP_SIZE    = 30      # MUST be even (mirrored sampling)
 # SIGMA raised 0.05 -> 0.1 (2026-08-04): in-sim trend testing
 # (tests/test_simulation.py ExtendedMiniESTrendSuite) showed the population
@@ -73,9 +229,39 @@ POP_SIZE    = 30      # MUST be even (mirrored sampling)
 # larger SIGMA makes it more likely at least some candidates flip sign again.
 SIGMA       = 0.1     # perturbation scale
 ALPHA       = 0.02    # learning rate
-GENERATIONS = 100
-SEED        = 42
-CHECKPOINT_EVERY = 10
+
+# Episodes evaluated per candidate per generation, averaged before ranking
+# (mirrors run_timed_spot_probe's episodes_per_candidate in
+# tests/test_simulation.py). Added 2026-08-05: single-episode fitness is
+# noisy enough that rank-transform ES (which only uses ORDER) can flip a
+# genuinely-better candidate below a worse one just from one unlucky
+# episode's stochastic hit/damage rolls. A sim A/B probe (5 seeds x 40
+# gens, see repo memory "Multi-episode fitness averaging probe") showed
+# averaging 3 episodes/candidate fixed two seeds that otherwise collapsed
+# to ~8% clear rate, and improved every aggregate metric (clear_rate,
+# mean/best accuracy, mean hits) with no seed getting more than a small dip
+# worse. Set to 1 to fully disable (exact prior single-episode behavior).
+#
+# Reverted 3 -> 1 for schedule mode (2026-08-10): ran a full live 80-gen
+# EPISODES_PER_CANDIDATE=3 pass and then directly re-evaluated the resulting
+# theta_final.npy for 16 real BizHawk episodes -- fitness/clear/damage/acc
+# were BIT-IDENTICAL across all 16 (std=0.0 exactly). Schedule mode's
+# open-loop action table is indexed only by tick count (never reacts to
+# observations), and the emulator is deterministic from a fixed savestate,
+# so a fixed schedule-mode theta has ZERO episode-to-episode variance.
+# EPISODES_PER_CANDIDATE's whole purpose is averaging out per-episode
+# stochastic noise for a FIXED candidate -- with zero variance to average
+# out, it was pure wasted compute (3x wall-clock) for schedule mode. That
+# rationale (repo memory's "Multi-episode fitness averaging probe") was
+# validated for "mlp" (closed-loop, reactive) mode, which may still have
+# real timing/observation jitter -- raise this again if POLICY_MODE is
+# switched back to "mlp".
+EPISODES_PER_CANDIDATE = 1
+
+# GENERATIONS raised back up for live convergence passes (2026-08-08).
+GENERATIONS = 80
+SEED        = 10
+CHECKPOINT_EVERY = 5
 
 # Stagnation kick (see SIGMA note above): if fitness std stays below
 # STD_STAGNATION_THRESHOLD for STAGNATION_PATIENCE consecutive generations,
@@ -123,6 +309,182 @@ BIZHAWK_ROM         = "/home/ampho/Downloads/TimeCrisis_NTSC/Time Crisis.cue"   
 BIZHAWK_LUA         = "/home/ampho/TimeCrisisAISpeedruns/bizhawk_bridge.lua"  # absolute path recommended
 BIZHAWK_EXTRA_ARGS  = []                  # any extra EmuHawk CLI flags
 
+# All EmuHawk instances on a machine share a single config.ini in the BizHawk
+# install directory (confirmed: only one config.ini exists, no per-instance
+# copy). Launching NUM_WORKERS instances back-to-back with zero delay lets them
+# race on reading/writing that shared file during startup, which crashed a real
+# 4-worker run within the first tick (bridge_client got ConnectionResetError
+# right after all 4 handshakes succeeded -- one instance died moments later).
+# A short stagger between launches avoids the race. Raise this if instances
+# still crash shortly after startup; 0 restores the old (unstaggered) behavior.
+BIZHAWK_LAUNCH_STAGGER_SECONDS = 3.0
+
+# Warm-start scale for the two shot-phase input rows in es_train.py's w1.
+# 0.0 keeps the strict zero-init behavior (gen0 exactly matches pre-port).
+# >0 seeds the new shot-phase channels with small non-zero weights so arc
+# variation can show up earlier instead of waiting for many generations to
+# discover/use those dims from pure perturbation noise.
+SHOT_PHASE_WARMSTART_ROW_STD = 0.08
+
+# Warm-start value for vision_schedule mode's single global
+# vision_gain_logit scalar (see POLICY_MODE comment above; shared across
+# every tick, not a per-tick column). tanh(1.0) ~= 0.76, i.e. gen-0 blends
+# the base aim ~76% of the way toward the top-priority detection's centroid
+# rather than 0% -- meaningful vision usage from the start, while still
+# small enough for SIGMA=0.1 perturbations to push it higher, lower, or
+# negative if ES finds that better. Set to 0.0 to restore the old
+# byte-identical-to-schedule-mode gen-0 behavior.
+VISION_GAIN_WARMSTART = 1.2
+
+# Warm-start value for vision_schedule mode's single global
+# shoot_gain_logit scalar (added 2026-08-17 alongside per_frame_vision --
+# see policy.py's note above VISION_SCHEDULE_BLOCK_DIM). Blends detection
+# PRESENCE (+1 detected / -1 not detected) into the shoot decision on top
+# of the open-loop shoot_logit, so the trigger can react to "is a target
+# actually in view" instead of firing purely on the fixed per-tick
+# schedule. The first live 80-gen run (1.0 -> tanh ~= 0.76) validated the
+# mechanism works (100% clear rate, mean_acc 0.33 -> 0.49) but also showed
+# ES steadily eroding shoot_gain back down to ~0.67, traced to stale
+# (every-3rd-tick) training-time vision -- see VISION_CAPTURE_EVERY_N_TICKS
+# above, now fixed to 1. With that staleness removed, raised to 2.0
+# (tanh(2.0) ~= 0.96) for a stronger gen-0 bias towards reactive,
+# detection-gated shooting -- still perturbable by ES if it finds lower is
+# better. Set to 0.0 to restore the old open-loop-only shoot decision.
+SHOOT_GAIN_WARMSTART = 1.2
+
+# Warm-start value for vision_schedule mode's single global
+# peek_gain_logit scalar (added 2026-09-09 alongside PEEK_DETECTION_SCALE --
+# see policy.py's note above VISION_SCHEDULE_BLOCK_DIM). Blends detection
+# PRESENCE into the peek (exposure) decision the same way SHOOT_GAIN_WARMSTART
+# does for shoot, so the agent is biased toward coming OUT of cover for a
+# visible target from generation 0 rather than discovering it from scratch.
+# Set to 0.0 to restore the old open-loop-only peek decision.
+PEEK_GAIN_WARMSTART = 1.2
+
+# Warm-start for vision_schedule's learned edge-drift correction gain.
+# 0.0 starts with no learned correction; ES can adapt positive/negative.
+VISION_DRIFT_GAIN_WARMSTART = 0.0
+
+# Edge threshold for applying learned drift correction from cursor error.
+# 0.0 = everywhere, 1.0 = only exact edge. 0.65 means correction ramps in
+# mostly near the outer ~17.5% on each side.
+VISION_DRIFT_EDGE_START = 0.65
+
+# Scales how strongly live detection confidence can nudge the trigger in
+# POLICY_MODE="vision_schedule". The shoot decision blends this term onto
+# the open-loop per-tick shoot logit in policy.act_vision_schedule:
+#   base_shoot_logit + SHOOT_DETECTION_SCALE * shoot_gain * detection_term
+# where detection_term is confidence-shaped in [-1, 1].
+#
+# Larger values make the trigger react more immediately to confident
+# detections (less schedule-timed waiting). Keep moderate to avoid
+# over-firing on noisy detections.
+#
+# 2026-09-13 (accuracy-regression structural fix): 1.5 -> 0.8. The incremental
+# rebalance (halved penalties + peek lock) fixed the flicker at gen 0 but ES
+# still drove accuracy flat (~0.13) by re-converging on spray-and-survive: at
+# 1.5 with a warm-started shoot_gain (~0.83), essentially ANY detection with
+# conf>~0.5 pushed shoot_logit positive, so the trigger fired almost every
+# exposed tick. Halving it makes firing far more selective (the open-loop base
+# shoot_logit and a genuinely confident target must agree), which is the
+# prerequisite for the per-miss penalty below to actually raise accuracy.
+SHOOT_DETECTION_SCALE = 0.8
+
+# Scales how strongly live detection PRESENCE can nudge the peek (cover <->
+# exposed) decision in POLICY_MODE="vision_schedule" -- same shape as
+# SHOOT_DETECTION_SCALE above, but for peek_gain (added 2026-09-09 to fix
+# shoot's confidence-based force-override being a no-op whenever the
+# open-loop schedule's peek happened to be False that tick -- see
+# policy.act_vision_schedule):
+#   base_peek_logit + PEEK_DETECTION_SCALE * peek_gain * detection_term
+# Larger values make the agent come out of cover more readily when a
+# confident detection is present, instead of waiting for the open-loop
+# schedule's fixed exposure window.
+PEEK_DETECTION_SCALE = 1.5
+
+# Vision-priority overrides for "shoot what you see" behavior.
+# If the top detection is at/above this confidence, bypass the blended shoot
+# logit and force shoot=True (subject to env-side ammo/peek guards).
+# 2026-09-13 (accuracy-regression rebalance): nudged 0.50 -> 0.60 so the
+# force-fire/force-peek override only triggers on clearly-confident detections
+# instead of firing before the aim has settled on marginal (0.5) ones.
+# 2026-09-13 (structural fix): raised further 0.60 -> 0.75 -- at 0.60 the
+# override still force-fired on middling detections before the aim locked,
+# feeding the spray. 0.75 reserves the force-fire for targets we're clearly
+# on, letting the (now less aggressive) blended shoot logit govern the rest.
+VISION_FORCE_SHOOT_CONFIDENCE = 0.75
+# Minimum blend gain when a confident detection is present. This makes aim
+# follow vision aggressively instead of staying near the open-loop base aim.
+VISION_MIN_BLEND_GAIN = 0.60
+
+# Aim-on-target trigger gate (added 2026-09-13). When a detection is present,
+# the trigger only fires if the cursor is already within this normalized
+# Euclidean distance of the target's aim point -- i.e. "aim first, then shoot".
+# Motivation: run 20260913_180345 (reload fix + Torch detector) recovered
+# engagement (cover 37-55, clears 1.0-1.6) but accuracy stayed flat ~0.11 with
+# mean_aim_span ~0.70 -- the open-loop schedule kept firing while the cursor
+# careened across ~70% of the screen chasing detections, so most shots went off
+# mid-sweep. This gate converts the good detector into accuracy by suppressing
+# fire until the cursor lands on the enemy. It does NOT block firing when no
+# detection is present (the open-loop schedule still governs blind spots), and
+# the force-shoot override is also gated on it so it can't leak off-target
+# shots. cursor/target are in [0,1]x[0,1]; 0.15 ~= within 15% of the normalized
+# frame of the enemy centroid. Tunable: lower for stricter accuracy (risk
+# under-firing if aim can't reach), raise if the agent holds fire too much.
+AIM_ON_TARGET_RADIUS = 0.15
+
+# Ammo-awareness (added 2026-09-10). Real players ration a magazine instead
+# of dumping it all into whichever target happens to be in front of them --
+# this scales how strongly ammo scarcity can suppress (or, if ES learns a
+# positive gain, encourage) firing, same additive-nudge shape as
+# SHOOT_DETECTION_SCALE above:
+#   ... + AMMO_CONSERVE_SCALE * ammo_gain * (1 - ammo_left_norm)
+# ammo_left_norm = ammo_left / AMMO_MAX_ROUNDS, so the term is 0 with a full
+# clip and grows toward AMMO_CONSERVE_SCALE * ammo_gain as the clip empties.
+#
+# A companion mechanism, switch_gain (biasing target selection toward the
+# runner-up detection as ammo got scarce, governed by a since-removed
+# SWITCH_LOCK_DIST_NORM constant), was added alongside this on 2026-09-10
+# and reverted on 2026-09-11 -- it could redirect aim onto a
+# GRENADE/PROJECTILE detection instead of another ENEMY, which caused a
+# measurable live-training regression. See policy.act_vision_schedule's
+# docstring / repo memory for details if revisiting this.
+# Second live run (2026-09-11) with switch_gain removed but ammo_gain retained
+# showed a clear improvement (clear_rate 0.875 -> 0.917, mean_acc 0.49 -> 0.53, mean_hits 3.5 -> 4.0) -- ammo-awareness is useful
+# Changed AMMO_CONSERVE_SCALE 1.5 -> 0.8 (2026-09-11), then reverted back to
+# 1.5 the same day: resumed a fresh run from the checkpoint above (tuned
+# under 1.5) while the config was already at 0.8, and observed candidates
+# sometimes not firing at all and staying exposed without ducking. Root
+# cause was NOT a code bug -- env_timecrisis.py's ammo_left==0 -> peek=False
+# override is unconditional and independent of this scale -- but reusing a
+# checkpoint whose ammo_gain was evolved/selected under 1.5 while
+# reinterpreting it at 0.8 (roughly half the effective magnitude) shifts the
+# population's effective firing threshold out from under weights ES never
+# tuned for that value, surfacing the known "stays exposed, rarely fires"
+# collapse mode discussed under SHOOT_GAIN_WARMSTART above. Reverted to 1.5
+# to match the checkpoint this was last validated against; if 0.8 (or any
+# other value) is tried again, retrain from scratch under it rather than
+# resuming an existing checkpoint tuned for a different scale.
+AMMO_CONSERVE_SCALE = 1.5
+
+# Vision-target aim offset for ENEMY detections. The detector supplies both
+# centroid and aim target; for enemies we bias toward upper torso/head instead
+# of geometric center so limb/shield center-mass misses happen less often.
+#
+# Y fraction is measured from bbox top (0.0 = top edge, 1.0 = bottom edge).
+ENEMY_AIM_Y_FRACTION = 0.26
+# If an enemy bbox is wide (likely shield-side posture), shift x away from
+# dead-center toward an inner-side shoulder point to avoid shielded center.
+ENEMY_SHIELD_WIDE_ASPECT = 0.60
+# Set to 0.0 to disable lateral side-shift; top-center aiming is usually
+# safer on shielded enemies when shield orientation is not explicitly known.
+ENEMY_SHIELD_X_OFFSET_FRAC = 0.0
+
+# Trigger pulse cadence while shoot=True (0-based frame index within one
+# decision tick). Uses one-frame PRESS pulses separated by release frames,
+# so values below 2 are clamped to 2 in env_timecrisis.py for reliability.
+SHOOT_PULSE_EVERY_N_FRAMES = 2
+
 # -----------------------------
 # Fitness shaping
 # -----------------------------
@@ -131,11 +493,139 @@ DAMAGE_PENALTY     = 300.0   # deliberately harsh: a hit is never worth it
 HIT_REWARD         = 5.0     # per confirmed hit, all episodes; teaches aim
 FAIL_PENALTY       = 200.0
 
+# Per-MISS penalty (added 2026-09-13, accuracy-regression structural fix).
+# accuracy = hits / fired collapsed to ~0.13 because misses were FREE: ES
+# maximised the dominant MULTI_CLEAR_BONUS * screens**2 survival term by
+# spraying (more shots -> more chance to clear a screen) with no downside to
+# the wasted rounds. This charges each missed shot (fired - hits) a flat cost,
+# the exact inverse of the "reward raw shot count" magdump-hack the project
+# deliberately avoids -- penalising WASTE, not rewarding volume, so the agent
+# is pushed toward firing only when a shot is likely to land. Deliberately
+# moderate: HIT_REWARD is +5 per hit, so at MISS_PENALTY=4 the hit/miss terms
+# alone break even around ~44% accuracy (gold-run territory) while still
+# leaving necessary clearing fire net-positive -- kept well below a level that
+# would tip the population into the documented "never expose / never fire"
+# cover-collapse local optimum (see SIGMA note above). Tune up if accuracy
+# stays low, down if clears/exposure collapse.
+MISS_PENALTY       = 4.0
+
+# Multi-screen fitness (added 2026-08-10 alongside vision_schedule).
+# Time Crisis' Area 1 has SEVERAL discrete "screens" (cover swaps); before
+# this change the episode terminated on the FIRST screen clear (phase_infer
+# treats cleared_guess=True as absorbing TERMINAL), so fitness was
+# effectively binary "did this ONE screen clear or not". The user hit the
+# ceiling of that early -- vision was clearly seeing enemies but couldn't
+# translate that into more reward, because there was no more reward to earn
+# once one screen fell. We now:
+#   (1) do NOT feed cleared_guess into phase_infer (episode keeps running
+#       to death / timeout / MAX_TICKS regardless of clears), and
+#   (2) count screen-clear events per-frame via monotonic-timer-peak
+#       tracking (see TimeCrisisEnv step()), and
+#   (3) add a QUADRATIC bonus so each additional screen is worth strictly
+#       more than the last -- exactly the "richly reward more screens than
+#       the previous" curve the user asked for.
+#
+# MULTI_CLEAR_BONUS * screens_cleared ** 2 lands at:
+#   1 screen: +1000  (roughly matches the existing single-clear CLEAR_BONUS)
+#   2 screens: +4000 (each extra worth 3000, dwarfs any accuracy dip from
+#                    encountering unfamiliar screen 2 enemies)
+#   3 screens: +9000
+#   4 screens: +16000
+# The gap between (N) and (N-1) is 2N-1 * MULTI_CLEAR_BONUS, so ES has a
+# strictly INCREASING marginal incentive to push for one more screen -- the
+# reward is genuinely "richer" per extra screen, not just larger absolute.
+#
+# Any per-tick timer bump larger than SCREEN_CLEAR_TIMER_BUMP is treated as
+# a new screen clear event (compared tick-start vs tick-end, not frame-by-
+# frame -- the bonus-roll conversion completes within a single decision
+# tick). Time Crisis' timer counts DOWN by a few units/tick in normal play
+# (and even throughout the screen-to-screen transition itself -- there is no
+# "frozen" phase to key off) and jumps up by hundreds on a clear, so 10 is
+# comfortably above natural per-tick noise and well below a real clear's
+# bonus roll.
+MULTI_CLEAR_BONUS = 1000.0
+SCREEN_CLEAR_TIMER_BUMP = 10
+
+# Accuracy gate on the DOMINANT clear reward (added 2026-09-13, third-pass
+# accuracy-regression fix -- "Strategy A"). Two prior fixes (peek-lock
+# re-enable + softened penalties, then MISS_PENALTY + firing selectivity)
+# both FAILED: over 13 gens accuracy stayed flat at ~0.13 while ES re-converged
+# on spray-and-survive every time. Root cause proven numerically: for a fixed
+# screen count the fitness is ~entirely (CLEAR_BONUS + MULTI_CLEAR_BONUS*
+# screens**2) -- e.g. +5000 for a 2-screen clear -- while EVERY accuracy term
+# combined (ACCURACY_BONUS_WEIGHT*acc, HIT_REWARD*hits, -MISS_PENALTY*misses)
+# moves fitness by only a few hundred points. Side-penalties can never
+# compete with a +4000 quadratic, so ES throws accuracy away for free.
+#
+# The fix makes the DOMINANT term itself care about accuracy: the clear reward
+# is multiplied by a gate that ramps from CLEAR_ACCURACY_GATE_FLOOR at 0%
+# accuracy up to 1.0 once accuracy reaches CLEAR_ACCURACY_GATE_TARGET:
+#     gate = FLOOR + (1 - FLOOR) * min(accuracy / TARGET, 1.0)
+# For a FIXED screen count a cleaner run now scores strictly higher (e.g. at
+# 2 screens: acc 0.13 -> 5000*0.60 = 3000 vs acc 0.40 -> 5000*1.0 = 5000, a
+# +2000 gradient -- comparable to an entire extra screen), so ES finally feels
+# a strong pull toward the clean-clear basin the 2026-08-17 gold run occupied
+# (which reached 33-49% acc WITH 2-4 screens, proving high acc and high screens
+# are compatible). More screens are still always preferred; they must now just
+# be cleared cleanly. FLOOR is kept above 0 so a genuinely hard screen with
+# unavoidably lower accuracy still yields net-positive clear reward and the
+# agent is never taught to stop clearing. Gate applies ONLY on cleared
+# episodes (screens>0); failed episodes keep the HIT_REWARD/MISS_PENALTY
+# gradient so pre-first-clear aim learning is unaffected. Tune FLOOR down for a
+# stronger accuracy pull, up if clearing collapses.
+#
+# 2026-09-13 SECOND TUNE (fourth-pass): FLOOR 0.40 -> 0.05 after the FLOOR=0.40
+# run (233438) STILL failed to move accuracy (flat ~0.12, slope -0.0006). At
+# FLOOR=0.40 a sloppy 2-screen clear still scored 2975 -- above a clean
+# 1-screen clear (2000) -- so ES kept spraying. At FLOOR=0.05 the sloppy
+# 2-screen clear (acc 0.10) drops to 5000*0.2875 = ~1437, now BELOW the clean
+# 1-screen (2000), finally flipping the ordering so ES is forced up the
+# accuracy gradient. FLOOR kept a hair above 0 to avoid an exactly-zero clear
+# reward degeneracy; clearing even at low accuracy still nets > -FAIL_PENALTY so
+# the agent is never taught to stop clearing. Paired with AMMO_SHOT_COST below.
+# TEMP 2026-09-13: reverted the fourth-pass staged fix (0.05 -> 0.40) for a
+# baseline diagnostic 10-gen run. Restore to 0.05 to re-enable the harsher gate.
+CLEAR_ACCURACY_GATE_FLOOR  = 0.40
+CLEAR_ACCURACY_GATE_TARGET = 0.40
+
+# Per-SHOT ammo cost (added 2026-09-13, fourth-pass -- "tighter ammo economy").
+# Every round fired costs fitness, hit OR miss, so bullets are a scarce
+# resource the agent must spend wisely -- the mechanical complement to the
+# accuracy gate above. Diagnosis: the agent sprays ~120 rounds/episode (~20
+# pop-duck-reload cycles at AMMO_MAX_ROUNDS=6) vs the 2026-08-17 gold run's
+# ~70-90 (~11-15 cycles); accuracy = RAM hits/fired is genuinely ~0.13 vs gold
+# 0.33-0.49. MISS_PENALTY alone only charges misses (an after-the-fact cost);
+# a flat per-shot cost also makes the agent value trigger DISCIPLINE up front
+# (don't pull unless the shot is likely to land), directly capping the spray
+# volume the RAM-ammo change (2026-09-11) let survival exploit. Sizing: at
+# HIT_REWARD=5 a hit still nets +3 after the cost, so necessary aimed fire stays
+# net-positive, while a wild shot now costs 2 (or 6 with MISS_PENALTY) -- the
+# ~120-shot spray pays ~240 on top of its miss penalty, the ~75-shot aimed run
+# only ~150. Kept moderate so the agent never under-fires into a failed clear
+# (clearing always beats -FAIL_PENALTY). Tune UP if spraying persists, DOWN if
+# clears collapse from under-firing.
+# TEMP 2026-09-13: disabled (2.0 -> 0.0) for the baseline diagnostic 10-gen run
+# (fitness -= 0 * total_fired is a no-op). Restore to 2.0 to re-enable.
+AMMO_SHOT_COST = 0.0
+
 # Peeking out is a HOLD, not a tap: the ~0.2s (~12-frame) in/out traverse only
 # completes if the button is held through it. PEEK_TRAVERSE_TICKS is a game-
-# mechanics constant (minimum hold lock so a transition can't be reversed
-# mid-animation; also gates when shots are allowed to register) -- it is NOT
-# a reward shaping knob. We used to also reward holding densely
+# mechanics constant -- it is NOT a reward shaping knob. It sets the
+# minimum-hold LATCH (env_timecrisis.py's peek_lock) so the agent can't
+# reverse the peek button mid-traverse, which would otherwise make the real
+# in-game animation reverse instead of completing (confirmed live as the
+# "1 tick cover in-out" flicker bug) -- this part must stay tick-count-based
+# since we have no ground-truth RAM flag for "mid-transition". It's ALSO
+# still used to compute the peek_phase observation feature (how far along
+# the traverse is), purely informational. It NO LONGER gates whether shots
+# are attempted (shoot_allowed) -- that used to also require
+# peek_ticks >= PEEK_TRAVERSE_TICKS as a rough estimate of when the traverse
+# animation finishes, but real success/failure is decided by the emulator
+# and read back ground-truth via shots_fired (RAM) regardless, so the extra
+# wait just delayed attempts unnecessarily. Removed 2026-08-18 so reload/
+# re-expose timing is bounded by real game state (peek + ammo_left) instead
+# of a hardcoded tick count -- see env_timecrisis.py's shoot_allowed comment.
+# We used to also reward holding densely
 # (COVER_HOLD_REWARD), penalize flip-flopping (COVER_FLIP_PENALTY) and camping
 # (COVER_TIME_PENALTY), and give extra hit credit only on failed episodes
 # (PARTIAL_HIT_REWARD). All four were removed: they just layered noisy shaping
@@ -145,6 +635,27 @@ FAIL_PENALTY       = 200.0
 # into fitness.
 PEEK_TRAVERSE_TICKS = 3     # ticks (x FRAME_SKIP frames) to clear the traverse
 
+# Transition-lock hold durations (in decision ticks) for the peek button
+# state machine. These are separate from PEEK_TRAVERSE_TICKS so we can reduce
+# "takes too long to look out" latency without changing the observation's
+# peek-phase normalization scale.
+#
+# OUT controls cover -> exposed transitions (agent wants to look out).
+# IN controls exposed -> cover transitions (agent ducks/reloads).
+#
+# 2026-09-13 (accuracy-regression rebalance): OUT raised 0 -> 2. At 0 the
+# lock was effectively DISABLED -- env_timecrisis.py computes
+# peek_lock = max(0, lock_ticks - 1), so both 0 (OUT) and 1 (IN) resolved to
+# a 0-tick hold, giving NO minimum dwell in either direction. That let the
+# policy pop out, fire, and duck within a single tick -- the 1-tick
+# cover<->expose flicker that drove mean_peek_flips to ~45 (vs ~25 in the
+# 2026-08-17 gold run, which held a real 3-tick lock) and helped tank
+# accuracy. OUT=2 forces at least a 2-tick exposure window (aim can settle +
+# a shot can land) before a duck is allowed, killing the pop-fire-duck
+# oscillation, while IN stays at 1 to keep re-expose latency low.
+PEEK_LOCK_OUT_TICKS = 2
+PEEK_LOCK_IN_TICKS = 1
+
 # NOTE: we deliberately do NOT reward raw shots fired (nor per-shot reload/
 # active-fire bonuses). Any reward that scales with shot COUNT is a magdump
 # hack -- the policy learns to spam the trigger for free reward regardless of
@@ -152,24 +663,115 @@ PEEK_TRAVERSE_TICKS = 3     # ticks (x FRAME_SKIP frames) to clear the traverse
 # flat, count-independent event reward, see below) touch shooting behaviour.
 
 # Rounds per clip. Time Crisis' Guncon always starts a screen with a full 6-
-# round clip; we mirror that in software (ammo_left is not read from RAM --
-# there's no known counter for it) so the policy can observe when it's about
-# to run dry and learn to duck instead of dry-firing.
+# round clip; we mirror that in software (ammo_left in env_timecrisis.py:
+# decrement on shot, refill to full on duck-into-cover and on screen clear) so
+# the policy can observe when it's about to run dry and learn to duck instead
+# of dry-firing. 2026-09-13: reverted from reading RAM.ammo (0x0B1DDC, tried
+# 2026-09-11) back to this software model -- the RAM.ammo switch coincided with
+# a drastic accuracy regression (flat ~0.13 vs the gold run's 0.33-0.49), so we
+# are testing the pre-regression software model in isolation to confirm whether
+# the RAM-ammo dependency was the cause. RAM.ammo stays defined in RamMap (used
+# only by the test sim fakes now) but no longer drives control.
 AMMO_MAX_ROUNDS = 6
 
-# Penalty per tick the agent is fully exposed with an EMPTY clip (ammo_left
-# == 0 at the start of the tick) instead of ducking back into cover to
-# reload. This no longer fires just because the agent chose not to shoot --
-# only true "should have ducked, gun is empty" ticks count.
+# Reload duration, in decision ticks (x FRAME_SKIP frames each). A reload only
+# completes after the character has been in cover (peek == False) for this many
+# CONSECUTIVE ticks -- long enough for the real duck-traverse + reload animation
+# to run in-game. 2026-09-13: added to fix a software/real DESYNC bug. The old
+# model refilled the software clip on the FIRST cover tick (a single ~5-frame
+# duck), so the agent popped straight back out believing it was full while the
+# REAL gun was still empty -- it then dry-fired ("looks out with an empty
+# magazine and spams the trigger"). Holding the reload for RELOAD_DUCK_TICKS
+# ticks keeps ammo_left == 0 until the real gun has actually reloaded; because
+# the `ammo_left == 0 -> peek = False` override in step() fires every tick while
+# empty, the agent is automatically HELD in cover for the whole reload. At
+# FRAME_SKIP=5 this is ~15 frames of cover (traverse-down ~12f + reload), which
+# matches the observed in-game reload. Tunable; raise if the gun is still empty
+# on re-expose, lower if reloads feel sluggish.
+RELOAD_DUCK_TICKS = 3
+
+# Diagnostic-only counter (see dry_fire_ticks in env_timecrisis.py):
+# env_timecrisis.py's step() HARD-ENFORCES a duck the instant ammo_left hits
+# 0 (overrides the policy's own peek output), so dry_fire_ticks is always 0
+# in practice. There used to be a DRY_FIRE_PENALTY fitness weight backing
+# this up, but since it could only ever multiply by 0 it was pure dead
+# weight in the fitness formula -- removed 2026-09-09 during the pre-retrain
+# dimension review (see repo memory). dry_fire_ticks itself is kept purely
+# as a regression diagnostic (DryFireBehaviorSuite asserts it stays 0).
+
+# Bravery shaping for vision_schedule mode. Both terms are applied only when
+# an ENEMY detection is visible on the tick.
+# - EXPOSED_NO_SHOT_PENALTY: exposed with ammo but no shot landed that tick.
+# - COVER_HESITATION_PENALTY: stayed in cover with ammo while enemy visible.
+# 2026-09-13 (accuracy-regression rebalance): both halved (25->12.5, 30->15).
+# These two "bravery" penalties reward firing-more / exposing-more, which the
+# audit tied to the spray-and-pray collapse (mean_acc ~0.13 vs the 2026-08-17
+# gold run's 0.33-0.49, which carried NEITHER penalty). Halving relieves the
+# spray pressure while still discouraging outright cowering; the accuracy is
+# meant to come back from ACCURACY_BONUS_WEIGHT + HIT_REWARD as in the gold run.
+EXPOSED_NO_SHOT_PENALTY = 12.5
+COVER_HESITATION_PENALTY = 15.0
+
+# hit_delta shaping: per-frame counter of how long we've gone without a hit.
+# The counter resets to 0 on any confirmed hit and increments by 1 on every
+# frame that does not register a hit. It is exposed to the policy as
+# hit_delta_norm and penalized in fitness (below) so the agent is nudged away
+# from long dry streaks.
+HIT_DELTA_NORM_FRAMES = 300.0
+# 2026-09-13 (accuracy-regression rebalance): halved 80 -> 40. Penalizing dry
+# streaks pushes the trigger to fire faster, which dilutes accuracy -- softened
+# as part of the spray-pressure rollback (see EXPOSED_NO_SHOT_PENALTY above).
+HIT_DELTA_PENALTY = 40.0
+
+# Reaction-latency shaping (recommendation #3 from the 2026-09-09 peek_gain
+# follow-up). Neither HIT_DELTA_PENALTY above (time since the last HIT) nor
+# EXPOSED_NO_SHOT_PENALTY/COVER_HESITATION_PENALTY (flat per-tick penalties
+# while a target is visible) directly measure how long the agent takes to
+# fire once a target FIRST becomes visible -- this adds that missing signal
+# directly, targeting "fire as fast as possible" instead of relying on the
+# indirect pressure from ``elapsed``.
 #
-# NOTE (2026-08-04): env_timecrisis.py's step() now HARD-ENFORCES the duck
-# the instant ammo_left hits 0 (overrides the policy's own peek output --
-# see the comment there), because relying on this penalty alone to teach
-# that behavior kept failing in real training (agents mag-dumped and stayed
-# exposed anyway). With the override in place, dry_fire_ticks should always
-# be 0 in practice -- this penalty is now a harmless backstop/diagnostic, not
-# the primary mechanism. Left in place in case the override ever has a gap.
-DRY_FIRE_PENALTY = 2.0
+# Tracked tick-by-tick in env_timecrisis.py: a running streak counter
+# increments on every tick an ENEMY detection is visible and no shot is
+# fired that tick, and resets to 0 the instant either (a) a shot is fired
+# while a target is visible -- the streak length just before the reset is
+# recorded as one completed "reaction latency" sample -- or (b) no target
+# is visible (nothing to react to). episode_fitness() averages every
+# completed sample (plus one final unresolved sample if the episode ends
+# mid-streak, so a policy can't dodge this metric by simply never firing)
+# into mean_reaction_latency, normalizes by REACTION_LATENCY_NORM_TICKS,
+# and penalizes the result.
+REACTION_LATENCY_NORM_TICKS = 20.0
+# 2026-09-13 (accuracy-regression rebalance): halved 60 -> 30. Same rationale as
+# HIT_DELTA_PENALTY above -- "fire as fast as possible" pressure trades accuracy
+# for reaction time; softened to let deliberate, aimed shots win again.
+REACTION_LATENCY_PENALTY = 30.0
+
+# Accuracy-shaped fitness bonus (rewards hit RATE, not just hit COUNT).
+# Sim-validated (repo memory "Miss-correction objective probe", 2026-08-06):
+# combining this with the miss-correction terms above (the "miss-
+# correction+accuracy" arm) was the best-performing arm of that probe --
+# preserved clear rate, improved mean_acc (0.089 -> 0.111), raised the local
+# self-correction rate, and increased aim coordinate diversity, all without
+# collapsing to edges/center. Also note: fitness shaping only changes what
+# future ES generations are selected for -- it does not alter the behavior
+# of an already-trained checkpoint (theta_*.npy) without re-running training.
+ACCURACY_BONUS_WEIGHT = 1000.0
+
+# Removed 2026-09-09 (pre-retrain dimension review, see repo memory):
+# MISS_CORRECTION_BONUS/REPEATED_MISS_PENALTY/MOVE_EPS/SAME_EPS/EDGE_BAND/
+# CENTER_BAND/EDGE_SCATTER_PENALTY/CENTER_CAMP_PENALTY and CLIP_SHIFT_BONUS/
+# SHOT_SLOT_DIVERSITY_BONUS/SHOT_SLOT_DIVERSITY_SCALE (and the whole
+# compute_miss_correction_metrics() machinery in env_timecrisis.py that fed
+# them) all sim-validated in 2026-08-06 against an era where aim was either a
+# static MLP output or a purely open-loop table with no real target-tracking
+# -- the entire point was to force artificial arc variation since the policy
+# had no way to know where the enemy actually was. That's no longer true:
+# vision_gain (see VISION_GAIN_WARMSTART) now blends aim toward the ACTUAL
+# detected enemy centroid every tick, so forcing "shift away from last aim"
+# on top of that can fight against correct behavior (penalizing the agent
+# for consistently re-aiming at a real, consistently-placed target). Dropped
+# as dead weight/architecturally-superseded rather than re-validated.
 
 # Flat bonus (NOT scaled by shots fired) awarded exactly once, on the tick
 # the agent ducks back into cover with an empty clip (ammo_left == 0).
@@ -183,8 +785,9 @@ RELOAD_BONUS = 0.0
 # -----------------------------
 # Policy dims
 # obs = [timer_norm, life_norm, fired_norm, hit_norm, acc, last_hit, last_miss,
-#        peek_phase, ammo_norm, prev_aim_x_bias, prev_aim_y_bias,
-#        cursor_x_norm, cursor_y_norm]
+#        hit_delta_norm, peek_phase, ammo_norm, prev_aim_x_bias, prev_aim_y_bias,
+#        cursor_x_norm, cursor_y_norm,
+#        shot_phase_sin, shot_phase_cos]
 # peek_phase in [-1, +1]: sign = current peek state, magnitude = ticks_held / PEEK_TRAVERSE_TICKS
 # ammo_norm = ammo_left / AMMO_MAX_ROUNDS, in [0, 1]
 # prev_aim_x_bias / prev_aim_y_bias in [-1, 1]: the aim_x_bias/aim_y_bias the
@@ -192,22 +795,51 @@ RELOAD_BONUS = 0.0
 # input. The net is otherwise purely feedforward/memoryless, so without this
 # it has no way to know what it last chose -- this closes that loop, letting
 # weights learn to shift aim across ticks instead of latching onto one spot.
+# hit_delta_norm in [0, 1] (clipped): normalized per-frame streak length since
+# the last confirmed hit. 0 means "just hit"; larger values mean the policy has
+# gone longer without landing anything.
 # cursor_x_norm / cursor_y_norm in [0, 1]: the actual current on-screen gun
 # cursor read back from RAM. This is the first live screen-space signal in the
 # policy input: even without enemy RAM yet, the policy can now correlate where
 # rewarded hits happened with where the reticle actually was.
+# shot_phase_sin / shot_phase_cos: (sin, cos) of the shot-in-clip phase angle,
+# angle = 2*pi * (AMMO_MAX_ROUNDS - ammo_left) / AMMO_MAX_ROUNDS. Non-smooth
+# per-shot signal (adjacent shots land at distinct 2-D positions on the unit
+# circle, not on a monotonic ramp like ammo_norm) intended to break the "same
+# 6-shot arc every clip" symptom -- the memoryless MLP fed only smooth
+# monotonic inputs (ammo_norm ramp, prev_aim drift) naturally emits a smooth
+# deterministic arc; adding a non-smooth per-shot cue lets ES route each shot
+# through distinct hidden-layer paths without disentangling it from the ramp.
+# Sim-validated (repo memory "Shot-phase sin/cos + zero-init port", 2026-08-06):
+# a 5-seed x 30-gen A/B on TimedSpotBaselineAccuracyEnv showed this loosens the
+# per-shot arc std on BOTH x (+66%) and y (+62%) axes vs. baseline OBS_DIM=13,
+# and roughly triples pooled aim-y range -- the direct symptom fix the user
+# asked for. Caveat: it also cost ~22 percentage points of clear rate in the
+# sim (52% -> 30% at 30 gens) because the extra 2 dims add 2*HIDDEN=128 more
+# parameters for ES to search over. The es_train.py warm-start zero-initializes
+# the input-column weights on these 2 dims so at gen 0 behavior matches the
+# pre-port baseline exactly and ES has to actively learn to USE these dims.
 # act = [shoot_logit, cover_logit, aim_x_bias, aim_y_bias]
 # Both aim axes are policy-controlled: bias in [-1, 1] -> screen position in [0, 1].
 # -----------------------------
-OBS_DIM = 13
+OBS_DIM = 16
 HIDDEN  = 64
 ACT_DIM = 4
 
 # -----------------------------
 # Logging / feedback
 # -----------------------------
-VERBOSE_EPISODES = True
+VERBOSE_EPISODES = False
 LOG_CSV = "training_log.csv"
+# If True, es_train.py writes each run to its own timestamped file (e.g.
+# training_log_20260815_153000.csv) instead of appending to the same
+# LOG_CSV every time, so separate runs' generations never blend together in
+# one file. plot_progress.py's existing "training_log*.csv" glob + --latest
+# flag already picks up whichever file is newest. Every row also carries a
+# run_id column regardless of this flag, as a second line of defense if you
+# ever do point two runs at the same file. Set False to restore the old
+# fixed-filename-append behavior.
+LOG_CSV_TIMESTAMPED = True
 HUD_ENABLED = True    # draw status text on the emulator window
 
 # -----------------------------
@@ -225,12 +857,37 @@ HUD_ENABLED = True    # draw status text on the emulator window
 #
 # Axes are normalized to [0.0, 1.0] (0 = left/top, 1 = right/bottom),
 # so center = 0.5.
+# Optional post-calibration clip bounds can rein in edge-only overshoot while
+# preserving near-identity mapping over most of the screen.
 # -----------------------------
 GUNCON_CALIB = {
     "center_x": 0.5,
     "center_y": 0.5,
-    "scale_x": 0.94,   # DuckStation-verified: X axis to 94%
-    "scale_y": 1.0,    # Y already perfect
-    "offset_x": 0.0,
-    "offset_y": 0.0,
+
+    # 2026-09-15: values MEASURED empirically by calibrate_guncon.py, which
+    # drives the axes to known positions and reads the real on-screen reticle
+    # back from RAM cursor_x/cursor_y. The uncorrected device mapping (identity
+    # calibration) was, with R^2 = 1.0000 on both axes:
+    #     X:  reticle = 1.0872 * written - 0.0970
+    #     Y:  reticle = 1.0390 * written - 0.0043
+    # The dominant fault was the X OFFSET of -0.097 (a flat ~9.7% leftward shift
+    # of EVERY shot), which the previous config never corrected (offset_x=0.0);
+    # the old scale_x=0.94 additionally compressed right-side aim further left.
+    # Net: an enemy at x=0.80 landed the reticle at ~0.753 (~4.7% screen left of
+    # target) -- the "always shoots to the left of him" symptom on right-side
+    # enemies. Solving reticle(T(v)) = v for the correcting transform
+    # T(v) = center + (v-center)*scale + offset gives scale = 1/slope,
+    # offset = (0.5 - intercept)/slope - 0.5. These values make the written aim
+    # land where intended end-to-end (validated by re-running the probe). The
+    # earlier scale_x=0.94 note below is superseded -- it was a DuckStation-
+    # derived guess that did not transfer to this Nymashock/BizHawk build.
+    # policy.py's learned drift_gain still layers a fine-adjustment on top.
+    "scale_x": 0.9198,
+    "scale_y": 0.9625,
+    "offset_x": 0.0491,
+    "offset_y": -0.0146,
+    "min_x": 0.0,
+    "max_x": 1.0,
+    "min_y": 0.0,
+    "max_y": 1.0,
 }

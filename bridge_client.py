@@ -44,10 +44,16 @@ Commands (payload text, before framing):
     frame                                            -> OK <framecount>
     hud <line1|line2|...>                            -> OK
     hud_clear                                        -> OK
+    screenshot                                       -> (raw BMP bytes, length-
+                                                        prefixed just like every
+                                                        other reply; NO trailing
+                                                        OK -- see get_screenshot)
 Errors come back as: ERR <message>
 """
 
 import socket
+
+import numpy as np
 
 from config import GUNCON_CALIB
 
@@ -56,6 +62,44 @@ from config import GUNCON_CALIB
 HANDSHAKE_TIMEOUT = 120.0
 # Per-attempt send/recv timeout while polling the handshake.
 HANDSHAKE_POLL_INTERVAL = 0.5
+
+
+def _decode_image_bytes(data: bytes) -> np.ndarray:
+    """Decode a screenshot payload (PNG or BMP -- see get_screenshot's
+    IMAGE FORMAT NOTE) into an HxWx3 uint8 RGB array.
+
+    Uses cv2.imdecode so any format BizHawk decides to encode with (PNG in
+    2.11.1's Mono build, but this could change if the C# side ever swaps
+    ImageConverter for something explicit) just works without another wire-
+    format regression. Imported lazily so this module still loads (and every
+    non-vision command still works) on machines without opencv installed --
+    only get_screenshot itself fails there, with a clearer message than
+    ImportError-at-import-time.
+    """
+    try:
+        import cv2  # type: ignore
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise RuntimeError(
+            "cv2 is required for get_screenshot() decoding. "
+            "Install opencv-python-headless (see requirements.txt)."
+        ) from exc
+
+    if not data:
+        raise ValueError("Empty screenshot payload from BizHawk")
+
+    arr = np.frombuffer(data, dtype=np.uint8)
+    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if bgr is None:
+        # Include the first bytes of the payload so the failure mode
+        # (unexpected magic) is diagnosable from the log without needing a
+        # second run to capture a dump. 16 bytes is enough for PNG/BMP/JPEG/
+        # length-prefix framing bugs to be spotted at a glance.
+        preview = data[:16].hex()
+        raise ValueError(
+            f"cv2.imdecode failed on {len(data)}-byte screenshot payload "
+            f"(first 16 bytes hex: {preview})"
+        )
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
 def apply_guncon_calibration(aim_x, aim_y):
@@ -68,9 +112,15 @@ def apply_guncon_calibration(aim_x, aim_y):
     c = GUNCON_CALIB
     x = c["center_x"] + (aim_x - c["center_x"]) * c["scale_x"] + c["offset_x"]
     y = c["center_y"] + (aim_y - c["center_y"]) * c["scale_y"] + c["offset_y"]
-    # clamp so we never send out-of-range coordinates to the port
-    x = min(1.0, max(0.0, x))
-    y = min(1.0, max(0.0, y))
+    # Optional post-calibration clip bounds allow edge-specific guard rails
+    # (e.g. rein in right-edge overshoot) while preserving near-identity
+    # mapping over most of the screen.
+    min_x = float(c.get("min_x", 0.0))
+    max_x = float(c.get("max_x", 1.0))
+    min_y = float(c.get("min_y", 0.0))
+    max_y = float(c.get("max_y", 1.0))
+    x = min(max_x, max(min_x, x))
+    y = min(max_y, max(min_y, y))
     return x, y
 
 
@@ -106,11 +156,13 @@ class BridgeClient:
             raise RuntimeError("Bridge not connected. Call connect() first.")
         self.sock.sendall(self._frame(payload))
 
-    def _recv_message(self) -> str:
-        """Read one length-prefixed message: decimal length, space, payload.
+    def _recv_message_bytes(self) -> bytes:
+        """Read one length-prefixed message and return the RAW payload bytes.
 
-        May raise socket.timeout if nothing arrives within the socket timeout.
-        Returns the decoded payload (prefix stripped).
+        Same wire format as ``_recv_message`` but skips the UTF-8 decode step
+        so binary payloads (e.g. the BMP screenshot from BizHawk's
+        ``comm.socketServerScreenShot``) round-trip byte-exact. All existing
+        text commands still go through ``_recv_message`` and decode as UTF-8.
         """
         if self.sock is None:
             raise RuntimeError("Bridge not connected. Call connect() first.")
@@ -130,10 +182,11 @@ class BridgeClient:
         except ValueError:
             raise RuntimeError(f"Malformed length prefix: {length_str!r}")
 
-        # 2. Ensure we have the full payload of n bytes.
+        # 2. Ensure we have the full payload of n bytes. Bigger recv chunk than
+        # the text path because a screenshot BMP is ~256 KB, not 100 B.
         self._recv_buf = rest
         while len(self._recv_buf) < n:
-            chunk = sock.recv(4096)
+            chunk = sock.recv(65536)
             if chunk == b"":
                 raise RuntimeError(
                     "Bridge disconnected mid-message "
@@ -143,7 +196,11 @@ class BridgeClient:
 
         payload = self._recv_buf[:n]
         self._recv_buf = self._recv_buf[n:]
-        return payload.decode("utf-8", errors="replace")
+        return payload
+
+    def _recv_message(self) -> str:
+        """Read one length-prefixed message and decode it as UTF-8 text."""
+        return self._recv_message_bytes().decode("utf-8", errors="replace")
 
     # -- lifecycle ------------------------------------------------------
 
@@ -276,6 +333,27 @@ class BridgeClient:
             raise RuntimeError(f"Bridge returned no value for 'read_u16 0x{addr:X}'")
         return int(resp)
 
+    def read_u16_multi(self, addrs) -> list:
+        """Read several u16 RAM values in ONE round trip.
+
+        Added 2026-09-05: VISION_PROFILE timing (see repo memory) showed
+        ``TimeCrisisEnv._read_core()``'s six sequential ``read_u16()`` calls
+        costing ~75-90ms COMBINED per frame, even though each individual
+        memory read is essentially free on the BizHawk side -- the cost is
+        the fixed per-command round-trip latency of ``bizhawk_bridge.lua``'s
+        main loop (one socket command serviced per ``emu.yield()``), paid
+        once per command regardless of what it does. Batching N addresses
+        into a single ``read_u16_multi`` command collapses N round trips
+        into 1.
+        """
+        addr_str = " ".join(f"0x{a:X}" for a in addrs)
+        resp = self._cmd(f"read_u16_multi {addr_str}")
+        if resp is None:
+            raise RuntimeError(
+                f"Bridge returned no value for 'read_u16_multi {addr_str}'"
+            )
+        return [int(v) for v in resp.split()]
+
     def set_input(self, shoot: bool, peek: bool, aim_x: float = 0.5, aim_y: float = 0.5):
         # Apply the Guncon calibration exactly once, right before sending.
         cx, cy = apply_guncon_calibration(aim_x, aim_y)
@@ -297,6 +375,45 @@ class BridgeClient:
         if resp is None:
             raise RuntimeError("Bridge returned no value for 'frame'")
         return int(resp)
+
+    def get_screenshot(self) -> np.ndarray:
+        """Capture the current emulator frame as an HxWx3 uint8 RGB array.
+
+        Sends the ``screenshot`` command, which the Lua bridge services by
+        calling ``comm.socketServerScreenShot()``. BizHawk writes the image
+        straight down the socket using the same length-prefix wire format as
+        every other reply (verified against BizHawk 2.11.1
+        ``SocketServer.PrefixWithLength`` -> ``SocketServer.SendScreenshot``).
+        Unlike every other command there is NO trailing ``OK`` -- the framed
+        image IS the reply -- so we read the payload as raw bytes via
+        ``_recv_message_bytes`` (never via ``_cmd``, which would try to UTF-8
+        decode the binary payload).
+
+        IMAGE FORMAT NOTE:
+            BizHawk's ``NetworkingTakeScreenshot`` callback (MainForm.cs) is:
+
+                (byte[]) new ImageConverter()
+                    .ConvertTo(MakeScreenshotImage().ToSysdrawingBitmap(),
+                               typeof(byte[]))
+
+            ``ImageConverter.ConvertTo(Bitmap, typeof(byte[]))`` serialises
+            using ``Bitmap.Save(stream, RawFormat)``. A freshly-constructed
+            ``Format32bppArgb`` bitmap's ``RawFormat`` is
+            ``ImageFormat.MemoryBmp``, which .NET/Mono treats as
+            "unspecified" and quietly falls back to **PNG** encoding, NOT
+            raw BMP. The docstring / earlier code that decoded via
+            ``vision.decode_bmp`` was WRONG about the wire format; the
+            payload starts with ``\\x89PNG``, not ``BM``, and blew up as
+            ``ValueError("Not a BMP file (missing 'BM' magic)")`` the first
+            time this ran against a real BizHawk. Real fix: decode with
+            OpenCV's format-agnostic ``cv2.imdecode`` so BMP, PNG, or any
+            future format change on BizHawk's side just works.
+        """
+        if self.sock is None:
+            raise RuntimeError("Bridge not connected. Call connect() first.")
+        self._send("screenshot")
+        img_bytes = self._recv_message_bytes()
+        return _decode_image_bytes(img_bytes)
 
     def hud(self, lines):
         safe = [str(s).replace("|", "/").replace("\n", " ") for s in lines]

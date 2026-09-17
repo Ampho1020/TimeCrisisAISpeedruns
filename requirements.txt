@@ -1,2 +1,12 @@
 numpy
 matplotlib
+# Vision stack (Phase 2 of the vision-conditioned schedule plan).
+# opencv-python-headless: classical CV toolbox (MOG2 background subtraction,
+#   connectedComponentsWithStats, template matching, HOG, etc.). Headless
+#   variant avoids a duplicate Qt install alongside the existing PyQt5 on the
+#   dev machine and works CPU-only on any Linux target.
+# onnxruntime: hook for a fine-tuned YOLO/RT-DETR model (Phase 2 ONNXDetector
+#   slot). No model file ships with the repo -- runtime auto-falls back to
+#   the classical detector when config.VISION_ONNX_MODEL_PATH is absent.
+opencv-python-headless>=4.8
+onnxruntime>=1.16

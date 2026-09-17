@@ -44,12 +44,36 @@
 --
 -- Commands (one per line):
 --   read_u16 <addr>                               -> OK <value>
+--   read_u16_multi <addr1> <addr2> ...            -> OK <v1> <v2> ...
 --   set_input <shoot01> <peek01> <aim_x> <aim_y>  -> OK   (aim_* optional)
 --   input_state                                   -> OK <shoot01> <peek01> <aim_x> <aim_y>
 --   step <n>                                      -> OK
 --   load <slot> / save <slot>                     -> OK
 --   frame                                         -> OK <framecount>
 --   hud <line1|line2|...> / hud_clear             -> OK
+--   screenshot                                    -> (image payload framed as "{N} <img_bytes>", NO trailing OK)
+--
+-- SCREENSHOT NOTE
+--   comm.socketServerScreenShot() writes the current framebuffer straight
+--   down the socket using BizHawk's standard length-prefix wire format
+--   (verified against BizHawk 2.11.1 SocketServer.cs PrefixWithLength) --
+--   i.e. "{byte_count} <img_bytes>", no newline, no framing changes.
+--   Because that IS the reply to "screenshot", the command handler returns
+--   nil below so the dispatcher does NOT append its usual "OK\n" and the
+--   client's BridgeClient.get_screenshot() sees exactly one framed message
+--   (the image) per request.
+--
+--   Note on IMAGE format (2026-08-10, found by real-BizHawk test):
+--   BizHawk's NetworkingTakeScreenshot callback in MainForm.cs is
+--       (byte[]) new ImageConverter().ConvertTo(
+--                    MakeScreenshotImage().ToSysdrawingBitmap(),
+--                    typeof(byte[]))
+--   which serialises Bitmap via Bitmap.Save(stream, RawFormat). A freshly-
+--   constructed Format32bppArgb bitmap's RawFormat is ImageFormat.MemoryBmp,
+--   which .NET/Mono treats as "unspecified" and quietly falls back to PNG
+--   encoding, NOT raw BMP. The Python client therefore decodes with
+--   cv2.imdecode (format-agnostic) rather than a BMP-specific parser --
+--   see bridge_client._decode_image_bytes.
 --
 -- NOTES
 --   * Aim X/Y are now written to the Guncon axes via joypad.setanalog, so the
@@ -173,6 +197,21 @@ local function handle(line)
     if not addr then return "ERR bad_addr\n" end
     return "OK " .. tostring(memory.read_u16_le(addr, DOMAIN)) .. "\n"
 
+  elseif cmd == "read_u16_multi" then
+    -- Batches several read_u16 addresses into ONE round trip. Added
+    -- 2026-09-05: the main loop below services exactly one socket command
+    -- per emu.yield(), so N sequential read_u16 calls cost N loop
+    -- iterations' worth of round-trip latency even though each individual
+    -- memory.read_u16_le() call itself is essentially free -- batching
+    -- collapses that to a single round trip regardless of N.
+    local vals = {}
+    for i = 2, #parts do
+      local addr = parse_int(parts[i])
+      if not addr then return "ERR bad_addr\n" end
+      table.insert(vals, tostring(memory.read_u16_le(addr, DOMAIN)))
+    end
+    return "OK " .. table.concat(vals, " ") .. "\n"
+
   elseif cmd == "set_input" then
     shoot = (parts[2] == "1")
     peek  = (parts[3] == "1")
@@ -217,6 +256,16 @@ local function handle(line)
   elseif cmd == "hud_clear" then
     hud_lines = {}
     return "OK\n"
+
+  elseif cmd == "screenshot" then
+    -- comm.socketServerScreenShot() sends the framed image directly on the
+    -- socket (see SCREENSHOT NOTE at the top of this file) and returns a
+    -- Lua-side status string that we DISCARD -- Python doesn't see it. We
+    -- return nil so the dispatcher below skips its usual OK-reply send;
+    -- otherwise Python would have to read two framed messages per request
+    -- (image then OK) instead of one.
+    local _ = comm.socketServerScreenShot()
+    return nil
 
   else
     return "ERR unknown_cmd\n"
@@ -308,7 +357,15 @@ while true do
     local line = comm.socketServerResponse()
     if line and line ~= "" then
       local ok, resp = pcall(handle, line)
-      comm.socketServerSend(ok and resp or ("ERR " .. tostring(resp) .. "\n"))
+      if not ok then
+        comm.socketServerSend("ERR " .. tostring(resp) .. "\n")
+      elseif resp ~= nil then
+        -- resp == nil means the handler already spoke on the wire itself
+        -- (e.g. the "screenshot" command, which sent a framed image via
+        -- comm.socketServerScreenShot()). Skip our default OK-reply send in
+        -- that case so exactly one framed message per request goes out.
+        comm.socketServerSend(resp)
+      end
     end
     draw_hud()
     emu.yield()
