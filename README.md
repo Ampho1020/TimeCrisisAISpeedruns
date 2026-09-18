@@ -194,6 +194,40 @@ all useful RAM. Two safeguards prevent the episode from idling forever:
    `life` are all identical for `CONTINUE_SCREEN_STALE_TICKS` consecutive
    decision ticks, the episode is force-terminated.
 
+## Aim precision: the leftward shot-grouping fix
+
+For a long time after switching from the old 5-frame decision cadence to
+full-speed, no-frame-skip per-frame play, live runs showed shots consistently
+**grouped to one side** of the target — right-side enemies were peppered a bit
+to the left, several magazines in a row. It looked like a Guncon
+offset/scaling bug, but it was not.
+
+A software trace of the entire aim pipeline (detector centroid →
+`policy.act_vision_schedule` blend → `bridge_client.apply_guncon_calibration`
+→ measured hardware device response) against the real checkpoint showed:
+
+- **The Guncon calibration is innocent.** The calibration transform is, by
+  design, the inverse of the measured device response, so
+  `device(calibrate(x)) == x` to four decimals — it cancels the hardware and
+  the shot lands exactly where the policy aimed. (When reasoning about where a
+  shot *lands*, use `device(calibrate(aim))`, not the written cursor value.)
+- **The real cause was the vision blend residual.** `act_vision_schedule`
+  moved only `blend_gain = tanh(vision_gain) ≈ 0.9` of the way from the learned
+  per-tick *base aim* (which sits near screen center) to the detected enemy.
+  The leftover ~10% weight on the center-ish base aim pulled every off-center
+  shot back toward center (regression to the mean): right-side targets landed
+  left, left-side targets landed right, and the miss grew with distance from
+  center. This only became visible once per-frame play removed the old cadence
+  smoothing that had masked it.
+
+**Fix:** on a confident detection (`best_conf ≥ VISION_FORCE_SHOOT_CONFIDENCE`)
+`act_vision_schedule` now snaps `blend_gain = 1.0`, aiming exactly at the
+detected target instead of a partial blend. In simulation this dropped the
+landing error to ≤0.001 at every screen position; live it eliminated the
+grouping (shots spot-on) and lifted accuracy noticeably. The fix is
+inference-time only and does not change the theta shape, so existing
+checkpoints remain compatible — no retrain required.
+
 ## Known limitations
 
 - **No enemy-position RAM.** The cursor RAM (`cursor_x` / `cursor_y`) tells the
