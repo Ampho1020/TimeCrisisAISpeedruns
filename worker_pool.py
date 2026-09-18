@@ -57,6 +57,7 @@ class WorkerPool:
         self.envs = [TimeCrisisEnv(host=HOST, port=p) for p in self.ports]
         self._procs: list[subprocess.Popen] = []
         self._executor: ThreadPoolExecutor | None = None
+        self._closing = False
 
     # -- lifecycle ------------------------------------------------------
 
@@ -94,6 +95,11 @@ class WorkerPool:
         print(f"[pool] {self.num_workers} worker(s) live.", flush=True)
 
     def close(self):
+        # Signal in-flight evals to stop recovering: without this, threads that
+        # are mid-episode when we tear down catch the resulting socket errors
+        # and try to "recover" by relaunching BizHawk, leaving orphan emulators
+        # behind (and racing with the list teardown below).
+        self._closing = True
         if self._executor is not None:
             self._executor.shutdown(wait=False)
             self._executor = None
@@ -111,6 +117,92 @@ class WorkerPool:
 
     # -- evaluation -----------------------------------------------------
 
+    def _restart_worker(self, worker_idx: int):
+        """Tear down and rebuild ONE flaky worker's emulator + bridge in place.
+
+        A single BizHawk instance occasionally drops its socket mid-run (e.g.
+        the bridge returns no value for a ``read_u16_multi`` after the emulator
+        wedges on a continue/menu screen). Without recovery that one dropout
+        raises straight through ``evaluate()`` and aborts the entire training
+        run, throwing away every generation so far. This recycles only the
+        affected port -- the other workers keep their live connections -- so
+        the run can carry on. Each worker index is driven by exactly one
+        thread, so mutating ``self._procs[worker_idx]``/``self.envs[worker_idx]``
+        here is race-free.
+        """
+        port = self.ports[worker_idx]
+        env = self.envs[worker_idx]
+        print(
+            f"[pool] restarting worker {worker_idx} on port {port} "
+            f"after a bridge failure...",
+            flush=True,
+        )
+        # Drop the old bridge sockets (best-effort).
+        try:
+            env.close()
+        except Exception:
+            pass
+        # Kill the old emulator process, if we launched it.
+        if AUTO_LAUNCH_BIZHAWK and worker_idx < len(self._procs):
+            old = self._procs[worker_idx]
+            try:
+                old.terminate()
+                old.wait(timeout=10)
+            except Exception:
+                try:
+                    old.kill()
+                except Exception:
+                    pass
+        # Rebind the listener BEFORE relaunching so the emulator can dial in.
+        env.start_listening()
+        if AUTO_LAUNCH_BIZHAWK:
+            self._procs[worker_idx] = _launch_bizhawk(port)
+        else:
+            print(
+                f"[pool] AUTO_LAUNCH_BIZHAWK is off -- relaunch BizHawk on "
+                f"port {port} now so worker {worker_idx} can reconnect.",
+                flush=True,
+            )
+        # Block until it reconnects + completes the Lua handshake.
+        env.finish_connect()
+        print(f"[pool] worker {worker_idx} back online.", flush=True)
+
+    def _eval_with_recovery(self, worker_idx: int, candidate, max_restarts: int = 2):
+        """Evaluate one candidate, restarting the worker and retrying on a
+        bridge/emulator failure. Only raises (aborting the run) if the worker
+        cannot be brought back after ``max_restarts`` attempts -- i.e. a truly
+        dead setup, not a transient blip."""
+        attempt = 0
+        while True:
+            try:
+                return self.envs[worker_idx].episode_fitness(candidate)
+            except Exception as exc:
+                # Don't try to recover a failure that is just the pool being
+                # torn down -- that only spawns orphan emulators mid-shutdown.
+                if self._closing:
+                    raise
+                attempt += 1
+                print(
+                    f"[pool] worker {worker_idx} eval failed "
+                    f"(attempt {attempt}/{max_restarts}): {exc!r}",
+                    flush=True,
+                )
+                if attempt > max_restarts:
+                    print(
+                        f"[pool] worker {worker_idx} unrecoverable after "
+                        f"{max_restarts} restart(s) -- aborting.",
+                        flush=True,
+                    )
+                    raise
+                try:
+                    self._restart_worker(worker_idx)
+                except Exception as rexc:
+                    print(
+                        f"[pool] worker {worker_idx} restart failed: {rexc!r}",
+                        flush=True,
+                    )
+                    raise
+
     def evaluate(self, candidates, progress_cb=None):
         """Evaluate every candidate; returns aligned [(fitness, info), ...].
 
@@ -127,9 +219,8 @@ class WorkerPool:
 
         def run_chunk(worker_idx: int):
             nonlocal done
-            env = self.envs[worker_idx]
             for i in range(worker_idx, len(candidates), self.num_workers):
-                results[i] = env.episode_fitness(candidates[i])
+                results[i] = self._eval_with_recovery(worker_idx, candidates[i])
                 if progress_cb is not None:
                     with done_lock:
                         done += 1

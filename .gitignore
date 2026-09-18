@@ -18,3 +18,4 @@ VideoExport/
 Dataset_base/
 images/
 maingame_fulltrain/
+*.png

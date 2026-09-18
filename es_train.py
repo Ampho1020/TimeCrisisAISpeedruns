@@ -103,6 +103,16 @@ def _mean_peek_gain(theta_batch: np.ndarray) -> float:
     return float(np.tanh(batch[:, PEEK_GAIN_IDX]).mean())
 
 
+def _mean_ammo_gain(theta_batch: np.ndarray) -> float:
+    """Mean tanh(ammo_gain_logit) across candidates (vision_schedule only).
+    Same shape as the other _mean_*_gain helpers; logged so a collapse or
+    runaway of the ammo-conditioned blend is visible per generation."""
+    if POLICY_MODE != "vision_schedule":
+        return 0.0
+    batch = theta_batch if theta_batch.ndim > 1 else theta_batch[None, :]
+    return float(np.tanh(batch[:, AMMO_GAIN_IDX]).mean())
+
+
 def train(init_theta_path: str | None = None):
     if POP_SIZE % 2 != 0:
         raise ValueError("POP_SIZE must be even for mirrored sampling.")
@@ -336,6 +346,8 @@ def train(init_theta_path: str | None = None):
             theta_drift_gain = _mean_drift_gain(theta)
             mean_peek_gain = _mean_peek_gain(candidates)
             theta_peek_gain = _mean_peek_gain(theta)
+            mean_ammo_gain = _mean_ammo_gain(candidates)
+            theta_ammo_gain = _mean_ammo_gain(theta)
 
             # --- diagnostics ---
             best_i = int(np.argmax(fitnesses))
@@ -347,7 +359,12 @@ def train(init_theta_path: str | None = None):
             # exactly 0.0/1.0 when EPISODES_PER_CANDIDATE == 1.
             clear_rate = float(np.mean([x["cleared"] for x in infos]))
             timeout_rate = float(np.mean([x["timed_out"] for x in infos]))
+            dead_rate = float(np.mean([x["dead"] for x in infos]))
             mean_acc = float(np.mean([x["accuracy"] for x in infos]))
+            mean_time = float(np.mean([x["elapsed"] for x in infos]))
+            mean_damage = float(np.mean([x["damage"] for x in infos]))
+            mean_shots_fired = float(np.mean([x["shots_fired"] for x in infos]))
+            mean_shots_hit = float(np.mean([x["shots_hit"] for x in infos]))
             # Multi-screen diagnostics (added 2026-08-10 alongside the
             # MULTI_CLEAR_BONUS quadratic in env_timecrisis.py). mean_screens
             # is the population-average number of screens cleared per
@@ -365,11 +382,21 @@ def train(init_theta_path: str | None = None):
             mean_aim_span_x = float(np.mean([x["aim_span_x"] for x in infos]))
             mean_aim_span_y = float(np.mean([x["aim_span_y"] for x in infos]))
             mean_aim_dx = float(np.mean([x["mean_abs_aim_dx"] for x in infos]))
+            mean_aim_dy = float(np.mean([x["mean_abs_aim_dy"] for x in infos]))
             mean_shot_left_frac = float(np.mean([x["shot_left_frac"] for x in infos]))
             mean_shot_mid_frac = float(np.mean([x["shot_mid_frac"] for x in infos]))
             mean_shot_right_frac = float(np.mean([x["shot_right_frac"] for x in infos]))
+            mean_hit_rate_left = float(np.mean([x["hit_rate_left"] for x in infos]))
+            mean_hit_rate_mid = float(np.mean([x["hit_rate_mid"] for x in infos]))
+            mean_hit_rate_right = float(np.mean([x["hit_rate_right"] for x in infos]))
             mean_hit_delta = float(np.mean([x["mean_hit_delta"] for x in infos]))
             mean_reaction_latency = float(np.mean([x["mean_reaction_latency"] for x in infos]))
+            # Trigger / cover discipline counts (per-episode tick totals).
+            mean_dry_fire = float(np.mean([x["dry_fire_ticks"] for x in infos]))
+            mean_no_shot_exposed = float(np.mean([x["no_shot_exposed_ticks"] for x in infos]))
+            mean_hesitated_cover = float(np.mean([x["hesitated_cover_ticks"] for x in infos]))
+            mean_reload_correct = float(np.mean([x["reload_correct_count"] for x in infos]))
+            mean_continue_ticks = float(np.mean([x["continue_screen_count"] for x in infos]))
 
             print(
                 f"\n=== gen {gen:03d} | best {fitnesses[best_i]:8.2f} "
@@ -407,37 +434,52 @@ def train(init_theta_path: str | None = None):
             logger.log({
                 "run_id": run_id,
                 "gen": gen,
+                "sigma_used": sigma_this_gen,
                 "best": float(fitnesses[best_i]),
                 "mean": float(fitnesses.mean()),
                 "std": std,
                 "spread": spread,
+                "theta_fitness": theta_fitness,
                 "clear_rate": clear_rate,
+                "timeout_rate": timeout_rate,
+                "dead_rate": dead_rate,
+                "theta_clear": theta_info["cleared"],
+                "theta_time": theta_info["elapsed"],
+                "theta_damage": theta_info["damage"],
+                "theta_acc": theta_info["accuracy"],
+                "theta_screens_cleared": float(theta_info.get("screens_cleared", 0)),
                 "best_time": best["elapsed"],
                 "best_damage": best["damage"],
                 "best_acc": best["accuracy"],
+                "mean_time": mean_time,
+                "mean_damage": mean_damage,
                 "mean_acc": mean_acc,
+                "mean_shots_fired": mean_shots_fired,
+                "mean_shots_hit": mean_shots_hit,
+                "mean_screens_cleared": mean_screens,
+                "max_screens_cleared": max_screens,
                 "mean_peek_flips": mean_flips,
                 "mean_peek_hold": mean_hold,
                 "mean_cover_time": mean_cover_time,
+                "mean_dry_fire": mean_dry_fire,
+                "mean_no_shot_exposed": mean_no_shot_exposed,
+                "mean_hesitated_cover": mean_hesitated_cover,
+                "mean_reload_correct": mean_reload_correct,
+                "mean_continue_ticks": mean_continue_ticks,
                 "mean_aim_x_std": mean_aim_x_std,
                 "mean_aim_y_std": mean_aim_y_std,
                 "mean_aim_span_x": mean_aim_span_x,
                 "mean_aim_span_y": mean_aim_span_y,
                 "mean_aim_dx": mean_aim_dx,
-                "mean_hit_delta": mean_hit_delta,
-                "mean_reaction_latency": mean_reaction_latency,
+                "mean_aim_dy": mean_aim_dy,
                 "mean_shot_left_frac": mean_shot_left_frac,
                 "mean_shot_mid_frac": mean_shot_mid_frac,
                 "mean_shot_right_frac": mean_shot_right_frac,
-                "sigma_used": sigma_this_gen,
-                "theta_fitness": theta_fitness,
-                "theta_clear": theta_info["cleared"],
-                "theta_time": theta_info["elapsed"],
-                "theta_damage": theta_info["damage"],
-                "theta_acc": theta_info["accuracy"],
-                "mean_screens_cleared": mean_screens,
-                "max_screens_cleared": max_screens,
-                "theta_screens_cleared": float(theta_info.get("screens_cleared", 0)),
+                "mean_hit_rate_left": mean_hit_rate_left,
+                "mean_hit_rate_mid": mean_hit_rate_mid,
+                "mean_hit_rate_right": mean_hit_rate_right,
+                "mean_hit_delta": mean_hit_delta,
+                "mean_reaction_latency": mean_reaction_latency,
                 "mean_vision_gain": mean_vision_gain,
                 "theta_vision_gain": theta_vision_gain,
                 "mean_shoot_gain": mean_shoot_gain,
@@ -446,6 +488,8 @@ def train(init_theta_path: str | None = None):
                 "theta_drift_gain": theta_drift_gain,
                 "mean_peek_gain": mean_peek_gain,
                 "theta_peek_gain": theta_peek_gain,
+                "mean_ammo_gain": mean_ammo_gain,
+                "theta_ammo_gain": theta_ammo_gain,
             })
 
             if gen % CHECKPOINT_EVERY == 0:

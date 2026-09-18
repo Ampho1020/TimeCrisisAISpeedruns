@@ -5,52 +5,55 @@ import os
 
 
 class TrainingLogger:
+    # One row per generation. Every column es_train.py can compute is logged
+    # here so plot_progress.py (and manual CSV inspection) has the full picture
+    # of a run -- population means, the best candidate, and the actual center
+    # theta -- without silently dropping anything. Columns are grouped by
+    # concern; plot_progress.py tolerates missing/empty cells per-column, so
+    # older runs and non-vision_schedule modes still plot cleanly.
     FIELDS = [
-        "run_id",
-        "gen", "best", "mean", "std", "spread",
-        "clear_rate", "best_time", "best_damage", "best_acc", "mean_acc",
+        # --- identity / ES state ---
+        "run_id", "gen", "sigma_used",
+        # --- fitness (population spread + the actual center theta) ---
+        "best", "mean", "std", "spread", "theta_fitness",
+        # --- outcome rates across the population (fractions in [0, 1]) ---
+        "clear_rate", "timeout_rate", "dead_rate",
+        # --- center-theta outcome this generation ---
+        "theta_clear", "theta_time", "theta_damage", "theta_acc",
+        "theta_screens_cleared",
+        # --- best candidate this generation ---
+        "best_time", "best_damage", "best_acc",
+        # --- population-mean outcomes ---
+        "mean_time", "mean_damage", "mean_acc",
+        "mean_shots_fired", "mean_shots_hit",
+        # Multi-screen tracking (MULTI_CLEAR_BONUS in config.py). mean/max are
+        # population aggregates; theta_screens_cleared (above) is the center.
+        "mean_screens_cleared", "max_screens_cleared",
+        # --- cover / peek behaviour ---
         "mean_peek_flips", "mean_peek_hold", "mean_cover_time",
+        # --- trigger / cover discipline (per-episode tick counts, pop mean) ---
+        "mean_dry_fire", "mean_no_shot_exposed", "mean_hesitated_cover",
+        "mean_reload_correct", "mean_continue_ticks",
+        # --- aim behaviour / lane usage ---
         "mean_aim_x_std", "mean_aim_y_std", "mean_aim_span_x", "mean_aim_span_y",
-        "mean_aim_dx", "mean_hit_delta",
-        # Reaction-latency tracking (added 2026-09-09, recommendation #3 of
-        # the peek_gain follow-up). Mean ticks between a target first
-        # becoming visible and the first shot fired at it (see
-        # REACTION_LATENCY_PENALTY in config.py). Should trend DOWN if ES is
-        # learning to react faster to visible targets.
-        "mean_reaction_latency",
+        "mean_aim_dx", "mean_aim_dy",
         "mean_shot_left_frac", "mean_shot_mid_frac", "mean_shot_right_frac",
-        "sigma_used",
-        "theta_fitness", "theta_clear", "theta_time", "theta_damage", "theta_acc",
-        # Multi-screen tracking (added 2026-08-10 alongside MULTI_CLEAR_BONUS
-        # in config.py). mean_screens_cleared / max_screens_cleared aggregate
-        # across the population per generation; theta_screens_cleared is the
-        # current mean-theta's single-episode count.
-        "mean_screens_cleared", "max_screens_cleared", "theta_screens_cleared",
-        # Vision-gain tracking (added 2026-08-15 alongside VISION_GAIN_WARMSTART
-        # in config.py). mean_vision_gain is the population's average
-        # tanh(vision_gain_logit) across all MAX_TICKS rows (0.0 for
-        # non-vision_schedule POLICY_MODE); theta_vision_gain is the same
-        # computed on the updated center theta. Both should stay non-trivial
-        # (not collapse toward 0) if ES is keeping vision meaningfully in the
-        # aim blend rather than learning to ignore it.
+        "mean_hit_rate_left", "mean_hit_rate_mid", "mean_hit_rate_right",
+        # --- reaction / hit timing ---
+        # mean_hit_delta: mean frames between the reticle reaching a target and
+        # the hit registering. mean_reaction_latency: mean ticks between a
+        # target becoming visible and the first shot at it (REACTION_LATENCY_
+        # PENALTY in config.py). Both should trend DOWN.
+        "mean_hit_delta", "mean_reaction_latency",
+        # --- shared gain scalars (vision_schedule only; 0.0 otherwise) ---
+        # Each pair is population-mean tanh(gain_logit) and the same on the
+        # updated center theta. Watch for any collapsing toward 0 (ES learning
+        # to ignore that signal) vs. staying meaningfully engaged.
         "mean_vision_gain", "theta_vision_gain",
-        # Shoot-gain tracking (added 2026-08-17 alongside SHOOT_GAIN_WARMSTART
-        # in config.py -- fixes the trigger lagging behind the now-instant
-        # per-frame aim tracking). Same shape as the vision_gain pair above,
-        # but for tanh(shoot_gain_logit), the detection-presence blend into
-        # the shoot decision.
         "mean_shoot_gain", "theta_shoot_gain",
-        # Drift-gain tracking (learned edge-drift correction gain). Was
-        # already computed/passed by es_train.py but missing from FIELDS,
-        # so TrainingLogger.log() silently dropped it -- added here.
         "mean_drift_gain", "theta_drift_gain",
-        # Peek-gain tracking (added 2026-09-09 alongside PEEK_GAIN_WARMSTART
-        # in config.py -- fixes shoot's confidence-based force-override
-        # being a no-op whenever the open-loop schedule's peek happened to
-        # be False that tick). Same shape as the shoot_gain pair above, but
-        # for tanh(peek_gain_logit), the detection-presence blend into the
-        # peek (exposure) decision.
         "mean_peek_gain", "theta_peek_gain",
+        "mean_ammo_gain", "theta_ammo_gain",
     ]
 
     def __init__(self, path: str):

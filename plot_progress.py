@@ -50,150 +50,140 @@ def main():
         print("No data yet.")
         return
 
-    gens = [int(r["gen"]) for r in rows]
+    def series(key, scale=1.0):
+        """(generations, values) for one column, skipping blank/non-numeric
+        cells so older logs and non-vision_schedule runs plot cleanly."""
+        xs, ys = [], []
+        for r in rows:
+            v = r.get(key, "")
+            if v == "":
+                continue
+            try:
+                y = scale * float(v)
+            except ValueError:
+                continue
+            xs.append(int(r["gen"]))
+            ys.append(y)
+        return xs, ys
 
-    def col(k):
-        return [float(r[k]) for r in rows if r.get(k, "") != ""]
+    # Every panel is data-driven so adding a column to logger.py only needs a
+    # new entry here. Each series is (label, csv_key, scale, linestyle).
+    PCT = 100.0
+    panels = [
+        {"title": "fitness", "series": [
+            ("best", "best", 1.0, "-"),
+            ("mean", "mean", 1.0, "-"),
+            ("center theta", "theta_fitness", 1.0, "--")]},
+        {"title": "fitness std (~0 => raise SIGMA) / spread", "series": [
+            ("std", "std", 1.0, "-"),
+            ("spread", "spread", 1.0, ":")]},
+        {"title": "outcome rate %  (clear / timeout / dead)", "ylim": (-5, 105), "series": [
+            ("clear", "clear_rate", PCT, "-"),
+            ("timeout", "timeout_rate", PCT, "-"),
+            ("dead", "dead_rate", PCT, "-")]},
+        {"title": "clear time (ticks)  (\u2193 = faster)", "series": [
+            ("best", "best_time", 1.0, "-"),
+            ("pop mean", "mean_time", 1.0, "-"),
+            ("center theta", "theta_time", 1.0, "--")]},
+        {"title": "screens cleared / episode  (\u2191 = chaining)", "series": [
+            ("pop mean", "mean_screens_cleared", 1.0, "-"),
+            ("pop max", "max_screens_cleared", 1.0, "-"),
+            ("center theta", "theta_screens_cleared", 1.0, "--")]},
+        {"title": "accuracy %", "ylim": (-5, 105), "series": [
+            ("pop mean", "mean_acc", PCT, "-"),
+            ("pop best", "best_acc", PCT, "-"),
+            ("center theta", "theta_acc", PCT, "--")]},
+        {"title": "shots per episode (pop mean)", "series": [
+            ("fired", "mean_shots_fired", 1.0, "-"),
+            ("hit", "mean_shots_hit", 1.0, "-")]},
+        {"title": "damage per episode  (\u2193 = fewer hits taken)", "series": [
+            ("pop mean", "mean_damage", 1.0, "-"),
+            ("best", "best_damage", 1.0, "-"),
+            ("center theta", "theta_damage", 1.0, "--")]},
+        {"title": "mean ticks in cover  (\u2193 = less camping)",
+            "baselines": [(900, "always-cover (900)")], "series": [
+            ("cover ticks", "mean_cover_time", 1.0, "-")]},
+        {"title": "peek behaviour", "series": [
+            ("flips", "mean_peek_flips", 1.0, "-"),
+            ("hold score", "mean_peek_hold", 1.0, "-")]},
+        {"title": "trigger / cover discipline (ticks)", "series": [
+            ("dry fire", "mean_dry_fire", 1.0, "-"),
+            ("exposed no-shot", "mean_no_shot_exposed", 1.0, "-"),
+            ("hesitated cover", "mean_hesitated_cover", 1.0, "-"),
+            ("reload correct", "mean_reload_correct", 1.0, "-"),
+            ("continue-screen", "mean_continue_ticks", 1.0, ":")]},
+        {"title": "aim movement variability", "series": [
+            ("aim_x std", "mean_aim_x_std", 1.0, "-"),
+            ("aim_y std", "mean_aim_y_std", 1.0, "-"),
+            ("|aim dx|", "mean_aim_dx", 1.0, "--"),
+            ("|aim dy|", "mean_aim_dy", 1.0, "--")]},
+        {"title": "aim span (max-min)", "series": [
+            ("span x", "mean_aim_span_x", 1.0, "-"),
+            ("span y", "mean_aim_span_y", 1.0, "-")]},
+        {"title": "shot lane distribution % (L/M/R)", "ylim": (-5, 105), "series": [
+            ("left", "mean_shot_left_frac", PCT, "-"),
+            ("mid", "mean_shot_mid_frac", PCT, "-"),
+            ("right", "mean_shot_right_frac", PCT, "-")]},
+        {"title": "hit rate by lane % (L/M/R)", "ylim": (-5, 105), "series": [
+            ("left", "mean_hit_rate_left", PCT, "-"),
+            ("mid", "mean_hit_rate_mid", PCT, "-"),
+            ("right", "mean_hit_rate_right", PCT, "-")]},
+        {"title": "reaction timing (ticks)  (\u2193 = faster)", "series": [
+            ("hit delta", "mean_hit_delta", 1.0, "-"),
+            ("reaction latency", "mean_reaction_latency", 1.0, "-")]},
+        {"title": "gains \u2014 population mean  (\u21920 = ignoring signal)",
+            "baselines": [(0.0, None)], "series": [
+            ("vision", "mean_vision_gain", 1.0, "-"),
+            ("shoot", "mean_shoot_gain", 1.0, "-"),
+            ("drift", "mean_drift_gain", 1.0, "-"),
+            ("peek", "mean_peek_gain", 1.0, "-"),
+            ("ammo", "mean_ammo_gain", 1.0, "-")]},
+        {"title": "gains \u2014 center theta",
+            "baselines": [(0.0, None)], "series": [
+            ("vision", "theta_vision_gain", 1.0, "-"),
+            ("shoot", "theta_shoot_gain", 1.0, "-"),
+            ("drift", "theta_drift_gain", 1.0, "-"),
+            ("peek", "theta_peek_gain", 1.0, "-"),
+            ("ammo", "theta_ammo_gain", 1.0, "-")]},
+        {"title": "ES mutation step size (sigma)", "series": [
+            ("sigma", "sigma_used", 1.0, "-")]},
+    ]
 
-    def col_gens(k):
-        return [int(r["gen"]) for r in rows if r.get(k, "") != ""]
+    ncols = 2
+    nrows = (len(panels) + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(13, 3.1 * nrows), squeeze=False)
+    flat = [a for row in axes for a in row]
 
-    def has_col(k):
-        return any(r.get(k, "") != "" for r in rows)
+    for ax, panel in zip(flat, panels):
+        plotted = 0
+        for label, key, scale, style in panel["series"]:
+            xs, ys = series(key, scale)
+            if not xs:
+                continue
+            ax.plot(xs, ys, style, label=label, linewidth=1.3)
+            plotted += 1
+        labeled_baseline = False
+        if plotted:
+            for by, blabel in panel.get("baselines", []):
+                kw = {"color": "grey", "linestyle": "--", "linewidth": 0.8}
+                if blabel:
+                    kw["label"] = blabel
+                    labeled_baseline = True
+                ax.axhline(y=by, **kw)
+            if "ylim" in panel:
+                ax.set_ylim(*panel["ylim"])
+            if plotted > 1 or labeled_baseline:
+                ax.legend(fontsize=7, ncol=2)
+        else:
+            ax.text(0.5, 0.5, "no data yet", ha="center", va="center",
+                    transform=ax.transAxes)
+        ax.set_title(panel["title"], fontsize=9)
+        ax.grid(alpha=0.3)
+        ax.set_xlabel("generation")
 
-    fig, ax = plt.subplots(6, 2, figsize=(12, 19))
-
-    ax[0][0].plot(gens, col("best"), label="best")
-    ax[0][0].plot(gens, col("mean"), label="mean")
-    ax[0][0].set_title("fitness")
-    ax[0][0].legend()
-
-    ax[0][1].plot(gens, col("std"), color="tab:orange")
-    ax[0][1].set_title("fitness std   (~0 => raise SIGMA)")
-
-    ax[1][0].plot(gens, [100 * v for v in col("clear_rate")], color="tab:green")
-    ax[1][0].set_title("clear rate %")
-    ax[1][0].set_ylim(-5, 105)
-
-    ax[1][1].plot(gens, col("best_time"), color="tab:red")
-    ax[1][1].set_title("best clear time")
-
-    # --- cover / peek behaviour ---
-    ctime_g = col_gens("mean_cover_time")
-    hold_g  = col_gens("mean_peek_hold")
-
-    if ctime_g:
-        ax[2][0].plot(ctime_g, col("mean_cover_time"), color="tab:purple")
-        ax[2][0].axhline(y=900, color="grey", linestyle="--", linewidth=0.8,
-                         label="always-cover baseline (900 ticks)")
-        ax[2][0].set_title("mean ticks in cover   (↓ = less camping)")
-        ax[2][0].legend(fontsize=8)
-    else:
-        ax[2][0].text(0.5, 0.5, "no cover data yet",
-                      ha="center", va="center", transform=ax[2][0].transAxes)
-        ax[2][0].set_title("mean ticks in cover per episode")
-
-    if hold_g:
-        ax[2][1].plot(hold_g, col("mean_peek_hold"), color="tab:cyan")
-        ax[2][1].set_title("mean peek hold score   (\u2191 = proper peek cycles)")
-    else:
-        ax[2][1].text(0.5, 0.5, "no cover data yet",
-                      ha="center", va="center", transform=ax[2][1].transAxes)
-        ax[2][1].set_title("mean out-of-cover hold score")
-
-    # --- aim behavior / lane usage ---
-    if has_col("mean_aim_x_std") and has_col("mean_aim_y_std"):
-        ax[3][0].plot(col_gens("mean_aim_x_std"), col("mean_aim_x_std"), label="aim_x std")
-        ax[3][0].plot(col_gens("mean_aim_y_std"), col("mean_aim_y_std"), label="aim_y std")
-        if has_col("mean_aim_dx"):
-            ax[3][0].plot(col_gens("mean_aim_dx"), col("mean_aim_dx"), label="mean |aim dx|", linestyle="--")
-        ax[3][0].set_title("aim movement variability")
-        ax[3][0].legend(fontsize=8)
-    else:
-        ax[3][0].text(0.5, 0.5, "no aim-telemetry data yet",
-                      ha="center", va="center", transform=ax[3][0].transAxes)
-        ax[3][0].set_title("aim movement variability")
-
-    if (
-        has_col("mean_shot_left_frac")
-        and has_col("mean_shot_mid_frac")
-        and has_col("mean_shot_right_frac")
-    ):
-        ax[3][1].plot(col_gens("mean_shot_left_frac"),  [100 * v for v in col("mean_shot_left_frac")],  label="left")
-        ax[3][1].plot(col_gens("mean_shot_mid_frac"),   [100 * v for v in col("mean_shot_mid_frac")],   label="mid")
-        ax[3][1].plot(col_gens("mean_shot_right_frac"), [100 * v for v in col("mean_shot_right_frac")], label="right")
-        ax[3][1].set_ylim(-5, 105)
-        ax[3][1].set_title("shot lane distribution % (L/M/R)")
-        ax[3][1].legend(fontsize=8)
-    else:
-        ax[3][1].text(0.5, 0.5, "no lane-telemetry data yet",
-                      ha="center", va="center", transform=ax[3][1].transAxes)
-        ax[3][1].set_title("shot lane distribution % (L/M/R)")
-
-    # --- multi-screen progress (added 2026-08-10 alongside MULTI_CLEAR_BONUS) ---
-    if has_col("mean_screens_cleared"):
-        ax[4][0].plot(col_gens("mean_screens_cleared"), col("mean_screens_cleared"), label="pop mean")
-        if has_col("max_screens_cleared"):
-            ax[4][0].plot(col_gens("max_screens_cleared"), col("max_screens_cleared"), label="pop max")
-        if has_col("theta_screens_cleared"):
-            ax[4][0].plot(col_gens("theta_screens_cleared"), col("theta_screens_cleared"),
-                          label="center theta", linestyle="--")
-        ax[4][0].set_title("screens cleared per episode   (\u2191 = chaining more screens)")
-        ax[4][0].legend(fontsize=8)
-    else:
-        ax[4][0].text(0.5, 0.5, "no screens-cleared data yet",
-                      ha="center", va="center", transform=ax[4][0].transAxes)
-        ax[4][0].set_title("screens cleared per episode")
-
-    # --- vision-gain tracking (added 2026-08-15 alongside VISION_GAIN_WARMSTART) ---
-    if has_col("mean_vision_gain"):
-        ax[4][1].plot(col_gens("mean_vision_gain"), col("mean_vision_gain"), label="pop mean")
-        if has_col("theta_vision_gain"):
-            ax[4][1].plot(col_gens("theta_vision_gain"), col("theta_vision_gain"),
-                          label="center theta", linestyle="--")
-        ax[4][1].axhline(y=0.0, color="grey", linestyle=":", linewidth=0.8)
-        ax[4][1].set_title("vision_gain = tanh(vision_gain_logit)   (\u2193 near 0 = ignoring vision)")
-        ax[4][1].legend(fontsize=8)
-    else:
-        ax[4][1].text(0.5, 0.5, "no vision_gain data yet",
-                      ha="center", va="center", transform=ax[4][1].transAxes)
-        ax[4][1].set_title("vision_gain")
-
-    # --- accuracy (population mean/best vs. center theta) ---
-    if has_col("mean_acc"):
-        ax[5][0].plot(col_gens("mean_acc"), [100 * v for v in col("mean_acc")], label="pop mean")
-        if has_col("best_acc"):
-            ax[5][0].plot(col_gens("best_acc"), [100 * v for v in col("best_acc")], label="pop best")
-        if has_col("theta_acc"):
-            ax[5][0].plot(col_gens("theta_acc"), [100 * v for v in col("theta_acc")],
-                          label="center theta", linestyle="--")
-        ax[5][0].set_ylim(-5, 105)
-        ax[5][0].set_title("accuracy %")
-        ax[5][0].legend(fontsize=8)
-    else:
-        ax[5][0].text(0.5, 0.5, "no accuracy data yet",
-                      ha="center", va="center", transform=ax[5][0].transAxes)
-        ax[5][0].set_title("accuracy %")
-
-    # --- ES step size + center-theta fitness vs. population ---
-    if has_col("sigma_used"):
-        ax[5][1].plot(col_gens("sigma_used"), col("sigma_used"), color="tab:brown", label="sigma")
-        ax[5][1].set_ylabel("sigma")
-        ax[5][1].set_title("ES mutation step size (sigma) / center-theta fitness")
-        ax[5][1].legend(fontsize=8, loc="upper left")
-        if has_col("theta_fitness"):
-            ax2 = ax[5][1].twinx()
-            ax2.plot(col_gens("theta_fitness"), col("theta_fitness"), color="tab:pink", label="theta fitness")
-            ax2.legend(fontsize=8, loc="upper right")
-    else:
-        ax[5][1].text(0.5, 0.5, "no sigma data yet",
-                      ha="center", va="center", transform=ax[5][1].transAxes)
-        ax[5][1].set_title("ES mutation step size (sigma)")
-
-    for row in ax:
-        for a in row:
-            a.grid(alpha=0.3)
-            a.set_xlabel("generation")
+    # Hide any unused trailing axes (odd panel count).
+    for ax in flat[len(panels):]:
+        ax.axis("off")
 
     plt.tight_layout()
     if out_path:
