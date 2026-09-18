@@ -427,7 +427,19 @@ def act_vision_schedule(
 
     blend_gain = gain
     if best_conf >= VISION_FORCE_SHOOT_CONFIDENCE:
-        blend_gain = max(blend_gain, VISION_MIN_BLEND_GAIN)
+        # 2026-09-18 leftward-grouping fix: when the detector is confident
+        # enough to force the shot, aim EXACTLY at the detected target
+        # (blend_gain = 1.0) instead of a partial blend. A partial blend
+        # (gain = tanh(vision_gain) ~= 0.905) leaves ~9.5% weight on the
+        # near-center open-loop base aim (mean base_x_01 ~= 0.49), which pulls
+        # every off-center shot back toward screen center -- a systematic miss
+        # that GROWS with distance from center: an enemy at x=0.80 landed the
+        # shot at ~0.77 (0.030 LEFT), x=0.62 at ~0.606 (0.014 LEFT). That is the
+        # "shots grouped to the left of a right-side enemy" symptom. The guncon
+        # calibration was verified NOT to be the cause (device(calib(x)) == x).
+        # See /tmp aim-offset probe / repo memory. VISION_MIN_BLEND_GAIN is kept
+        # for reference but the confident path now snaps to a full lock-on.
+        blend_gain = 1.0
     blended_x_01 = min(
         1.0, max(0.0, base_x_01 + blend_gain * (target_x_norm - base_x_01)),
     )
