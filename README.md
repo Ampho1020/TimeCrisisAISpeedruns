@@ -155,6 +155,51 @@ The one line command for the current project is:
 ./EmuHawkMono.sh "/home/ampho/Downloads/TimeCrisis_NTSC/Time Crisis.cue" --socket_ip=127.0.0.1 --socket_port=8765 --lua=/home/ampho/TimeCrisisAISpeedruns/bizhawk_bridge.lua
 ```
 
+## Eval vs. training playback (speed & frame skip)
+
+Training and evaluation deliberately use **different emulator playback
+settings**, and — importantly — this does **not** change the trained policy's
+behaviour, so **the same `theta` is valid under both** and **no retrain is ever
+required** to switch between them.
+
+| Setting | Training | Eval (`run_eval.py`) | What it controls |
+|---|---|---|---|
+| Emulator speed (`client.speedmode`) | `3200%` (launch default in `bizhawk_bridge.lua`) | `100%` (`--speed`, default) | Wall-clock throttle only |
+| Display frameskip (`client.frameskip`) | BizHawk default | `0` (draw every frame) | Rendering only, not emulation |
+| Decision cadence (`FRAME_SKIP`) | `5` | `5` (unchanged) | Trained rhythm — part of the schedule |
+| Per-frame vision (`per_frame_vision`) | `False` (refresh every N ticks) | `True` (refresh every frame) | Freshness of the aim-blend input only |
+
+**Why speed is behaviourally irrelevant.** The emulator is deterministic and
+**frame-gated by Python**, not free-running. In `bizhawk_bridge.lua`'s main
+loop a frame advances *only* when a `step` command is pending (`pending_steps >
+0`); otherwise the loop services one socket command and `emu.yield()`s without
+advancing. `client.speedmode(percent)` only changes how long `emu.frameadvance()`
+blocks for wall-clock pacing — the exact `input → frame → RAM/pixels` sequence
+is bit-identical whether a frame takes 0.5 ms (3200%) or 16.7 ms (100%). A
+generation produces the same result at any speed.
+
+**Why display frameskip 0 is safe.** `client.frameskip(n)` skips *rendering*,
+never *emulation* — game logic runs every frame regardless. Setting it to `0`
+for eval only makes the screenshots the detector sees *fresher/more accurate*;
+it cannot desync anything.
+
+**Where the only real train/eval difference lives.** Not speed or frameskip —
+it's `per_frame_vision`, which refreshes the detector/aim blend every frame at
+eval instead of every N ticks. Even that only nudges the **vision-informed aim
+blend**. The core behaviour — shoot timing, peek/cover, and base-aim schedule —
+comes from the fixed per-tick `theta` row driven by **RAM** (`shots_fired`,
+`timer`, `life`, ammo), which is fully deterministic w.r.t. inputs and
+unaffected by any of these settings. Because `FRAME_SKIP=5` is preserved at
+eval, the trained decision rhythm is reproduced exactly.
+
+**Bottom line:** train fast (`3200%`, `FRAME_SKIP=5`); evaluate at human speed
+(`100%`, frameskip `0`). Override with `run_eval.py --speed <pct>` (e.g. `400`
+for a faster-but-watchable run, `3200` to match training). One practical, non-
+behavioural caveat: at `100%` with per-frame vision the detector must keep up
+with ~16.7 ms/frame; if it's slower the loop simply runs *below* real time (the
+emulator waits for Python — it never advances extra frames on its own), so eval
+may look slightly slow but never plays wrong.
+
 ## Shakedown run first
 
 Before committing to a long run, set `POP_SIZE = 6` and `GENERATIONS = 3` in
