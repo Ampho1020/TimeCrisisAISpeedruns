@@ -50,6 +50,8 @@
 --   step <n>                                      -> OK
 --   load <slot> / save <slot>                     -> OK
 --   frame                                         -> OK <framecount>
+--   speed <percent>                               -> OK   (runtime throttle; 100 = real time)
+--   frameskip <n>                                 -> OK   (display frameskip; 0 = draw every frame)
 --   hud <line1|line2|...> / hud_clear             -> OK
 --   screenshot                                    -> (image payload framed as "{N} <img_bytes>", NO trailing OK)
 --
@@ -244,6 +246,23 @@ local function handle(line)
 
   elseif cmd == "frame" then
     return "OK " .. tostring(emu.framecount()) .. "\n"
+
+  elseif cmd == "speed" then
+    -- Set the emulator throttle at runtime. Training leaves the launch
+    -- default (EMULATOR_SPEED_PERCENT, see below) untouched; run_eval.py
+    -- sends "speed 100" so a human can watch the run at real time.
+    local pct = tonumber(parts[2]) or 100
+    client.speedmode(pct)
+    return "OK\n"
+
+  elseif cmd == "frameskip" then
+    -- Set BizHawk's DISPLAY frameskip (how many rendered frames to drop),
+    -- distinct from the Python-side decision FRAME_SKIP. At high speedmode
+    -- BizHawk auto-drops rendered frames to keep up, which looks like
+    -- stuttering. run_eval.py sends "frameskip 0" so every frame is drawn.
+    local n = tonumber(parts[2]) or 0
+    client.frameskip(n)
+    return "OK\n"
 
   elseif cmd == "hud" then
     hud_lines = {}

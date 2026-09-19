@@ -41,8 +41,8 @@ Commands (payload text, before framing):
     step <n>                                         -> OK
     load <slot>                                      -> OK
     save <slot>                                      -> OK
-    frame                                            -> OK <framecount>
-    hud <line1|line2|...>                            -> OK
+    frame                                            -> OK <framecount>    speed <percent>                                 -> OK
+    frameskip <n>                                   -> OK    hud <line1|line2|...>                            -> OK
     hud_clear                                        -> OK
     screenshot                                       -> (raw BMP bytes, length-
                                                         prefixed just like every
@@ -375,6 +375,24 @@ class BridgeClient:
         if resp is None:
             raise RuntimeError("Bridge returned no value for 'frame'")
         return int(resp)
+
+    def set_speed(self, percent: int = 100):
+        """Set the emulator throttle at runtime (100 = real time).
+
+        Training keeps the launch default (EMULATOR_SPEED_PERCENT=3200 in
+        bizhawk_bridge.lua) so a generation finishes fast; run_eval.py calls
+        this with 100 so the run plays back at human speed.
+        """
+        self._cmd(f"speed {int(percent)}")
+
+    def set_frameskip(self, n: int = 0):
+        """Set BizHawk's DISPLAY frameskip (rendered frames to drop).
+
+        Distinct from the Python-side decision FRAME_SKIP. At high speedmode
+        BizHawk auto-drops rendered frames to keep up, which looks like
+        stuttering; run_eval.py sends 0 so every frame is drawn.
+        """
+        self._cmd(f"frameskip {int(n)}")
 
     def get_screenshot(self) -> np.ndarray:
         """Capture the current emulator frame as an HxWx3 uint8 RGB array.

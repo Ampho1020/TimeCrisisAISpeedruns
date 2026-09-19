@@ -149,6 +149,11 @@ Evaluate a saved checkpoint:
 ```bash
 python run_eval.py theta_gen_050.npy
 ```
+After running run_eval.py, it is required to run BizHawk with the port listening and the Lua script correctly.
+The one line command for the current project is: 
+```
+./EmuHawkMono.sh "/home/ampho/Downloads/TimeCrisis_NTSC/Time Crisis.cue" --socket_ip=127.0.0.1 --socket_port=8765 --lua=/home/ampho/TimeCrisisAISpeedruns/bizhawk_bridge.lua
+```
 
 ## Shakedown run first
 

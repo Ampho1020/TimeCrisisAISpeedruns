@@ -260,7 +260,7 @@ EPISODES_PER_CANDIDATE = 1
 
 # GENERATIONS raised back up for live convergence passes (2026-08-08).
 GENERATIONS = 80
-SEED        = 10
+SEED        = 42   # 2026-09-19 fresh full retrain from scratch (was 10)
 CHECKPOINT_EVERY = 5
 
 # Stagnation kick (see SIGMA note above): if fitness std stays below
