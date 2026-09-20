@@ -433,6 +433,28 @@ VISION_MIN_BLEND_GAIN = 0.60
 # under-firing if aim can't reach), raise if the agent holds fire too much.
 AIM_ON_TARGET_RADIUS = 0.15
 
+# Post-kill shot refractory (Option 1, 2026-09-20). Enemies die after at most
+# KILL_REFRACTORY_SHOTS confirmed hits (they vanish immediately on the 3rd), so
+# any further trigger pulses at that same spot are wasted shots into the death
+# animation -- the dominant miss source observed in live play. Once the env has
+# landed KILL_REFRACTORY_SHOTS ground-truth hits (RAM shots_hit delta) on a
+# target location, it withholds further fire within KILL_REFRACTORY_RADIUS of
+# that spot for KILL_REFRACTORY_TICKS decision ticks.
+#
+# The window is deliberately SHORT because later scenes queue enemies behind
+# one another at ~the same coordinate: a long spatial block would starve the
+# next enemy. A brief hold only swallows the tail of the current burst; once it
+# expires the stamp is dropped and a newly-detected enemy at that spot starts a
+# fresh 0-count. Hits 1..KILL_REFRACTORY_SHOTS are NEVER blocked, so a full kill
+# always lands. Inference-time only -- no theta shape change, so existing
+# checkpoints stay valid whether this is on during eval only or during training
+# too. (Headshots kill in 1 shot with a faster animation; that faster-death
+# case is intentionally left for a later refinement.)
+ENABLE_KILL_REFRACTORY = True
+KILL_REFRACTORY_SHOTS = 3
+KILL_REFRACTORY_RADIUS = 0.06
+KILL_REFRACTORY_TICKS = 2
+
 # Ammo-awareness (added 2026-09-10). Real players ration a magazine instead
 # of dumping it all into whichever target happens to be in front of them --
 # this scales how strongly ammo scarcity can suppress (or, if ES learns a

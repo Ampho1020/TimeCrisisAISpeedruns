@@ -14,6 +14,8 @@ from config import (
     DAMAGE_PENALTY,
     FAIL_PENALTY,
     EXPOSED_NO_SHOT_PENALTY,
+    ENABLE_KILL_REFRACTORY, KILL_REFRACTORY_SHOTS,
+    KILL_REFRACTORY_RADIUS, KILL_REFRACTORY_TICKS,
     FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
     MAX_TICKS, MISS_PENALTY, MULTI_CLEAR_BONUS,
     PEEK_LOCK_IN_TICKS, PEEK_LOCK_OUT_TICKS, PEEK_TRAVERSE_TICKS,
@@ -135,6 +137,11 @@ class TimeCrisisEnv:
         self.ammo_left: int = AMMO_MAX_ROUNDS
         self.cover_ticks: int = 0  # consecutive ticks in cover (peek False); drives the reload hold
         self.hit_delta: int = 0  # frames since the last confirmed hit
+        # Post-kill shot refractory (see ENABLE_KILL_REFRACTORY in config.py).
+        # Each stamp: {"x","y","hits","killed_tick","last_tick"} keyed by aim
+        # location; suppresses wasted post-kill pulses without an enemy tracker.
+        self._kill_stamps: list[dict] = []
+        self.suppressed_shot_pulses: int = 0  # diagnostic: pulses withheld by the refractory
         self.reaction_no_shot_streak: int = 0  # ticks a target has been visible with no shot fired since
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
         self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
@@ -330,6 +337,8 @@ class TimeCrisisEnv:
         self.ammo_left = AMMO_MAX_ROUNDS
         self.cover_ticks = 0
         self.hit_delta = 0
+        self._kill_stamps = []
+        self.suppressed_shot_pulses = 0
         self.reaction_no_shot_streak = 0
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
@@ -354,6 +363,58 @@ class TimeCrisisEnv:
             self.prev_aim_x_bias, self.prev_aim_y_bias,
             hit_delta=self.hit_delta,
         )
+
+    # -- post-kill shot refractory (see ENABLE_KILL_REFRACTORY) ---------
+
+    def _nearest_kill_stamp(self, x: float, y: float):
+        """Return the kill stamp within KILL_REFRACTORY_RADIUS of (x, y), or None."""
+        best = None
+        best_d = KILL_REFRACTORY_RADIUS
+        for s in getattr(self, "_kill_stamps", ()):
+            d = ((s["x"] - x) ** 2 + (s["y"] - y) ** 2) ** 0.5
+            if d <= best_d:
+                best_d = d
+                best = s
+        return best
+
+    def _credit_target_hits(self, n: int, x: float, y: float):
+        """Attribute n ground-truth hits (RAM shots_hit delta) to the target at
+        (x, y); once KILL_REFRACTORY_SHOTS have landed the spot is marked killed."""
+        stamps = getattr(self, "_kill_stamps", None)
+        if stamps is None:
+            stamps = self._kill_stamps = []
+        stamp = self._nearest_kill_stamp(x, y)
+        if stamp is None:
+            stamp = {"x": float(x), "y": float(y), "hits": 0,
+                     "killed_tick": None, "last_tick": self.ticks}
+            stamps.append(stamp)
+        stamp["hits"] += int(n)
+        stamp["x"], stamp["y"] = float(x), float(y)
+        stamp["last_tick"] = self.ticks
+        if stamp["killed_tick"] is None and stamp["hits"] >= KILL_REFRACTORY_SHOTS:
+            stamp["killed_tick"] = self.ticks
+
+    def _target_in_refractory(self, x: float, y: float) -> bool:
+        """True if a target at (x, y) has already absorbed a full kill and is
+        still within the post-kill refractory window -- further fire is waste."""
+        s = self._nearest_kill_stamp(x, y)
+        if s is None or s["killed_tick"] is None:
+            return False
+        return (self.ticks - s["killed_tick"]) <= KILL_REFRACTORY_TICKS
+
+    def _purge_kill_stamps(self):
+        """Drop expired kill stamps (and stale un-killed ones) so a newly-queued
+        enemy at the same coordinate starts a fresh 0-count."""
+        stamps = getattr(self, "_kill_stamps", None)
+        if not stamps:
+            return
+        self._kill_stamps = [
+            s for s in stamps
+            if (s["killed_tick"] is not None
+                and (self.ticks - s["killed_tick"]) <= KILL_REFRACTORY_TICKS)
+            or (s["killed_tick"] is None
+                and (self.ticks - s["last_tick"]) <= KILL_REFRACTORY_TICKS + 1)
+        ]
 
     def step(self, theta: np.ndarray):
         _tick_t0 = time.perf_counter() if VISION_PROFILE else 0.0
@@ -500,6 +561,9 @@ class TimeCrisisEnv:
         # actually empty when the agent decided to duck" diagnostics further down.
         ammo_at_tick_start = self.ammo_left
 
+        if ENABLE_KILL_REFRACTORY:
+            self._purge_kill_stamps()
+
         for f in range(FRAME_SKIP):
             # Per-frame vision refresh (eval only, see __init__): re-capture
             # + re-blend the aim on every raw frame after the first (which
@@ -542,14 +606,17 @@ class TimeCrisisEnv:
             # button for all 5 frames makes fire rate uncontrollable.
             # shoot_allowed ensures the trigger only fires when fully exposed.
             pulse_every = max(2, int(SHOOT_PULSE_EVERY_N_FRAMES))
+            fire_pulse = bool(shoot and shoot_allowed and (f % pulse_every == 0))
+            # Post-kill refractory: the enemy at this spot is already dead once
+            # KILL_REFRACTORY_SHOTS have landed, so withhold further pulses to
+            # stop dumping shots into the death animation.
+            if fire_pulse and ENABLE_KILL_REFRACTORY and self._target_in_refractory(aim_x, aim_y):
+                fire_pulse = False
+                self.suppressed_shot_pulses += 1
             if VISION_PROFILE:
                 _t0 = time.perf_counter()
             self.client.set_input(
-                shoot=bool(
-                    shoot
-                    and shoot_allowed
-                    and (f % pulse_every == 0)
-                ),
+                shoot=fire_pulse,
                 peek=peek,
                 aim_x=aim_x,
                 aim_y=aim_y,
@@ -573,6 +640,8 @@ class TimeCrisisEnv:
             total_hit += frame_hits
             if frame_hits > 0:
                 self.hit_delta = 0
+                if ENABLE_KILL_REFRACTORY:
+                    self._credit_target_hits(frame_hits, aim_x, aim_y)
             else:
                 self.hit_delta += 1
             life_d       = u16_delta(post["life"], pre["life"])
@@ -1042,6 +1111,7 @@ class TimeCrisisEnv:
             "hesitated_cover_ticks": int(hesitated_cover_ticks),
             "reload_correct_count": int(reload_correct_count),
             "continue_screen_count": int(continue_screen_count),
+            "suppressed_shot_pulses": int(getattr(self, "suppressed_shot_pulses", 0)),
             "aim_x_std": aim_x_std,
             "aim_y_std": aim_y_std,
             "aim_span_x": aim_span_x,

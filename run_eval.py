@@ -83,6 +83,7 @@ def main():
               f"({info['shots_hit']}/{info['shots_fired']})")
         print(f"dry_fire   : {info['dry_fire_ticks']} ticks")
         print(f"reload ok  : {info['reload_correct_count']}")
+        print(f"post-kill shots suppressed : {info.get('suppressed_shot_pulses', 0)}")
         print(f"no_shot exposed : {info['no_shot_exposed_ticks']} ticks, "
               f"hesitated cover : {info['hesitated_cover_ticks']} ticks")
         if args.dump_frames:
