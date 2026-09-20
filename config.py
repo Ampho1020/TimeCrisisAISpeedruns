@@ -260,7 +260,7 @@ EPISODES_PER_CANDIDATE = 1
 
 # GENERATIONS raised back up for live convergence passes (2026-08-08).
 GENERATIONS = 80
-SEED        = 123
+SEED        = 2024
 CHECKPOINT_EVERY = 5
 
 # Stagnation kick (see SIGMA note above): if fitness std stays below
@@ -450,7 +450,14 @@ AIM_ON_TARGET_RADIUS = 0.15
 # checkpoints stay valid whether this is on during eval only or during training
 # too. (Headshots kill in 1 shot with a faster animation; that faster-death
 # case is intentionally left for a later refinement.)
-ENABLE_KILL_REFRACTORY = True
+#
+# 2026-09-20: DISABLED. A stacked-enemy sim (enemies queued at one (x,y)) showed
+# the refractory holds fire on the live enemy behind a just-killed one for the
+# whole window (~4 ticks slower to clear a 3-stack). The no-detection fire gate
+# (REQUIRE_DETECTION_TO_FIRE) already stops the common post-kill waste (empty
+# spot -> no fire), so the refractory's only remaining case (dead-but-still-
+# detected) isn't worth the stacked-enemy penalty. Code kept behind the flag.
+ENABLE_KILL_REFRACTORY = False
 KILL_REFRACTORY_SHOTS = 3
 KILL_REFRACTORY_RADIUS = 0.06
 KILL_REFRACTORY_TICKS = 2
