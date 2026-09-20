@@ -149,6 +149,56 @@ Evaluate a saved checkpoint:
 ```bash
 python run_eval.py theta_gen_050.npy
 ```
+After running run_eval.py, it is required to run BizHawk with the port listening and the Lua script correctly.
+The one line command for the current project is: 
+```
+./EmuHawkMono.sh "/home/ampho/Downloads/TimeCrisis_NTSC/Time Crisis.cue" --socket_ip=127.0.0.1 --socket_port=8765 --lua=/home/ampho/TimeCrisisAISpeedruns/bizhawk_bridge.lua
+```
+
+## Eval vs. training playback (speed & frame skip)
+
+Training and evaluation deliberately use **different emulator playback
+settings**, and — importantly — this does **not** change the trained policy's
+behaviour, so **the same `theta` is valid under both** and **no retrain is ever
+required** to switch between them.
+
+| Setting | Training | Eval (`run_eval.py`) | What it controls |
+|---|---|---|---|
+| Emulator speed (`client.speedmode`) | `3200%` (launch default in `bizhawk_bridge.lua`) | `100%` (`--speed`, default) | Wall-clock throttle only |
+| Display frameskip (`client.frameskip`) | BizHawk default | `0` (draw every frame) | Rendering only, not emulation |
+| Decision cadence (`FRAME_SKIP`) | `5` | `5` (unchanged) | Trained rhythm — part of the schedule |
+| Per-frame vision (`per_frame_vision`) | `False` (refresh every N ticks) | `True` (refresh every frame) | Freshness of the aim-blend input only |
+
+**Why speed is behaviourally irrelevant.** The emulator is deterministic and
+**frame-gated by Python**, not free-running. In `bizhawk_bridge.lua`'s main
+loop a frame advances *only* when a `step` command is pending (`pending_steps >
+0`); otherwise the loop services one socket command and `emu.yield()`s without
+advancing. `client.speedmode(percent)` only changes how long `emu.frameadvance()`
+blocks for wall-clock pacing — the exact `input → frame → RAM/pixels` sequence
+is bit-identical whether a frame takes 0.5 ms (3200%) or 16.7 ms (100%). A
+generation produces the same result at any speed.
+
+**Why display frameskip 0 is safe.** `client.frameskip(n)` skips *rendering*,
+never *emulation* — game logic runs every frame regardless. Setting it to `0`
+for eval only makes the screenshots the detector sees *fresher/more accurate*;
+it cannot desync anything.
+
+**Where the only real train/eval difference lives.** Not speed or frameskip —
+it's `per_frame_vision`, which refreshes the detector/aim blend every frame at
+eval instead of every N ticks. Even that only nudges the **vision-informed aim
+blend**. The core behaviour — shoot timing, peek/cover, and base-aim schedule —
+comes from the fixed per-tick `theta` row driven by **RAM** (`shots_fired`,
+`timer`, `life`, ammo), which is fully deterministic w.r.t. inputs and
+unaffected by any of these settings. Because `FRAME_SKIP=5` is preserved at
+eval, the trained decision rhythm is reproduced exactly.
+
+**Bottom line:** train fast (`3200%`, `FRAME_SKIP=5`); evaluate at human speed
+(`100%`, frameskip `0`). Override with `run_eval.py --speed <pct>` (e.g. `400`
+for a faster-but-watchable run, `3200` to match training). One practical, non-
+behavioural caveat: at `100%` with per-frame vision the detector must keep up
+with ~16.7 ms/frame; if it's slower the loop simply runs *below* real time (the
+emulator waits for Python — it never advances extra frames on its own), so eval
+may look slightly slow but never plays wrong.
 
 ## Shakedown run first
 
@@ -193,6 +243,40 @@ all useful RAM. Two safeguards prevent the episode from idling forever:
 2. **Stale-counter watchdog** — if `shots_fired`, `shots_hit`, `timer`, and
    `life` are all identical for `CONTINUE_SCREEN_STALE_TICKS` consecutive
    decision ticks, the episode is force-terminated.
+
+## Aim precision: the leftward shot-grouping fix
+
+For a long time after switching from the old 5-frame decision cadence to
+full-speed, no-frame-skip per-frame play, live runs showed shots consistently
+**grouped to one side** of the target — right-side enemies were peppered a bit
+to the left, several magazines in a row. It looked like a Guncon
+offset/scaling bug, but it was not.
+
+A software trace of the entire aim pipeline (detector centroid →
+`policy.act_vision_schedule` blend → `bridge_client.apply_guncon_calibration`
+→ measured hardware device response) against the real checkpoint showed:
+
+- **The Guncon calibration is innocent.** The calibration transform is, by
+  design, the inverse of the measured device response, so
+  `device(calibrate(x)) == x` to four decimals — it cancels the hardware and
+  the shot lands exactly where the policy aimed. (When reasoning about where a
+  shot *lands*, use `device(calibrate(aim))`, not the written cursor value.)
+- **The real cause was the vision blend residual.** `act_vision_schedule`
+  moved only `blend_gain = tanh(vision_gain) ≈ 0.9` of the way from the learned
+  per-tick *base aim* (which sits near screen center) to the detected enemy.
+  The leftover ~10% weight on the center-ish base aim pulled every off-center
+  shot back toward center (regression to the mean): right-side targets landed
+  left, left-side targets landed right, and the miss grew with distance from
+  center. This only became visible once per-frame play removed the old cadence
+  smoothing that had masked it.
+
+**Fix:** on a confident detection (`best_conf ≥ VISION_FORCE_SHOOT_CONFIDENCE`)
+`act_vision_schedule` now snaps `blend_gain = 1.0`, aiming exactly at the
+detected target instead of a partial blend. In simulation this dropped the
+landing error to ≤0.001 at every screen position; live it eliminated the
+grouping (shots spot-on) and lifted accuracy noticeably. The fix is
+inference-time only and does not change the theta shape, so existing
+checkpoints remain compatible — no retrain required.
 
 ## Known limitations
 
