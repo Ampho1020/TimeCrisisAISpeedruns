@@ -370,6 +370,13 @@ VISION_DRIFT_GAIN_WARMSTART = 0.0
 # mostly near the outer ~17.5% on each side.
 VISION_DRIFT_EDGE_START = 0.65
 
+# 2026-09-20: DISABLED. With full aim lock-on (blend_gain=1.0) the cursor sits
+# exactly on the detected enemy, so the edge-drift term only moves it back OFF
+# target: a negative learned drift_gain pulls edge targets toward the (central)
+# cursor -> left targets drift right, right targets drift left (symmetric inward
+# miss). drift_gain stays in the theta layout (inert) so checkpoint shape holds.
+ENABLE_VISION_DRIFT = False
+
 # Scales how strongly live detection confidence can nudge the trigger in
 # POLICY_MODE="vision_schedule". The shoot decision blends this term onto
 # the open-loop per-tick shoot logit in policy.act_vision_schedule:

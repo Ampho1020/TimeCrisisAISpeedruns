@@ -10,6 +10,7 @@ from config import (
     REQUIRE_DETECTION_TO_FIRE,
     SCHEDULE_BLOCK_TICKS,
     SHOOT_DETECTION_SCALE,
+    ENABLE_VISION_DRIFT,
     VISION_DRIFT_EDGE_START,
     VISION_FORCE_SHOOT_CONFIDENCE,
     VISION_MIN_BLEND_GAIN,
@@ -420,7 +421,7 @@ def act_vision_schedule(
     target_x_norm = float(getattr(best_det, "aim_x_norm", best_det.cx_norm))
     target_y_norm = float(getattr(best_det, "aim_y_norm", best_det.cy_norm))
 
-    if cursor_x_norm is not None and cursor_y_norm is not None:
+    if ENABLE_VISION_DRIFT and cursor_x_norm is not None and cursor_y_norm is not None:
         edge_mag_x = max(0.0, abs(target_x_norm - 0.5) * 2.0 - VISION_DRIFT_EDGE_START)
         edge_gain_x = min(1.0, edge_mag_x / max(1e-6, 1.0 - VISION_DRIFT_EDGE_START))
         target_x_norm = float(np.clip(
