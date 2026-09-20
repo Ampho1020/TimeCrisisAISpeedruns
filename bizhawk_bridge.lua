@@ -245,6 +245,24 @@ local function handle(line)
   elseif cmd == "frame" then
     return "OK " .. tostring(emu.framecount()) .. "\n"
 
+  elseif cmd == "speed" then
+    -- Runtime emulator throttle override. Training keeps the launch default
+    -- (EMULATOR_SPEED_PERCENT below); run_eval.py sends "speed 100" so a human
+    -- can watch the run at real time.
+    local pct = tonumber(parts[2]) or 100
+    client.speedmode(pct)
+    return "OK\n"
+
+  elseif cmd == "frameskip" then
+    -- BizHawk DISPLAY frameskip (rendered frames dropped), distinct from the
+    -- Python-side decision FRAME_SKIP. At high speedmode BizHawk auto-drops
+    -- frames; run_eval.py sends "frameskip 0" so every frame is drawn.
+    -- pcall-guarded so an unsupported client.frameskip on some build can't
+    -- error the command and abort the Python-side eval.
+    local n = tonumber(parts[2]) or 0
+    pcall(client.frameskip, n)
+    return "OK\n"
+
   elseif cmd == "hud" then
     hud_lines = {}
     local text = string.sub(line, 5)

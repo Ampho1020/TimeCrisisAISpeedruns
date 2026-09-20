@@ -15,7 +15,7 @@ from config import (
     FAIL_PENALTY,
     EXPOSED_NO_SHOT_PENALTY,
     ENABLE_KILL_REFRACTORY, KILL_REFRACTORY_SHOTS,
-    KILL_REFRACTORY_RADIUS, KILL_REFRACTORY_TICKS,
+    KILL_REFRACTORY_RADIUS, KILL_REFRACTORY_TICKS, KILL_REFRACTORY_ABSENCE,
     FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
     MAX_TICKS, MISS_PENALTY, MULTI_CLEAR_BONUS,
     PEEK_LOCK_IN_TICKS, PEEK_LOCK_OUT_TICKS, PEEK_TRAVERSE_TICKS,
@@ -402,6 +402,28 @@ class TimeCrisisEnv:
             return False
         return (self.ticks - s["killed_tick"]) <= KILL_REFRACTORY_TICKS
 
+    def _mark_kills_by_absence(self, detections):
+        """Mark an already-hit spot killed once no ENEMY detection remains near
+        it. Catches 1-2 hit (headshot/quick) kills that never reach
+        KILL_REFRACTORY_SHOTS -- the pure hit-count trigger missed those."""
+        stamps = getattr(self, "_kill_stamps", None)
+        if not stamps:
+            return
+        for s in stamps:
+            if s["killed_tick"] is not None or s["hits"] < 1:
+                continue
+            enemy_near = False
+            for det in (detections or []):
+                if int(getattr(det, "class_id", -1)) != 0:  # ENEMY class only
+                    continue
+                dx = float(det.cx_norm) - s["x"]
+                dy = float(det.cy_norm) - s["y"]
+                if (dx * dx + dy * dy) ** 0.5 <= KILL_REFRACTORY_RADIUS:
+                    enemy_near = True
+                    break
+            if not enemy_near:
+                s["killed_tick"] = self.ticks
+
     def _purge_kill_stamps(self):
         """Drop expired kill stamps (and stale un-killed ones) so a newly-queued
         enemy at the same coordinate starts a fresh 0-count."""
@@ -563,6 +585,8 @@ class TimeCrisisEnv:
 
         if ENABLE_KILL_REFRACTORY:
             self._purge_kill_stamps()
+            if KILL_REFRACTORY_ABSENCE and POLICY_MODE == "vision_schedule":
+                self._mark_kills_by_absence(self.last_detections)
 
         for f in range(FRAME_SKIP):
             # Per-frame vision refresh (eval only, see __init__): re-capture

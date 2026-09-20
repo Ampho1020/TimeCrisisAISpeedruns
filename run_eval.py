@@ -2,6 +2,7 @@
 
 Usage:
     python run_eval.py [checkpoint.npy] [--dump-frames <dir>] [--tick-vision]
+                       [--speed <pct>]
 
 Flags:
     --dump-frames <dir>   Save one PNG per decision tick during the episode
@@ -14,6 +15,13 @@ Flags:
                           every raw emulator frame). By default eval now
                           refreshes vision + aim on every single frame, like
                           a human player watching the screen continuously.
+    --speed <pct>         Emulator throttle for the run, percent of real time.
+                          Default 100 (human speed): eval plays at normal speed
+                          with every frame drawn, unlike training's 3200%
+                          (EMULATOR_SPEED_PERCENT in the Lua bridge). This is the
+                          emulator throttle, NOT the Python-side decision
+                          FRAME_SKIP -- that cadence is part of the trained
+                          schedule and stays put.
 """
 
 import argparse
@@ -56,6 +64,16 @@ def main():
             "VISION_CAPTURE_EVERY_N_TICKS ticks) instead of every frame."
         ),
     )
+    parser.add_argument(
+        "--speed",
+        type=int,
+        default=100,
+        metavar="PCT",
+        help=(
+            "Emulator throttle for the eval run, percent of real time "
+            "(default 100 = human speed). Pass 3200 to match training speed."
+        ),
+    )
     args = parser.parse_args()
     theta = np.asarray(np.load(args.checkpoint), dtype=np.float64).reshape(-1)
     expected = _expected_theta_size()
@@ -72,6 +90,14 @@ def main():
         env.dump_frames_dir = args.dump_frames
     env.connect()
     try:
+        # Override the launch-time training throttle (EMULATOR_SPEED_PERCENT
+        # =3200 in bizhawk_bridge.lua) and disable BizHawk's display frameskip
+        # so eval plays back like a human sees it. Does NOT touch the
+        # Python-side decision FRAME_SKIP (baked into the trained schedule).
+        env.client.set_speed(args.speed)
+        env.client.set_frameskip(0)
+        print(f"[eval] emulator speed set to {args.speed}% with display "
+              f"frameskip 0 (real-time playback)", flush=True)
         fitness, info = env.episode_fitness(theta)
         print(f"checkpoint : {args.checkpoint}")
         print(f"fitness    : {fitness:.2f}")

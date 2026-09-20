@@ -455,6 +455,16 @@ KILL_REFRACTORY_SHOTS = 3
 KILL_REFRACTORY_RADIUS = 0.06
 KILL_REFRACTORY_TICKS = 2
 
+# Also treat a hit spot as killed the moment no ENEMY detection remains within
+# KILL_REFRACTORY_RADIUS of it (perception + RAM), not only at
+# KILL_REFRACTORY_SHOTS hits. This catches 1-2 hit (headshot/quick) kills that
+# never reach the 3-hit count -- the live case where the pure-count trigger
+# stayed at 0 suppressions because most enemies die in fewer than 3 hits. Only
+# spots that already absorbed >=1 confirmed hit are eligible, so a fresh enemy
+# is never suppressed; a brief false positive (detection flicker) only delays
+# the next shot by <=KILL_REFRACTORY_TICKS ticks, so the cost is bounded.
+KILL_REFRACTORY_ABSENCE = True
+
 # Ammo-awareness (added 2026-09-10). Real players ration a magazine instead
 # of dumping it all into whichever target happens to be in front of them --
 # this scales how strongly ammo scarcity can suppress (or, if ES learns a

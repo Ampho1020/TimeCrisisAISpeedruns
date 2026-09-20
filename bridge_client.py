@@ -376,6 +376,24 @@ class BridgeClient:
             raise RuntimeError("Bridge returned no value for 'frame'")
         return int(resp)
 
+    def set_speed(self, percent: int = 100):
+        """Set the emulator throttle at runtime (100 = real time).
+
+        Training keeps the launch default (EMULATOR_SPEED_PERCENT=3200 in
+        bizhawk_bridge.lua); run_eval.py calls this with 100 so the run plays
+        back at human speed.
+        """
+        self._cmd(f"speed {int(percent)}")
+
+    def set_frameskip(self, n: int = 0):
+        """Set BizHawk's DISPLAY frameskip (rendered frames dropped).
+
+        Distinct from the Python-side decision FRAME_SKIP. run_eval.py sends 0
+        so every frame is drawn instead of BizHawk auto-dropping frames at high
+        speedmode.
+        """
+        self._cmd(f"frameskip {int(n)}")
+
     def get_screenshot(self) -> np.ndarray:
         """Capture the current emulator frame as an HxWx3 uint8 RGB array.
 
