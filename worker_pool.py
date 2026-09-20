@@ -130,6 +130,11 @@ class WorkerPool:
         thread, so mutating ``self._procs[worker_idx]``/``self.envs[worker_idx]``
         here is race-free.
         """
+        # If the pool is tearing down, do NOT rebuild: close() may have already
+        # cleared self._procs (the assignment below would IndexError) and any
+        # emulator we launch now would be orphaned past shutdown.
+        if self._closing:
+            raise RuntimeError("worker pool is closing; skipping worker restart")
         port = self.ports[worker_idx]
         env = self.envs[worker_idx]
         print(
@@ -156,7 +161,12 @@ class WorkerPool:
         # Rebind the listener BEFORE relaunching so the emulator can dial in.
         env.start_listening()
         if AUTO_LAUNCH_BIZHAWK:
-            self._procs[worker_idx] = _launch_bizhawk(port)
+            proc = _launch_bizhawk(port)
+            # Index-safe: a concurrent close() can shrink/clear self._procs
+            # while this restart is in flight -- grow it rather than IndexError.
+            while len(self._procs) <= worker_idx:
+                self._procs.append(None)
+            self._procs[worker_idx] = proc
         else:
             print(
                 f"[pool] AUTO_LAUNCH_BIZHAWK is off -- relaunch BizHawk on "
