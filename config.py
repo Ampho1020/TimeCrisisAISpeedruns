@@ -260,7 +260,7 @@ EPISODES_PER_CANDIDATE = 1
 
 # GENERATIONS raised back up for live convergence passes (2026-08-08).
 GENERATIONS = 80
-SEED        = 10
+SEED        = 123
 CHECKPOINT_EVERY = 5
 
 # Stagnation kick (see SIGMA note above): if fitness std stays below
@@ -464,6 +464,13 @@ KILL_REFRACTORY_TICKS = 2
 # is never suppressed; a brief false positive (detection flicker) only delays
 # the next shot by <=KILL_REFRACTORY_TICKS ticks, so the cost is bounded.
 KILL_REFRACTORY_ABSENCE = True
+
+# Only pull the trigger when the detector actually sees a target. On a tick
+# with no ENEMY detection the open-loop schedule otherwise fires at the near-
+# center base aim (detector miss -> wasted center/"in the air" shots). With
+# this True, no-detection ticks hold fire; aim still falls back to the base
+# schedule. Inference-time only, no theta shape change.
+REQUIRE_DETECTION_TO_FIRE = True
 
 # Ammo-awareness (added 2026-09-10). Real players ration a magazine instead
 # of dumping it all into whichever target happens to be in front of them --

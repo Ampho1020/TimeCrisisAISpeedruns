@@ -7,6 +7,7 @@ from config import (
     ACT_DIM, AMMO_CONSERVE_SCALE, AIM_ON_TARGET_RADIUS, HIDDEN, MAX_TICKS,
     NUM_ENEMY_CLASSES, OBS_DIM,
     PEEK_DETECTION_SCALE,
+    REQUIRE_DETECTION_TO_FIRE,
     SCHEDULE_BLOCK_TICKS,
     SHOOT_DETECTION_SCALE,
     VISION_DRIFT_EDGE_START,
@@ -406,7 +407,10 @@ def act_vision_schedule(
         shoot = True
 
     if best_det is None:
-        # No usable target this tick -- fall back to base aim.
+        # No usable target this tick -- fall back to base aim. Optionally hold
+        # fire so a detector miss doesn't spray the near-center base aim.
+        if REQUIRE_DETECTION_TO_FIRE:
+            shoot = False
         return shoot, peek, base_ax_bias, base_ay_bias
 
     # Blend in [0, 1] screen space, then convert back to the [-1, 1] bias
@@ -425,9 +429,15 @@ def act_vision_schedule(
             1.0,
         ))
 
-    blend_gain = gain
-    if best_conf >= VISION_FORCE_SHOOT_CONFIDENCE:
-        blend_gain = max(blend_gain, VISION_MIN_BLEND_GAIN)
+    # Full lock-on: aim EXACTLY at the detected target. A partial blend
+    # (blend_gain = tanh(vision_gain) ~= 0.83) leaves residual weight on the
+    # near-center base aim, which pulls off-center shots back toward center --
+    # the leftward/off-center grouping. Aiming at the detection is always
+    # correct regardless of confidence; the separate force-SHOOT gate above
+    # still governs WHEN to fire, so a low-confidence detection can steer aim
+    # without necessarily pulling the trigger. (vision_gain stays in the theta
+    # layout, unused here, so checkpoint shape is stable -- same as peek_gain.)
+    blend_gain = 1.0
     blended_x_01 = min(
         1.0, max(0.0, base_x_01 + blend_gain * (target_x_norm - base_x_01)),
     )
