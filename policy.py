@@ -10,6 +10,7 @@ from config import (
     REQUIRE_DETECTION_TO_FIRE,
     SCHEDULE_BLOCK_TICKS,
     SHOOT_DETECTION_SCALE,
+    AIM_OUTWARD_GAIN_X,
     ENABLE_VISION_DRIFT,
     VISION_DRIFT_EDGE_START,
     VISION_FORCE_SHOOT_CONFIDENCE,
@@ -429,6 +430,11 @@ def act_vision_schedule(
             0.0,
             1.0,
         ))
+
+    # Fixed outward correction for the detector's slight inward box-centroid
+    # bias (see AIM_OUTWARD_GAIN_X). Scales distance from screen center; 1.0=off.
+    if AIM_OUTWARD_GAIN_X != 1.0:
+        target_x_norm = float(min(1.0, max(0.0, 0.5 + (target_x_norm - 0.5) * AIM_OUTWARD_GAIN_X)))
 
     # Full lock-on: aim EXACTLY at the detected target. A partial blend
     # (blend_gain = tanh(vision_gain) ~= 0.83) leaves residual weight on the
