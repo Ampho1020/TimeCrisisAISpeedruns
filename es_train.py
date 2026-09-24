@@ -6,6 +6,9 @@ Usage:
 """
 
 import argparse
+import csv
+import glob
+import os
 import time
 from datetime import datetime
 
@@ -113,9 +116,62 @@ def _mean_ammo_gain(theta_batch: np.ndarray) -> float:
     return float(np.tanh(batch[:, AMMO_GAIN_IDX]).mean())
 
 
-def train(init_theta_path: str | None = None):
+def _find_latest_log_and_gen():
+    """Return (path, last_gen, run_id) of the most recent training_log CSV, or
+    (None, -1, None) if none exist. Used by --resume to continue in place."""
+    base, ext = LOG_CSV.rsplit(".", 1) if "." in LOG_CSV else (LOG_CSV, "csv")
+    logs = sorted(glob.glob(f"{base}_*.{ext}"), key=os.path.getmtime)
+    if not logs:
+        return None, -1, None
+    path = logs[-1]
+    last_gen, run_id = -1, None
+    try:
+        with open(path, newline="") as fh:
+            for row in csv.DictReader(fh):
+                try:
+                    last_gen = max(last_gen, int(row["gen"]))
+                except (KeyError, ValueError):
+                    continue
+                run_id = row.get("run_id") or run_id
+    except OSError:
+        return None, -1, None
+    return path, last_gen, run_id
+
+
+def _pick_resume_checkpoint():
+    """Best available theta to resume from: interrupt > final > latest gen."""
+    for p in ("theta_interrupt.npy", "theta_final.npy"):
+        if os.path.exists(p):
+            return p
+    gens = sorted(glob.glob("theta_gen_*.npy"))
+    return gens[-1] if gens else None
+
+
+def train(init_theta_path: str | None = None, resume: bool = False):
     if POP_SIZE % 2 != 0:
         raise ValueError("POP_SIZE must be even for mirrored sampling.")
+
+    # Resume: continue the latest run's generation numbering and append to its
+    # CSV, instead of restarting at gen 000 in a fresh log.
+    start_gen = 0
+    resume_log_path = None
+    resume_run_id = None
+    if resume:
+        resume_log_path, _last_gen, resume_run_id = _find_latest_log_and_gen()
+        if resume_log_path is None:
+            print("[es_train] --resume: no existing training_log_*.csv found -- "
+                  "starting a fresh run.", flush=True)
+        else:
+            start_gen = _last_gen + 1
+            if init_theta_path is None:
+                init_theta_path = _pick_resume_checkpoint()
+                if init_theta_path is None:
+                    raise SystemExit(
+                        "[es_train] --resume: no theta_*.npy checkpoint found to "
+                        "resume from (looked for theta_interrupt/final/gen_*)."
+                    )
+            print(f"[es_train] --resume: continuing '{resume_log_path}' from "
+                  f"gen {start_gen:03d} using '{init_theta_path}'", flush=True)
 
     rng = np.random.default_rng(SEED)
     if POLICY_MODE == "schedule":
@@ -136,7 +192,12 @@ def train(init_theta_path: str | None = None):
         # Small init -- large weights saturate tanh and kill the signal.
         theta = rng.normal(0.0, 0.1, size=(param_count,)).astype(np.float64)
 
-    if POLICY_MODE == "schedule":
+    if init_theta_path:
+        # Resuming/continuing from a saved theta -- use it AS-IS. Skipping the
+        # warm-start below is essential: it would otherwise clobber the loaded
+        # theta's trained gains/class-priority and re-add the peek bias.
+        pass
+    elif POLICY_MODE == "schedule":
         # Open-loop: theta is a flat (MAX_TICKS, 4) per-tick action table
         # (shoot_logit, peek_logit, aim_x_bias, aim_y_bias). Mild peek-
         # forward bias on EVERY tick's row -- same anti-"never expose"
@@ -240,13 +301,16 @@ def train(init_theta_path: str | None = None):
     # values, and (b) written into every logged row regardless, as a second
     # line of defense if LOG_CSV_TIMESTAMPED is ever turned off and two runs
     # do end up sharing one file.
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if LOG_CSV_TIMESTAMPED:
+    run_id = resume_run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+    if resume_log_path is not None:
+        log_path = resume_log_path
+    elif LOG_CSV_TIMESTAMPED:
         base, ext = LOG_CSV.rsplit(".", 1) if "." in LOG_CSV else (LOG_CSV, "csv")
         log_path = f"{base}_{run_id}.{ext}"
     else:
         log_path = LOG_CSV
-    print(f"[es_train] run_id={run_id} logging to {log_path}", flush=True)
+    print(f"[es_train] run_id={run_id} logging to {log_path} "
+          f"(starting at gen {start_gen:03d})", flush=True)
     logger = TrainingLogger(log_path)
     # Consecutive generations with fitness std below STD_STAGNATION_THRESHOLD.
     # When this reaches STAGNATION_PATIENCE, every mirrored candidate is
@@ -256,7 +320,7 @@ def train(init_theta_path: str | None = None):
     # chance of flipping a candidate's behavior again.
     stagnant_gens = 0
     try:
-        for gen in range(GENERATIONS):
+        for gen in range(start_gen, GENERATIONS):
             kicking = stagnant_gens >= STAGNATION_PATIENCE
             sigma_this_gen = SIGMA * STAGNATION_SIGMA_MULT if kicking else SIGMA
             if kicking:
@@ -523,5 +587,15 @@ if __name__ == "__main__":
             "instead of random initialization."
         ),
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Continue the latest run: keep generation numbering going (no "
+            "restart at gen 000) and append to the most recent training_log "
+            "CSV. Auto-loads theta_interrupt.npy / theta_final.npy / the latest "
+            "theta_gen_*.npy when --init-theta isn't given."
+        ),
+    )
     args = parser.parse_args()
-    train(init_theta_path=args.init_theta)
+    train(init_theta_path=args.init_theta, resume=args.resume)
