@@ -7,6 +7,7 @@ import numpy as np
 from bridge_client import BridgeClient
 from config import (
     ACCURACY_BONUS_WEIGHT, AMMO_MAX_ROUNDS, AMMO_SHOT_COST,
+    AREA_SCREENS,
     CLEAR_ACCURACY_GATE_FLOOR, CLEAR_ACCURACY_GATE_TARGET,
     CLEAR_BONUS, CONTINUE_SCREEN_FALLBACK_TICKS,
     CONTINUE_SCREEN_STALE_TICKS, CURSOR_X_MAX,
@@ -573,6 +574,7 @@ class TimeCrisisEnv:
         total_fired = total_hit = total_life_loss = 0
         dead_guess = timed_out_guess = False
         continue_screen_guess = False
+        area_cleared_guess = False  # all AREA_SCREENS done -> success terminal
         tick_start_core = core_watchdog_snapshot(self.prev)
         tick_start_shots_life = (
             self.prev["shots_fired"], self.prev["shots_hit"], self.prev["life"],
@@ -720,6 +722,12 @@ class TimeCrisisEnv:
         clear_this_tick = tick_timer_delta > SCREEN_CLEAR_TIMER_BUMP
         if clear_this_tick:
             self.screens_cleared += 1
+        # Area complete: clearing the last of AREA_SCREENS ends the episode as a
+        # SUCCESS now, before the "Area clear" results screen freezes the
+        # counters (which the core-stale watchdog would otherwise misread as a
+        # stuck continue/menu screen -> timed_out + log spam).
+        if self.screens_cleared >= AREA_SCREENS:
+            area_cleared_guess = True
 
         # Fallback continue/menu watchdog: if all core counters were frozen
         # across the entire decision tick, count it. Several consecutive frozen
@@ -735,22 +743,28 @@ class TimeCrisisEnv:
         else:
             self.stale_core_ticks = 0
         if self.stale_core_ticks >= CONTINUE_SCREEN_STALE_TICKS:
-            timed_out_guess = True
-            continue_screen_guess = True
-            # Reaching here means the direct life/timer terminal checks in the
-            # frame loop MISSED a death/timeout (dead_guess/timed_out_guess were
-            # both still False when all four core counters froze). That should
-            # not normally happen -- log it so any real continue-screen escape
-            # is visible in the worker output, mirroring the slow fallback below.
-            print(
-                "[env_timecrisis] core-stale watchdog fired "
-                f"({self.stale_core_ticks} ticks, all counters frozen) -- "
-                "primary life/timer terminal check was MISSED; "
-                f"life={self.prev['life']} timer={self.prev['timer']} "
-                f"shots_fired={self.prev['shots_fired']} "
-                f"shots_hit={self.prev['shots_hit']}.",
-                flush=True,
-            )
+            if self.screens_cleared >= AREA_SCREENS:
+                # Frozen counters AFTER the whole area was cleared = the "Area
+                # clear" results screen, i.e. a SUCCESS -- not a stuck continue/
+                # menu. End as cleared, and stay silent (no watchdog spam).
+                area_cleared_guess = True
+            else:
+                timed_out_guess = True
+                continue_screen_guess = True
+                # Reaching here means the direct life/timer terminal checks in the
+                # frame loop MISSED a death/timeout (dead_guess/timed_out_guess were
+                # both still False when all four core counters froze). That should
+                # not normally happen -- log it so any real continue-screen escape
+                # is visible in the worker output, mirroring the slow fallback below.
+                print(
+                    "[env_timecrisis] core-stale watchdog fired "
+                    f"({self.stale_core_ticks} ticks, all counters frozen) -- "
+                    "primary life/timer terminal check was MISSED; "
+                    f"life={self.prev['life']} timer={self.prev['timer']} "
+                    f"shots_fired={self.prev['shots_fired']} "
+                    f"shots_hit={self.prev['shots_hit']}.",
+                    flush=True,
+                )
 
         # Second, slower fallback that ignores ``timer`` entirely (see
         # CONTINUE_SCREEN_FALLBACK_TICKS in config.py): catches the case where
@@ -768,14 +782,17 @@ class TimeCrisisEnv:
         else:
             self.stale_shots_life_ticks = 0
         if self.stale_shots_life_ticks >= CONTINUE_SCREEN_FALLBACK_TICKS:
-            timed_out_guess = True
-            continue_screen_guess = True
-            print(
-                "[env_timecrisis] shots/life-stale fallback fired "
-                f"({self.stale_shots_life_ticks} ticks) -- likely stuck on a "
-                "continue/menu screen the timer-based watchdog missed.",
-                flush=True,
-            )
+            if self.screens_cleared >= AREA_SCREENS:
+                area_cleared_guess = True
+            else:
+                timed_out_guess = True
+                continue_screen_guess = True
+                print(
+                    "[env_timecrisis] shots/life-stale fallback fired "
+                    f"({self.stale_shots_life_ticks} ticks) -- likely stuck on a "
+                    "continue/menu screen the timer-based watchdog missed.",
+                    flush=True,
+                )
 
         # Wasted exposure: penalise ticks where the agent is fully exposed with
         # an EMPTY clip (ammo_left was already 0 at the start of this tick)
@@ -883,7 +900,7 @@ class TimeCrisisEnv:
             hit_delta=self.hit_delta,
         )
 
-        done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS)
+        done = (phase is Phase.TERMINAL) or (self.ticks >= MAX_TICKS) or area_cleared_guess
         info = {
             "shots_fired_delta": total_fired,
             "shots_hit_delta": total_hit,
@@ -899,6 +916,7 @@ class TimeCrisisEnv:
             "dead": dead_guess,
             "timed_out": timed_out_guess,
             "continue_screen": continue_screen_guess,
+            "area_cleared": bool(area_cleared_guess),
             "peek": bool(peek),
             "phase": phase.name,
             "dry_fire": dry_fire,

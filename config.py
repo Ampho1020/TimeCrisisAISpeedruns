@@ -89,6 +89,14 @@ CONTINUE_SCREEN_STALE_TICKS = 3
 # still catching a truly stuck screen well before the 900-tick/75s cap.
 CONTINUE_SCREEN_FALLBACK_TICKS = 180
 
+# Screens per area. Clearing this many ends the episode as a SUCCESS: the game
+# shows an "Area clear" results screen (time vs par, accuracy) which FREEZES the
+# same RAM counters the core-stale watchdog keys off -- so without this, a full
+# area clear would be misread as a stuck continue/menu screen (timed_out) and
+# spam the watchdog log. Reaching AREA_SCREENS terminates the episode as cleared
+# before that frozen state is ever reached.
+AREA_SCREENS = 5
+
 # -----------------------------
 # ES hyperparameters
 # -----------------------------
