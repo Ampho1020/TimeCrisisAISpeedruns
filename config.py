@@ -394,7 +394,7 @@ ENABLE_VISION_DRIFT = False
 # can't evolve the inward pull the old drift_gain did. 1.0 = off; raise slightly
 # if still inward, lower if it overshoots outward. Heuristic stopgap until the
 # detector is fine-tuned (see TODO).
-AIM_OUTWARD_GAIN_X = 1.04
+AIM_OUTWARD_GAIN_X = 1.07
 
 # Scales how strongly live detection confidence can nudge the trigger in
 # POLICY_MODE="vision_schedule". The shoot decision blends this term onto
