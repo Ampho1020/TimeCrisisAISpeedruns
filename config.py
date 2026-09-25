@@ -217,10 +217,12 @@ VISION_DETECTOR_DEVICE = "cuda"  # passed to TorchYoloDetector's YOLO.to(...)
 # dropped entirely, so the policy never aims or fires at them. Raised from the
 # 0.25 backend default (2026-09-25) because eval showed the agent firing at
 # non-enemy objects -- weak false-positive boxes that cleared 0.25 became fire
-# targets. 0.45 filters those low-confidence FPs at the source while keeping
-# genuine enemies (which the model scores well above 0.5). Tune UP if it still
-# shoots scenery, DOWN if it starts missing real enemies.
-VISION_DETECTION_CONFIDENCE = 0.45
+# targets. 2026-09-25: dialed 0.45 -> 0.35 after an off-policy eval of the
+# gen-32 checkpoint showed 0.45 also trimmed genuine low-confidence enemies
+# (hits fell 51->42, +1 damage) -- 0.35 still drops the weakest FP scenery
+# boxes while keeping more real targets. Tune UP if it still shoots scenery,
+# DOWN if it starts missing real enemies.
+VISION_DETECTION_CONFIDENCE = 0.35
 
 # Diagnostic-only timing instrumentation for the vision_schedule path
 # (2026-09-05, chasing a "decisions feel slow live" report). When True,
