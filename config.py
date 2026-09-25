@@ -483,7 +483,9 @@ AIM_ON_TARGET_RADIUS = 0.15
 # (REQUIRE_DETECTION_TO_FIRE) already stops the common post-kill waste (empty
 # spot -> no fire), so the refractory's only remaining case (dead-but-still-
 # detected) isn't worth the stacked-enemy penalty. Code kept behind the flag.
-ENABLE_KILL_REFRACTORY = False
+# 2026-09-25: Re-enabled kill refractory after evaluating stacked-enemy behavior.
+# TODO: NEEDS VALIDATION!
+ENABLE_KILL_REFRACTORY = True
 KILL_REFRACTORY_SHOTS = 3
 KILL_REFRACTORY_RADIUS = 0.06
 KILL_REFRACTORY_TICKS = 2

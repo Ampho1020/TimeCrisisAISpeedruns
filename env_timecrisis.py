@@ -142,6 +142,10 @@ class TimeCrisisEnv:
         # Each stamp: {"x","y","hits","killed_tick","last_tick"} keyed by aim
         # location; suppresses wasted post-kill pulses without an enemy tracker.
         self._kill_stamps: list[dict] = []
+        # FIFO of confirmed fired-shot aim points (RAM shots_fired deltas).
+        # Used to attribute later RAM shots_hit deltas to shot ORIGIN, not to
+        # whichever target the aim has moved onto by hit-report time.
+        self._confirmed_shot_aims: list[tuple[int, float, float]] = []
         self.suppressed_shot_pulses: int = 0  # diagnostic: pulses withheld by the refractory
         self.reaction_no_shot_streak: int = 0  # ticks a target has been visible with no shot fired since
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
@@ -339,6 +343,7 @@ class TimeCrisisEnv:
         self.cover_ticks = 0
         self.hit_delta = 0
         self._kill_stamps = []
+        self._confirmed_shot_aims = []
         self.suppressed_shot_pulses = 0
         self.reaction_no_shot_streak = 0
         self.prev_aim_x_bias = 0.0
@@ -394,6 +399,43 @@ class TimeCrisisEnv:
         stamp["last_tick"] = self.ticks
         if stamp["killed_tick"] is None and stamp["hits"] >= KILL_REFRACTORY_SHOTS:
             stamp["killed_tick"] = self.ticks
+
+    def _remember_confirmed_shots(self, n: int, x: float, y: float):
+        """Append n confirmed fired-shot origins (from RAM shots_fired deltas).
+
+        Keeping this FIFO lets us map later RAM shots_hit deltas back to where
+        those rounds were fired, even if aim moved before the hit was reported.
+        """
+        if n <= 0:
+            return
+        q = getattr(self, "_confirmed_shot_aims", None)
+        if q is None:
+            q = self._confirmed_shot_aims = []
+        for _ in range(int(n)):
+            q.append((self.ticks, float(x), float(y)))
+        # Bounded queue: enough headroom for delayed-hit attribution but never
+        # unbounded growth during long miss streaks.
+        max_kept = max(64, AMMO_MAX_ROUNDS * 8)
+        if len(q) > max_kept:
+            del q[: len(q) - max_kept]
+
+    def _consume_hit_origins(self, n: int, fallback_x: float, fallback_y: float) -> list[tuple[float, float]]:
+        """Resolve n hit origins from the confirmed-shot FIFO.
+
+        Falls back to the current aim when there are more hits than queued shot
+        origins (rare wrap/edge cases), preserving old behaviour as a fallback.
+        """
+        out: list[tuple[float, float]] = []
+        q = getattr(self, "_confirmed_shot_aims", None)
+        if q is None:
+            q = self._confirmed_shot_aims = []
+        for _ in range(max(0, int(n))):
+            if q:
+                _, sx, sy = q.pop(0)
+                out.append((float(sx), float(sy)))
+            else:
+                out.append((float(fallback_x), float(fallback_y)))
+        return out
 
     def _target_in_refractory(self, x: float, y: float) -> bool:
         """True if a target at (x, y) has already absorbed a full kill and is
@@ -661,13 +703,17 @@ class TimeCrisisEnv:
             if VISION_PROFILE:
                 self._profile_readcore_ms.append((time.perf_counter() - _t0) * 1000.0)
 
-            total_fired += max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
+            frame_fired = max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
+            total_fired += frame_fired
+            if frame_fired > 0 and ENABLE_KILL_REFRACTORY:
+                self._remember_confirmed_shots(frame_fired, aim_x, aim_y)
             frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
             total_hit += frame_hits
             if frame_hits > 0:
                 self.hit_delta = 0
                 if ENABLE_KILL_REFRACTORY:
-                    self._credit_target_hits(frame_hits, aim_x, aim_y)
+                    for hx, hy in self._consume_hit_origins(frame_hits, aim_x, aim_y):
+                        self._credit_target_hits(1, hx, hy)
             else:
                 self.hit_delta += 1
             life_d       = u16_delta(post["life"], pre["life"])
