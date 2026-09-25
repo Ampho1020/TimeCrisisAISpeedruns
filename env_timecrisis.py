@@ -606,7 +606,7 @@ class TimeCrisisEnv:
         # that lock prevents the AGENT from reversing the peek button mid
         # traverse (a real in-game animation-reversal bug, confirmed live),
         # not from firing too early.
-        shoot_allowed = peek
+        shoot_allowed = bool(peek and self.prev_peek)
         # Full-range mapping: tanh bias [-1, 1] spans the full screen [0, 1].
         # Using 0.5× previously kept the cursor in [0.17, 0.83] with typical
         # small initial weights; 1.0× lets early exploration reach the edges.
@@ -783,6 +783,7 @@ class TimeCrisisEnv:
             not dead_guess
             and not clear_this_tick
             and not timed_out_guess
+            and self.screens_cleared < AREA_SCREENS
             and core_watchdog_snapshot(self.prev) == tick_start_core
         ):
             self.stale_core_ticks += 1
@@ -822,6 +823,7 @@ class TimeCrisisEnv:
         if (
             not dead_guess
             and not clear_this_tick
+            and self.screens_cleared < AREA_SCREENS
             and current_shots_life == tick_start_shots_life
         ):
             self.stale_shots_life_ticks += 1

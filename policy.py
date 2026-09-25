@@ -384,8 +384,10 @@ def act_vision_schedule(
         and cursor_x_norm is not None
         and cursor_y_norm is not None
     ):
-        tgt_x = float(getattr(best_det, "aim_x_norm", best_det.cx_norm))
-        tgt_y = float(getattr(best_det, "aim_y_norm", best_det.cy_norm))
+        tgt_x_raw = getattr(best_det, "aim_x_norm", None)
+        tgt_y_raw = getattr(best_det, "aim_y_norm", None)
+        tgt_x = float(best_det.cx_norm if tgt_x_raw is None else tgt_x_raw)
+        tgt_y = float(best_det.cy_norm if tgt_y_raw is None else tgt_y_raw)
         dist = float(np.hypot(float(cursor_x_norm) - tgt_x, float(cursor_y_norm) - tgt_y))
         aim_on_target = dist <= AIM_ON_TARGET_RADIUS
         shoot = shoot and aim_on_target
@@ -419,8 +421,10 @@ def act_vision_schedule(
     # contract env.step consumes (env re-adds 0.5 and clips to [0, 1]).
     base_x_01 = min(1.0, max(0.0, 0.5 + base_ax_bias))
     base_y_01 = min(1.0, max(0.0, 0.5 + base_ay_bias))
-    target_x_norm = float(getattr(best_det, "aim_x_norm", best_det.cx_norm))
-    target_y_norm = float(getattr(best_det, "aim_y_norm", best_det.cy_norm))
+    target_x_raw = getattr(best_det, "aim_x_norm", None)
+    target_y_raw = getattr(best_det, "aim_y_norm", None)
+    target_x_norm = float(best_det.cx_norm if target_x_raw is None else target_x_raw)
+    target_y_norm = float(best_det.cy_norm if target_y_raw is None else target_y_raw)
 
     if ENABLE_VISION_DRIFT and cursor_x_norm is not None and cursor_y_norm is not None:
         edge_mag_x = max(0.0, abs(target_x_norm - 0.5) * 2.0 - VISION_DRIFT_EDGE_START)
