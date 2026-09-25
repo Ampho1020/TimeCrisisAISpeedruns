@@ -791,6 +791,7 @@ def build_detector(
     onnx_model_path: str | None = None,
     torch_model_path: str | None = None,
     device: str = "cuda",
+    confidence_threshold: float | None = None,
 ):
     """Return a detector, preferring GPU torch, then ONNX, then classical.
 
@@ -821,6 +822,10 @@ def build_detector(
     baseline on a bad path/typo. Every worker process prints this once at
     startup.
     """
+    conf_kwargs = (
+        {} if confidence_threshold is None
+        else {"confidence_threshold": confidence_threshold}
+    )
     if torch_model_path:
         abs_path = os.path.abspath(torch_model_path)
         if os.path.isfile(abs_path):
@@ -833,7 +838,7 @@ def build_detector(
                 mtime = _dt.datetime.fromtimestamp(
                     os.path.getmtime(abs_path)
                 ).strftime("%Y-%m-%d %H:%M:%S")
-                det = TorchYoloDetector(abs_path, device=device)
+                det = TorchYoloDetector(abs_path, device=device, **conf_kwargs)
                 print(
                     f"[detector] Using TorchYoloDetector (GPU/{device}): "
                     f"{abs_path} ({size_mb:.1f} MB, modified {mtime})",
@@ -866,7 +871,7 @@ def build_detector(
                 f"({size_mb:.1f} MB, modified {mtime})",
                 flush=True,
             )
-            return ONNXDetector(abs_path)
+            return ONNXDetector(abs_path, **conf_kwargs)
         print(
             f"[detector] WARNING: onnx_model_path={abs_path!r} does not exist "
             f"-- falling back to ClassicalDetector (basic MOG2 baseline, NOT "

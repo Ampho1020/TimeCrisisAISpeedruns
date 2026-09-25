@@ -24,7 +24,8 @@ from config import (
     RELOAD_BONUS, RELOAD_DUCK_TICKS,
     SCREEN_CLEAR_TIMER_BUMP, SHOOT_PULSE_EVERY_N_FRAMES,
     STATE_SLOT, TIMEOUT_TIMER_THRESHOLD,
-    VISION_CAPTURE_EVERY_N_TICKS, VISION_DETECTOR_DEVICE, VISION_ONNX_MODEL_PATH,
+    VISION_CAPTURE_EVERY_N_TICKS, VISION_DETECTION_CONFIDENCE,
+    VISION_DETECTOR_DEVICE, VISION_ONNX_MODEL_PATH,
     VISION_PROFILE, VISION_PROFILE_PRINT_EVERY, VISION_TORCH_MODEL_PATH,
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
@@ -181,6 +182,7 @@ class TimeCrisisEnv:
                 VISION_ONNX_MODEL_PATH or None,
                 torch_model_path=VISION_TORCH_MODEL_PATH or None,
                 device=VISION_DETECTOR_DEVICE,
+                confidence_threshold=VISION_DETECTION_CONFIDENCE,
             )
         else:
             self.detector = None

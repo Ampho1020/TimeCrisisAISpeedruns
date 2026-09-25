@@ -212,6 +212,16 @@ VISION_ONNX_MODEL_PATH = os.path.join(os.path.dirname(__file__), "best.onnx")
 VISION_TORCH_MODEL_PATH = os.path.join(os.path.dirname(__file__), "best.pt")
 VISION_DETECTOR_DEVICE = "cuda"  # passed to TorchYoloDetector's YOLO.to(...)
 
+# Minimum detection confidence floor for the YOLO/ONNX detector (passed as
+# ultralytics `conf=` / the score threshold). Detections below this are
+# dropped entirely, so the policy never aims or fires at them. Raised from the
+# 0.25 backend default (2026-09-25) because eval showed the agent firing at
+# non-enemy objects -- weak false-positive boxes that cleared 0.25 became fire
+# targets. 0.45 filters those low-confidence FPs at the source while keeping
+# genuine enemies (which the model scores well above 0.5). Tune UP if it still
+# shoots scenery, DOWN if it starts missing real enemies.
+VISION_DETECTION_CONFIDENCE = 0.45
+
 # Diagnostic-only timing instrumentation for the vision_schedule path
 # (2026-09-05, chasing a "decisions feel slow live" report). When True,
 # TimeCrisisEnv.step() times each self.client.get_screenshot() call and
@@ -438,7 +448,11 @@ PEEK_DETECTION_SCALE = 1.5
 # override still force-fired on middling detections before the aim locked,
 # feeding the spray. 0.75 reserves the force-fire for targets we're clearly
 # on, letting the (now less aggressive) blended shoot logit govern the rest.
-VISION_FORCE_SHOOT_CONFIDENCE = 0.75
+# 2026-09-25: 0.75 -> 0.82 alongside the VISION_DETECTION_CONFIDENCE floor
+# and the higher MISS_PENALTY -- eval showed shots at non-enemy objects, so
+# the force-fire override now demands even stronger evidence before bypassing
+# the blended logit.
+VISION_FORCE_SHOOT_CONFIDENCE = 0.82
 # Minimum blend gain when a confident detection is present. This makes aim
 # follow vision aggressively instead of staying near the open-loop base aim.
 VISION_MIN_BLEND_GAIN = 0.60
@@ -581,7 +595,14 @@ FAIL_PENALTY       = 200.0
 # would tip the population into the documented "never expose / never fire"
 # cover-collapse local optimum (see SIGMA note above). Tune up if accuracy
 # stays low, down if clears/exposure collapse.
-MISS_PENALTY       = 4.0
+# 2026-09-25: 4.0 -> 6.0. The seed-777 gen-32 checkpoint eval sat at ~48%
+# accuracy -- right at the ~44% hit/miss break-even the old value implied, so
+# the fitness had no gradient left to push it higher and the agent sprayed
+# cheap insurance rounds. At 6.0 (vs HIT_REWARD=5) break-even moves to ~55%,
+# charging waste harder while aimed clearing fire stays net-positive. Paired
+# with the raised detection-confidence floor so the extra penalty lands on
+# genuine waste, not detector false positives the agent can't help firing at.
+MISS_PENALTY       = 6.0
 
 # Multi-screen fitness (added 2026-08-10 alongside vision_schedule).
 # Time Crisis' Area 1 has SEVERAL discrete "screens" (cover swaps); before
