@@ -31,6 +31,12 @@ from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import act, act_schedule, act_vision_schedule
 
 
+# Optional global suppression for watchdog diagnostic prints. Primarily used
+# by simulation/unit-test harnesses where the watchdog behavior is asserted
+# directly and per-episode spam obscures signal.
+SUPPRESS_WATCHDOG_LOGS = False
+
+
 def u16_delta(new_v: int, old_v: int) -> int:
     """Signed delta between two u16 reads, wrap-around safe."""
     d = new_v - old_v
@@ -803,15 +809,16 @@ class TimeCrisisEnv:
                 # both still False when all four core counters froze). That should
                 # not normally happen -- log it so any real continue-screen escape
                 # is visible in the worker output, mirroring the slow fallback below.
-                print(
-                    "[env_timecrisis] core-stale watchdog fired "
-                    f"({self.stale_core_ticks} ticks, all counters frozen) -- "
-                    "primary life/timer terminal check was MISSED; "
-                    f"life={self.prev['life']} timer={self.prev['timer']} "
-                    f"shots_fired={self.prev['shots_fired']} "
-                    f"shots_hit={self.prev['shots_hit']}.",
-                    flush=True,
-                )
+                if not (SUPPRESS_WATCHDOG_LOGS or getattr(self, "suppress_watchdog_logs", False)):
+                    print(
+                        "[env_timecrisis] core-stale watchdog fired "
+                        f"({self.stale_core_ticks} ticks, all counters frozen) -- "
+                        "primary life/timer terminal check was MISSED; "
+                        f"life={self.prev['life']} timer={self.prev['timer']} "
+                        f"shots_fired={self.prev['shots_fired']} "
+                        f"shots_hit={self.prev['shots_hit']}.",
+                        flush=True,
+                    )
 
         # Second, slower fallback that ignores ``timer`` entirely (see
         # CONTINUE_SCREEN_FALLBACK_TICKS in config.py): catches the case where
@@ -835,12 +842,13 @@ class TimeCrisisEnv:
             else:
                 timed_out_guess = True
                 continue_screen_guess = True
-                print(
-                    "[env_timecrisis] shots/life-stale fallback fired "
-                    f"({self.stale_shots_life_ticks} ticks) -- likely stuck on a "
-                    "continue/menu screen the timer-based watchdog missed.",
-                    flush=True,
-                )
+                if not (SUPPRESS_WATCHDOG_LOGS or getattr(self, "suppress_watchdog_logs", False)):
+                    print(
+                        "[env_timecrisis] shots/life-stale fallback fired "
+                        f"({self.stale_shots_life_ticks} ticks) -- likely stuck on a "
+                        "continue/menu screen the timer-based watchdog missed.",
+                        flush=True,
+                    )
 
         # Wasted exposure: penalise ticks where the agent is fully exposed with
         # an EMPTY clip (ammo_left was already 0 at the start of this tick)

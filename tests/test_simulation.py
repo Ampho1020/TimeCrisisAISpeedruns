@@ -61,6 +61,7 @@ from policy import (
 # default. The open-loop path has its own dedicated tests (ScheduleSearchSuite,
 # below) against the sim-only TimedSpotScheduleEnv instead.
 env_timecrisis.POLICY_MODE = "mlp"
+env_timecrisis.SUPPRESS_WATCHDOG_LOGS = True
 
 
 # ---------------------------------------------------------------------------
@@ -2829,6 +2830,14 @@ class PeekGatingSuite(unittest.TestCase):
 class ContinueScreenWatchdogSuite(unittest.TestCase):
     """Regression tests for frozen-state (continue/menu) watchdog."""
 
+    _reported_once = False
+
+    @classmethod
+    def _report_watchdog_ok_once(cls):
+        if not cls._reported_once:
+            print("[watchdog] continue-screen fallback validated (single summary)")
+            cls._reported_once = True
+
     def test_frozen_state_terminates_within_threshold(self):
         theta = _theta_warm_start()
         env = FrozenStateEnv(seed=0)
@@ -2852,6 +2861,7 @@ class ContinueScreenWatchdogSuite(unittest.TestCase):
             f"Frozen termination took {done_tick} ticks, expected <= "
             f"CONTINUE_SCREEN_STALE_TICKS ({CONTINUE_SCREEN_STALE_TICKS})",
         )
+        self._report_watchdog_ok_once()
 
     def test_episode_reports_continue_screen_count(self):
         theta = _theta_warm_start()
@@ -2861,6 +2871,7 @@ class ContinueScreenWatchdogSuite(unittest.TestCase):
         self.assertIn("continue_screen_count", info)
         self.assertGreaterEqual(info["continue_screen_count"], 1)
         self.assertTrue(info["timed_out"])
+        self._report_watchdog_ok_once()
 
 
 class TimedSpotMemorySuite(unittest.TestCase):
