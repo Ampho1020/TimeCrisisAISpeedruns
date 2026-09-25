@@ -9,3 +9,5 @@ Retrain/fine-tune the YOLO detector (best.pt). The aim math is verified correct 
 Symptoms (2026-09-23 frame-dump diagnosis): extreme-edge enemies (cx<0.1) come back low-confidence (~0.26) and slightly imprecise; false positives on muzzle flashes / fire / clutter (e.g. a flame boxed as ENEMY at conf 0.45) pull aim off the real enemy in chaotic/damage frames.
 Plan: label more frames (edge enemies + hard negatives like muzzle flashes/fire), then fine-tune per the offline workflow in detector.py's footer. Use run_eval.py --dump-frames to gather corpus.
 
+Add dodge memory mechanics for DANGER and fixed red character 100% accurate hit moments!
+So that the agents will learn exact moments when to shoot. They already know which screen they are at, so it should be easy to keep separated.
