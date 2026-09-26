@@ -578,10 +578,10 @@ SHOOT_PULSE_EVERY_N_FRAMES = 2
 # -----------------------------
 # Fitness shaping
 # -----------------------------
-CLEAR_BONUS        = 200.0
+CLEAR_BONUS        = 100.0
 DAMAGE_PENALTY     = 300.0   # deliberately harsh: a hit is never worth it
 HIT_REWARD         = 5.0     # per confirmed hit, all episodes; teaches aim
-FAIL_PENALTY       = 200.0
+FAIL_PENALTY       = 1000.0
 
 # Per-MISS penalty (added 2026-09-13, accuracy-regression structural fix).
 # accuracy = hits / fired collapsed to ~0.13 because misses were FREE: ES
@@ -604,8 +604,8 @@ FAIL_PENALTY       = 200.0
 # charging waste harder while aimed clearing fire stays net-positive. Paired
 # with the raised detection-confidence floor so the extra penalty lands on
 # genuine waste, not detector false positives the agent can't help firing at.
-MISS_PENALTY       = 6.0
-
+# 2026-09-26: Increased MISS_PENALTY to 40.0 to further discourage wasteful shots.
+MISS_PENALTY       = 40.0
 # Multi-screen fitness (added 2026-08-10 alongside vision_schedule).
 # Time Crisis' Area 1 has SEVERAL discrete "screens" (cover swaps); before
 # this change the episode terminated on the FIRST screen clear (phase_infer
@@ -623,11 +623,11 @@ MISS_PENALTY       = 6.0
 #       the previous" curve the user asked for.
 #
 # MULTI_CLEAR_BONUS * screens_cleared ** 2 lands at:
-#   1 screen: +1000  (roughly matches the existing single-clear CLEAR_BONUS)
-#   2 screens: +4000 (each extra worth 3000, dwarfs any accuracy dip from
+#   1 screen: +100  (roughly matches the existing single-clear CLEAR_BONUS)
+#   2 screens: +400 (each extra worth 3000, dwarfs any accuracy dip from
 #                    encountering unfamiliar screen 2 enemies)
-#   3 screens: +9000
-#   4 screens: +16000
+#   3 screens: +900
+#   4 screens: +1600
 # The gap between (N) and (N-1) is 2N-1 * MULTI_CLEAR_BONUS, so ES has a
 # strictly INCREASING marginal incentive to push for one more screen -- the
 # reward is genuinely "richer" per extra screen, not just larger absolute.
@@ -814,7 +814,7 @@ COVER_HESITATION_PENALTY = 15.0
 # frame that does not register a hit. It is exposed to the policy as
 # hit_delta_norm and penalized in fitness (below) so the agent is nudged away
 # from long dry streaks.
-HIT_DELTA_NORM_FRAMES = 300.0
+HIT_DELTA_NORM_FRAMES = 400.0
 # 2026-09-13 (accuracy-regression rebalance): halved 80 -> 40. Penalizing dry
 # streaks pushes the trigger to fire faster, which dilutes accuracy -- softened
 # as part of the spray-pressure rollback (see EXPOSED_NO_SHOT_PENALTY above).
