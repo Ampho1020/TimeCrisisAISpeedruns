@@ -604,8 +604,15 @@ FAIL_PENALTY       = 1000.0
 # charging waste harder while aimed clearing fire stays net-positive. Paired
 # with the raised detection-confidence floor so the extra penalty lands on
 # genuine waste, not detector false positives the agent can't help firing at.
-# 2026-09-26: Increased MISS_PENALTY to 40.0 to further discourage wasteful shots.
-MISS_PENALTY       = 40.0
+# 2026-09-26: reverted 40.0 -> 10.0. The --shot-diag eval proved penalty
+# tuning is a dead end for accuracy: at MISS_PENALTY=40 (break-even ~89%)
+# mean_acc stayed DEAD FLAT ~0.49 across 48 generations. The agent is already
+# pixel-perfect aimed (0 off-target shots, mean aim->box 0.010) -- 90.5% of
+# shots are on-target yet only 45% connect, because detector boxes persist on
+# dead/spawning enemies and bursts dump extra pulses. No fitness gradient can
+# help a perfectly-aimed agent; the real levers are the YOLO retrain + fire
+# cadence. 10.0 keeps waste modestly charged without distorting fitness.
+MISS_PENALTY       = 10.0
 # Multi-screen fitness (added 2026-08-10 alongside vision_schedule).
 # Time Crisis' Area 1 has SEVERAL discrete "screens" (cover swaps); before
 # this change the episode terminated on the FIRST screen clear (phase_infer
