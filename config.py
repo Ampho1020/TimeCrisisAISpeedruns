@@ -640,7 +640,7 @@ MISS_PENALTY       = 6.0
 # "frozen" phase to key off) and jumps up by hundreds on a clear, so 10 is
 # comfortably above natural per-tick noise and well below a real clear's
 # bonus roll.
-MULTI_CLEAR_BONUS = 1000.0
+MULTI_CLEAR_BONUS = 100.0
 SCREEN_CLEAR_TIMER_BUMP = 10
 
 # Accuracy gate on the DOMINANT clear reward (added 2026-09-13, third-pass
