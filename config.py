@@ -573,7 +573,16 @@ ENEMY_SHIELD_X_OFFSET_FRAC = 0.0
 # Trigger pulse cadence while shoot=True (0-based frame index within one
 # decision tick). Uses one-frame PRESS pulses separated by release frames,
 # so values below 2 are clamped to 2 in env_timecrisis.py for reliability.
-SHOOT_PULSE_EVERY_N_FRAMES = 2
+# 2026-09-26: 2 -> 3 (burst discipline). At FRAME_SKIP=5 a value of 2 fires
+# pulses at f=0,2,4 (3 rounds/tick); the --shot-diag eval showed 90.5% of
+# shots on-target yet only 45% connecting -- a large share is burst-tail
+# rounds dumped into an enemy that already died on pulse 1 (RAM hit registers
+# mid-tick but the cached detection still shows the box, so the refractory
+# can't suppress them in time). 3 fires at f=0,3 (2 rounds/tick), cutting the
+# wasted tail ~1/3 while still landing multi-hit kills across re-exposures.
+# Raise toward FRAME_SKIP (1 round/tick) if on-target waste persists, lower if
+# clears slow from under-firing on tankier enemies.
+SHOOT_PULSE_EVERY_N_FRAMES = 3
 
 # -----------------------------
 # Fitness shaping
