@@ -578,7 +578,7 @@ SHOOT_PULSE_EVERY_N_FRAMES = 2
 # -----------------------------
 # Fitness shaping
 # -----------------------------
-CLEAR_BONUS        = 1000.0
+CLEAR_BONUS        = 200.0
 DAMAGE_PENALTY     = 300.0   # deliberately harsh: a hit is never worth it
 HIT_REWARD         = 5.0     # per confirmed hit, all episodes; teaches aim
 FAIL_PENALTY       = 200.0
