@@ -42,6 +42,52 @@ def _expected_theta_size() -> int:
     return PARAM_COUNT
 
 
+def _print_shot_diag(recs: list, on_target_radius: float = 0.08) -> None:
+    """Break down every fired shot into no-detection / off-target / on-target
+    buckets and report the hit rate of each, so the source of wasted bullets
+    is unambiguous (blind schedule pulses vs aim/detector precision misses)."""
+    fired = sum(r["fired"] for r in recs)
+    hits = sum(r["hit"] for r in recs)
+    if fired == 0:
+        print("shot-diag  : no shots fired")
+        return
+
+    def bucket(pred):
+        f = sum(r["fired"] for r in recs if pred(r))
+        h = sum(r["hit"] for r in recs if pred(r))
+        return f, h
+
+    blind_f, blind_h = bucket(lambda r: not r["had_detection"])
+    off_f, off_h = bucket(
+        lambda r: r["had_detection"] and r["nearest_dist"] >= on_target_radius
+    )
+    on_f, on_h = bucket(
+        lambda r: r["had_detection"]
+        and 0.0 <= r["nearest_dist"] < on_target_radius
+    )
+    det_recs = [r for r in recs if r["had_detection"]]
+    mean_dist = (
+        sum(r["nearest_dist"] for r in det_recs) / len(det_recs)
+        if det_recs else -1.0
+    )
+
+    def pct(n):
+        return 100.0 * n / fired
+
+    def rate(h, f):
+        return f"{100.0 * h / f:.0f}%" if f else "--"
+
+    print("---- shot diagnostics ----")
+    print(f"fired={fired}  hits={hits}  accuracy={100.0*hits/fired:.1f}%")
+    print(f"  blind (no detection)   : {blind_f:3d} ({pct(blind_f):4.1f}%)  "
+          f"hit {rate(blind_h, blind_f)}")
+    print(f"  off-target (aim>{on_target_radius:.2f})   : {off_f:3d} ({pct(off_f):4.1f}%)  "
+          f"hit {rate(off_h, off_f)}")
+    print(f"  on-target (aim<{on_target_radius:.2f})    : {on_f:3d} ({pct(on_f):4.1f}%)  "
+          f"hit {rate(on_h, on_f)}")
+    print(f"  mean aim->nearest box  : {mean_dist:.3f}  (detected-shot frames)")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -62,6 +108,14 @@ def main():
         help=(
             "Revert to training-cadence vision (refresh every "
             "VISION_CAPTURE_EVERY_N_TICKS ticks) instead of every frame."
+        ),
+    )
+    parser.add_argument(
+        "--shot-diag",
+        action="store_true",
+        help=(
+            "Record every fired shot and print a breakdown of WHERE bullets "
+            "are wasted: no-detection (blind), off-target, on-target misses."
         ),
     )
     parser.add_argument(
@@ -88,6 +142,8 @@ def main():
     env = TimeCrisisEnv(per_frame_vision=not args.tick_vision)
     if args.dump_frames:
         env.dump_frames_dir = args.dump_frames
+    if args.shot_diag:
+        env.shot_diag = []
     env.connect()
     try:
         # Override the launch-time training throttle (EMULATOR_SPEED_PERCENT
@@ -114,6 +170,8 @@ def main():
               f"hesitated cover : {info['hesitated_cover_ticks']} ticks")
         if args.dump_frames:
             print(f"frames     : {env._dump_frame_counter} saved to {args.dump_frames}")
+        if args.shot_diag and env.shot_diag is not None:
+            _print_shot_diag(env.shot_diag)
     finally:
         env.close()
 

@@ -154,6 +154,12 @@ class TimeCrisisEnv:
         # whichever target the aim has moved onto by hit-report time.
         self._confirmed_shot_aims: list[tuple[int, float, float]] = []
         self.suppressed_shot_pulses: int = 0  # diagnostic: pulses withheld by the refractory
+        # Optional per-fired-shot diagnostic sink (eval only). When set to a
+        # list (by run_eval --shot-diag) every registered RAM shot appends one
+        # record so we can see WHERE wasted bullets go: no-detection (blind
+        # schedule pulses), off-target (aim not on any box), or on-target
+        # misses (aim on a box but the shot still fails -> detector/aim ceiling).
+        self.shot_diag: list | None = None
         self.reaction_no_shot_streak: int = 0  # ticks a target has been visible with no shot fired since
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
         self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
@@ -724,6 +730,31 @@ class TimeCrisisEnv:
                         self._credit_target_hits(1, hx, hy)
             else:
                 self.hit_delta += 1
+            if self.shot_diag is not None and frame_fired > 0:
+                dets = self.last_detections or []
+                best_conf = 0.0
+                nearest_dist = -1.0
+                nearest_conf = 0.0
+                for det in dets:
+                    dx_raw = getattr(det, "aim_x_norm", None)
+                    dy_raw = getattr(det, "aim_y_norm", None)
+                    cx = float(det.cx_norm if dx_raw is None else dx_raw)
+                    cy = float(det.cy_norm if dy_raw is None else dy_raw)
+                    d = ((cx - aim_x) ** 2 + (cy - aim_y) ** 2) ** 0.5
+                    c = float(det.confidence)
+                    if c > best_conf:
+                        best_conf = c
+                    if nearest_dist < 0.0 or d < nearest_dist:
+                        nearest_dist = d
+                        nearest_conf = c
+                self.shot_diag.append({
+                    "fired": int(frame_fired),
+                    "hit": int(frame_hits),
+                    "had_detection": bool(dets),
+                    "best_conf": best_conf,
+                    "nearest_dist": nearest_dist,
+                    "nearest_conf": nearest_conf,
+                })
             life_d       = u16_delta(post["life"], pre["life"])
             if life_d < 0:
                 total_life_loss += -life_d
