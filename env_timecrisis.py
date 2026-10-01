@@ -628,6 +628,13 @@ class TimeCrisisEnv:
         aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
 
         total_fired = total_hit = total_life_loss = 0
+        # RAM reports shot hits frame-by-frame. Once a hit lands during this
+        # decision tick, stop any remaining burst pulses: the current target
+        # may already be in its death animation while the tick's cached
+        # detection still shows it. The next decision tick refreshes vision
+        # and can resume fire if the target is still present (or a stacked
+        # enemy has appeared at the same location).
+        hit_this_tick = False
         dead_guess = timed_out_guess = False
         continue_screen_guess = False
         area_cleared_guess = False  # all AREA_SCREENS done -> success terminal
@@ -667,7 +674,7 @@ class TimeCrisisEnv:
                         self.last_detections = self.detector.detect(frame_img)
                 except Exception as exc:  # pragma: no cover - defensive
                     print(f"[env] per-frame vision capture failed: {exc!r}", flush=True)
-                _, _, aim_x_bias, aim_y_bias = act_vision_schedule(
+                frame_shoot, _, aim_x_bias, aim_y_bias = act_vision_schedule(
                     theta,
                     self.ticks,
                     self.last_detections or [],
@@ -679,6 +686,12 @@ class TimeCrisisEnv:
                     ),
                     ammo_left_norm=self.ammo_left / AMMO_MAX_ROUNDS,
                 )
+                # Unlike training, per-frame-vision evaluation has a fresh
+                # detection result for this exact frame. Recompute the
+                # trigger from it too: keeping the tick-start shoot decision
+                # would allow a later burst pulse to fire after the target
+                # disappeared, despite REQUIRE_DETECTION_TO_FIRE.
+                shoot = frame_shoot
                 aim_x = min(1.0, max(0.0, 0.5 + float(aim_x_bias)))
                 aim_y = min(1.0, max(0.0, 0.5 + float(aim_y_bias)))
                 self.prev_aim_x_bias = float(aim_x_bias)
@@ -688,7 +701,10 @@ class TimeCrisisEnv:
             # button for all 5 frames makes fire rate uncontrollable.
             # shoot_allowed ensures the trigger only fires when fully exposed.
             pulse_every = max(2, int(SHOOT_PULSE_EVERY_N_FRAMES))
-            fire_pulse = bool(shoot and shoot_allowed and (f % pulse_every == 0))
+            fire_pulse = bool(
+                shoot and shoot_allowed and (f % pulse_every == 0)
+                and not hit_this_tick
+            )
             # Post-kill refractory: the enemy at this spot is already dead once
             # KILL_REFRACTORY_SHOTS have landed, so withhold further pulses to
             # stop dumping shots into the death animation.
@@ -724,13 +740,14 @@ class TimeCrisisEnv:
             frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
             total_hit += frame_hits
             if frame_hits > 0:
+                hit_this_tick = True
                 self.hit_delta = 0
                 if ENABLE_KILL_REFRACTORY:
                     for hx, hy in self._consume_hit_origins(frame_hits, aim_x, aim_y):
                         self._credit_target_hits(1, hx, hy)
             else:
                 self.hit_delta += 1
-            if self.shot_diag is not None and frame_fired > 0:
+            if getattr(self, "shot_diag", None) is not None and frame_fired > 0:
                 dets = self.last_detections or []
                 best_conf = 0.0
                 nearest_dist = -1.0

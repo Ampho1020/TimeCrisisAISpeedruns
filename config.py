@@ -582,7 +582,17 @@ ENEMY_SHIELD_X_OFFSET_FRAC = 0.0
 # wasted tail ~1/3 while still landing multi-hit kills across re-exposures.
 # Raise toward FRAME_SKIP (1 round/tick) if on-target waste persists, lower if
 # clears slow from under-firing on tankier enemies.
-SHOOT_PULSE_EVERY_N_FRAMES = 3
+# 2026-09-26 (REVERTED 3 -> 2): the blunt cadence cut desynced the ALREADY-
+# TRAINED gen-54 checkpoint's timing (it learned exposure/reload cadence
+# expecting 3 pulses/tick) -- eval regressed to 37.1% (124 fired, up from 106),
+# worse than baseline, because the policy under-killed per exposure and
+# re-exposed more. Superseded by env_timecrisis.py's hit_this_tick gate (stops
+# the REST of a burst the instant RAM confirms a hit, this same tick) -- a
+# precise, inference-time-only fix for the exact burst-tail waste this cadence
+# change was blindly attacking, with no retrain required and no risk of
+# desyncing existing checkpoints. Revisit raising this only after a FRESH
+# training run under hit_this_tick if on-target waste still persists.
+SHOOT_PULSE_EVERY_N_FRAMES = 2
 
 # -----------------------------
 # Fitness shaping
