@@ -550,11 +550,29 @@ KILL_REFRACTORY_ABSENCE = True
 # ENABLE_KILL_REFRACTORY is turned OFF on this branch so the A/B comparison
 # against main isn't confounded by the two suppression mechanisms stacking.
 ENABLE_ENEMY_ID_TRACKING = True
-ENEMY_TRACK_MATCH_RADIUS = 0.08  # slightly looser than KILL_REFRACTORY_RADIUS
-# to tolerate box jitter between ticks without losing the enemy's identity.
-ENEMY_TRACK_EXPIRE_TICKS = 10  # ~830ms of absence at FRAME_SKIP=5 (83ms/tick)
-# before a track is forgotten -- generous enough to survive a few detector
-# flicker frames, short enough to free the ID for a genuinely new enemy soon.
+# 2026-10-02: measured via --shot-diag's new tracker counters across 3 eval
+# runs of the same checkpoint at (0.08, 10): only 3-8% of confirmed hits ever
+# successfully marked a track "done" (most hit-credits are silently dropped),
+# AND in the worst run the mechanism over-suppressed (94 pulses blocked,
+# MORE than the 89 that fired) badly enough to drop a full clear to 3/5
+# screens with 3 damage + a timeout. Root cause: Time Crisis enemies reuse a
+# small set of fixed cover/spawn points, so a brand-new, fully-alive enemy
+# can spawn close enough to a just-killed one's last position, within the
+# expiry window, to get matched to that stale "done" track and never get
+# fired at again -- the same "can't tell this enemy apart from a new one"
+# problem the location-based refractory had, just lasting far longer.
+# Tightened both knobs to shrink the false-merge window: smaller radius so
+# two distinct enemies at nearby-but-different cover spots don't collide,
+# shorter expiry so a dead enemy's track is forgotten before the NEXT enemy
+# plausibly arrives at a similar spot. Re-test via --shot-diag before
+# loosening either back up.
+ENEMY_TRACK_MATCH_RADIUS = 0.05  # was 0.08 -- matches the old KILL_REFRACTORY_RADIUS,
+# already validated (previous diagnostics) as tight enough to track a single
+# enemy without false-merging neighbors, at this same detector precision.
+ENEMY_TRACK_EXPIRE_TICKS = 3  # was 10 (~830ms) -- now ~250ms, close to the old
+# KILL_REFRACTORY_TICKS=2 window that was already validated to reliably catch
+# a dead enemy's detection disappearing, without lingering long enough to
+# collide with the next enemy's arrival.
 
 # Only pull the trigger when the detector actually sees a target. On a tick
 # with no ENEMY detection the open-loop schedule otherwise fires at the near-
