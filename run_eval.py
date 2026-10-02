@@ -170,6 +170,9 @@ def main():
         print(f"kill stamps created        : {info.get('kill_stamps_created', 0)} "
               f"(killed by 3-shot count: {info.get('kills_marked_by_shots', 0)}, "
               f"by detection absence: {info.get('kills_marked_by_absence', 0)})")
+        print(f"ID-tracker suppressed      : {info.get('suppressed_shot_pulses_tracked', 0)} "
+              f"(tracks created: {info.get('enemy_tracks_created', 0)}, "
+              f"marked done: {info.get('enemy_tracks_done', 0)})")
         print(f"no_shot exposed : {info['no_shot_exposed_ticks']} ticks, "
               f"hesitated cover : {info['hesitated_cover_ticks']} ticks")
         if args.dump_frames:

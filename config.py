@@ -501,7 +501,11 @@ AIM_ON_TARGET_RADIUS = 0.15
 # detected) isn't worth the stacked-enemy penalty. Code kept behind the flag.
 # 2026-09-25: Re-enabled kill refractory after evaluating stacked-enemy behavior.
 # TODO: NEEDS VALIDATION!
-ENABLE_KILL_REFRACTORY = True
+# 2026-10-02: DISABLED on branch 1-punchman-(1-shot-on-target-only) so the new
+# ENEMY_ID_TRACKING experiment below isn't confounded by also running this
+# location-based system. Re-enable (and set ENABLE_ENEMY_ID_TRACKING=False) to
+# get back to main's behavior.
+ENABLE_KILL_REFRACTORY = False
 KILL_REFRACTORY_SHOTS = 3
 KILL_REFRACTORY_RADIUS = 0.06
 KILL_REFRACTORY_TICKS = 2
@@ -515,6 +519,42 @@ KILL_REFRACTORY_TICKS = 2
 # is never suppressed; a brief false positive (detection flicker) only delays
 # the next shot by <=KILL_REFRACTORY_TICKS ticks, so the cost is bounded.
 KILL_REFRACTORY_ABSENCE = True
+
+# -----------------------------------------------------------------------
+# EXPERIMENTAL (branch 1-punchman-(1-shot-on-target-only), 2026-10-02):
+# per-enemy IDENTITY tracking, as an alternative to the location-based
+# KILL_REFRACTORY_* system above.
+#
+# Diagnostics on the live refractory (--shot-diag + kill-stamp counters,
+# see run_eval.py) showed aim is pixel-perfect (0 off-target shots, mean
+# aim->box distance 0.010) yet on-target shots still only connect ~45% of
+# the time -- the agent is firing exactly where the detector draws a box,
+# which can be a lingering death-animation sprite the detector still
+# classifies as ENEMY. KILL_REFRACTORY_TICKS is a fixed, arbitrary-feeling
+# guess at how long that lingers, and the absence check can't distinguish
+# "this exact enemy is dead" from "a different enemy just arrived here".
+#
+# EnemyTracker (enemy_tracker.py) assigns a stable ID to each detected
+# ENEMY box via nearest-centroid matching across ticks, independent of
+# screen position. Once a track registers its FIRST confirmed RAM hit it
+# is marked permanently "done" (one-shot-only, regardless of whether the
+# in-game enemy actually needed more hits to die -- this is a deliberate
+# test of whether suppressing ALL further fire at a known-hit enemy raises
+# accuracy/clear speed, at the cost of possibly under-killing tankier
+# enemies). A track is only forgotten after ENEMY_TRACK_EXPIRE_TICKS of
+# the box being absent, so a new enemy walking into the same spot gets a
+# fresh, not-done ID instead of inheriting the old one's "done" status.
+#
+# Independent toggle from ENABLE_KILL_REFRACTORY so either system (or
+# neither, or -- for a combined test -- both) can be run in isolation.
+# ENABLE_KILL_REFRACTORY is turned OFF on this branch so the A/B comparison
+# against main isn't confounded by the two suppression mechanisms stacking.
+ENABLE_ENEMY_ID_TRACKING = True
+ENEMY_TRACK_MATCH_RADIUS = 0.08  # slightly looser than KILL_REFRACTORY_RADIUS
+# to tolerate box jitter between ticks without losing the enemy's identity.
+ENEMY_TRACK_EXPIRE_TICKS = 10  # ~830ms of absence at FRAME_SKIP=5 (83ms/tick)
+# before a track is forgotten -- generous enough to survive a few detector
+# flicker frames, short enough to free the ID for a genuinely new enemy soon.
 
 # Only pull the trigger when the detector actually sees a target. On a tick
 # with no ENEMY detection the open-loop schedule otherwise fires at the near-
