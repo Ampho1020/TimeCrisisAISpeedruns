@@ -188,6 +188,7 @@ class TimeCrisisEnv:
         # schedule pulses), off-target (aim not on any box), or on-target
         # misses (aim on a box but the shot still fails -> detector/aim ceiling).
         self.shot_diag: list | None = None
+        self._diag_hit_events: list[tuple[int, float, float]] = []  # (frame_idx, x, y), shot_diag only
         self.reaction_no_shot_streak: int = 0  # ticks a target has been visible with no shot fired since
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
         self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
@@ -397,6 +398,7 @@ class TimeCrisisEnv:
         self.suppressed_shot_pulses_tracked = 0
         self._confirmed_shot_track_ids = []
         self.shots_fired_no_track_id = 0
+        self._diag_hit_events = []
         self.reaction_no_shot_streak = 0
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
@@ -861,6 +863,14 @@ class TimeCrisisEnv:
                     if nearest_dist < 0.0 or d < nearest_dist:
                         nearest_dist = d
                         nearest_conf = c
+                cur_fi = self.ticks * FRAME_SKIP + f
+                since_hit_frames = -1
+                for hfi, hx, hy in reversed(self._diag_hit_events):
+                    if hfi >= cur_fi:
+                        continue
+                    if ((hx - aim_x) ** 2 + (hy - aim_y) ** 2) ** 0.5 <= KILL_REFRACTORY_RADIUS:
+                        since_hit_frames = cur_fi - hfi
+                        break
                 self.shot_diag.append({
                     "fired": int(frame_fired),
                     "hit": int(frame_hits),
@@ -868,7 +878,10 @@ class TimeCrisisEnv:
                     "best_conf": best_conf,
                     "nearest_dist": nearest_dist,
                     "nearest_conf": nearest_conf,
+                    "since_hit_frames": since_hit_frames,
                 })
+            if getattr(self, "shot_diag", None) is not None and frame_hits > 0:
+                self._diag_hit_events.append((self.ticks * FRAME_SKIP + f, aim_x, aim_y))
             life_d       = u16_delta(post["life"], pre["life"])
             if life_d < 0:
                 total_life_loss += -life_d

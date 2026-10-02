@@ -29,7 +29,7 @@ import sys
 
 import numpy as np
 
-from config import POLICY_MODE
+from config import FRAME_SKIP, POLICY_MODE
 from env_timecrisis import TimeCrisisEnv
 from policy import PARAM_COUNT, SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_PARAM_COUNT
 
@@ -86,6 +86,24 @@ def _print_shot_diag(recs: list, on_target_radius: float = 0.08) -> None:
     print(f"  on-target (aim<{on_target_radius:.2f})    : {on_f:3d} ({pct(on_f):4.1f}%)  "
           f"hit {rate(on_h, on_f)}")
     print(f"  mean aim->nearest box  : {mean_dist:.3f}  (detected-shot frames)")
+
+    # Ticks since the most recent EARLIER confirmed hit within the kill radius
+    # of this shot's aim point. Misses clustered shortly after a hit = ghost
+    # shots at a dying sprite; misses with no prior nearby hit = something else.
+    edges = [(0, 0), (1, 1), (2, 2), (3, 3), (4, 5), (6, 8), (9, 14), (15, 10**9)]
+    print("  shots by ticks since last nearby hit (hit rate):")
+    none_f = sum(r["fired"] for r in recs if r.get("since_hit_frames", -1) < 0)
+    none_h = sum(r["hit"] for r in recs if r.get("since_hit_frames", -1) < 0)
+    for lo, hi in edges:
+        sel = [r for r in recs
+               if r.get("since_hit_frames", -1) >= 0
+               and lo <= r["since_hit_frames"] // FRAME_SKIP <= hi]
+        f_ = sum(r["fired"] for r in sel)
+        h_ = sum(r["hit"] for r in sel)
+        label = f"{lo}" if lo == hi else (f"{lo}-{hi}" if hi < 10**9 else f"{lo}+")
+        print(f"    {label:>5} ticks : {f_:3d} fired, {f_ - h_:3d} missed, hit {rate(h_, f_)}")
+    print(f"    no prior hit nearby : {none_f:3d} fired, {none_f - none_h:3d} missed, "
+          f"hit {rate(none_h, none_f)}")
 
 
 def main():
