@@ -181,6 +181,7 @@ class TimeCrisisEnv:
         # shots_hit delta be credited to the track the round was aimed at,
         # even if aim moved on before the hit was reported.
         self._confirmed_shot_track_ids: list[int | None] = []
+        self.shots_fired_no_track_id: int = 0  # diagnostic: fired while target_track_id was None
         # Optional per-fired-shot diagnostic sink (eval only). When set to a
         # list (by run_eval --shot-diag) every registered RAM shot appends one
         # record so we can see WHERE wasted bullets go: no-detection (blind
@@ -395,6 +396,7 @@ class TimeCrisisEnv:
             tracker.reset()
         self.suppressed_shot_pulses_tracked = 0
         self._confirmed_shot_track_ids = []
+        self.shots_fired_no_track_id = 0
         self.reaction_no_shot_streak = 0
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
@@ -827,6 +829,8 @@ class TimeCrisisEnv:
                 self._remember_confirmed_shots(frame_fired, aim_x, aim_y)
             if frame_fired > 0 and tracker is not None:
                 self._remember_confirmed_shot_track_ids(frame_fired, target_track_id)
+                if target_track_id is None:
+                    self.shots_fired_no_track_id += frame_fired
             frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
             total_hit += frame_hits
             if frame_hits > 0:
@@ -1361,6 +1365,7 @@ class TimeCrisisEnv:
             "enemy_tracks_created": int(self.enemy_tracker.total_created) if getattr(self, "enemy_tracker", None) is not None else 0,
             "enemy_tracks_done": int(self.enemy_tracker.total_done) if getattr(self, "enemy_tracker", None) is not None else 0,
             "enemy_tracks_credit_misses": int(self.enemy_tracker.total_credit_misses) if getattr(self, "enemy_tracker", None) is not None else 0,
+            "shots_fired_no_track_id": int(getattr(self, "shots_fired_no_track_id", 0)),
             "aim_x_std": aim_x_std,
             "aim_y_std": aim_y_std,
             "aim_span_x": aim_span_x,
