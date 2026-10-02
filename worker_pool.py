@@ -58,6 +58,13 @@ class WorkerPool:
         self._procs: list[subprocess.Popen] = []
         self._executor: ThreadPoolExecutor | None = None
         self._closing = False
+        # Serializes shutdown against in-flight worker restarts (see close()
+        # and _restart_worker()): without this, a worker thread that hits a
+        # bridge failure in the brief window before _closing is set can launch
+        # a brand-new BizHawk process that close() never gets a chance to
+        # terminate, leaving an orphan emulator running after the user
+        # interrupts training.
+        self._lifecycle_lock = threading.Lock()
 
     # -- lifecycle ------------------------------------------------------
 
@@ -98,22 +105,28 @@ class WorkerPool:
         # Signal in-flight evals to stop recovering: without this, threads that
         # are mid-episode when we tear down catch the resulting socket errors
         # and try to "recover" by relaunching BizHawk, leaving orphan emulators
-        # behind (and racing with the list teardown below).
-        self._closing = True
-        if self._executor is not None:
-            self._executor.shutdown(wait=False)
-            self._executor = None
-        for env in self.envs:
-            try:
-                env.close()
-            except Exception:
-                pass
-        for proc in self._procs:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        self._procs = []
+        # behind (and racing with the list teardown below). Holding the
+        # lifecycle lock for the whole teardown means any _restart_worker()
+        # call that's already past its own _closing check is forced to finish
+        # (adding its new process to self._procs) BEFORE we get here, or to
+        # start AFTER we've already set _closing=True (and bail immediately) --
+        # either way, no orphan BizHawk process can escape termination below.
+        with self._lifecycle_lock:
+            self._closing = True
+            if self._executor is not None:
+                self._executor.shutdown(wait=False)
+                self._executor = None
+            for env in self.envs:
+                try:
+                    env.close()
+                except Exception:
+                    pass
+            for proc in self._procs:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            self._procs = []
 
     # -- evaluation -----------------------------------------------------
 
@@ -130,49 +143,57 @@ class WorkerPool:
         thread, so mutating ``self._procs[worker_idx]``/``self.envs[worker_idx]``
         here is race-free.
         """
-        # If the pool is tearing down, do NOT rebuild: close() may have already
-        # cleared self._procs (the assignment below would IndexError) and any
-        # emulator we launch now would be orphaned past shutdown.
-        if self._closing:
-            raise RuntimeError("worker pool is closing; skipping worker restart")
         port = self.ports[worker_idx]
         env = self.envs[worker_idx]
-        print(
-            f"[pool] restarting worker {worker_idx} on port {port} "
-            f"after a bridge failure...",
-            flush=True,
-        )
-        # Drop the old bridge sockets (best-effort).
-        try:
-            env.close()
-        except Exception:
-            pass
-        # Kill the old emulator process, if we launched it.
-        if AUTO_LAUNCH_BIZHAWK and worker_idx < len(self._procs):
-            old = self._procs[worker_idx]
-            try:
-                old.terminate()
-                old.wait(timeout=10)
-            except Exception:
-                try:
-                    old.kill()
-                except Exception:
-                    pass
-        # Rebind the listener BEFORE relaunching so the emulator can dial in.
-        env.start_listening()
-        if AUTO_LAUNCH_BIZHAWK:
-            proc = _launch_bizhawk(port)
-            # Index-safe: a concurrent close() can shrink/clear self._procs
-            # while this restart is in flight -- grow it rather than IndexError.
-            while len(self._procs) <= worker_idx:
-                self._procs.append(None)
-            self._procs[worker_idx] = proc
-        else:
+        # Everything that touches shared pool state (the closing flag, process
+        # list, socket teardown/relaunch) happens under the lifecycle lock so
+        # it can't interleave with close() -- see close()'s comment. The slow
+        # blocking wait for the emulator to reconnect happens AFTER we release
+        # the lock, so a concurrent close() on another worker isn't blocked by
+        # it.
+        with self._lifecycle_lock:
+            # If the pool is tearing down, do NOT rebuild: close() may have
+            # already cleared self._procs (the assignment below would
+            # IndexError) and any emulator we launch now would be orphaned
+            # past shutdown.
+            if self._closing:
+                raise RuntimeError("worker pool is closing; skipping worker restart")
             print(
-                f"[pool] AUTO_LAUNCH_BIZHAWK is off -- relaunch BizHawk on "
-                f"port {port} now so worker {worker_idx} can reconnect.",
+                f"[pool] restarting worker {worker_idx} on port {port} "
+                f"after a bridge failure...",
                 flush=True,
             )
+            # Drop the old bridge sockets (best-effort).
+            try:
+                env.close()
+            except Exception:
+                pass
+            # Kill the old emulator process, if we launched it.
+            if AUTO_LAUNCH_BIZHAWK and worker_idx < len(self._procs):
+                old = self._procs[worker_idx]
+                try:
+                    old.terminate()
+                    old.wait(timeout=10)
+                except Exception:
+                    try:
+                        old.kill()
+                    except Exception:
+                        pass
+            # Rebind the listener BEFORE relaunching so the emulator can dial in.
+            env.start_listening()
+            if AUTO_LAUNCH_BIZHAWK:
+                proc = _launch_bizhawk(port)
+                # Index-safe: a concurrent close() can shrink/clear self._procs
+                # while this restart is in flight -- grow it rather than IndexError.
+                while len(self._procs) <= worker_idx:
+                    self._procs.append(None)
+                self._procs[worker_idx] = proc
+            else:
+                print(
+                    f"[pool] AUTO_LAUNCH_BIZHAWK is off -- relaunch BizHawk on "
+                    f"port {port} now so worker {worker_idx} can reconnect.",
+                    flush=True,
+                )
         # Block until it reconnects + completes the Lua handshake.
         env.finish_connect()
         print(f"[pool] worker {worker_idx} back online.", flush=True)
