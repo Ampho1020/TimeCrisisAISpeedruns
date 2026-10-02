@@ -1360,6 +1360,7 @@ class TimeCrisisEnv:
             "suppressed_shot_pulses_tracked": int(getattr(self, "suppressed_shot_pulses_tracked", 0)),
             "enemy_tracks_created": int(self.enemy_tracker.total_created) if getattr(self, "enemy_tracker", None) is not None else 0,
             "enemy_tracks_done": int(self.enemy_tracker.total_done) if getattr(self, "enemy_tracker", None) is not None else 0,
+            "enemy_tracks_credit_misses": int(self.enemy_tracker.total_credit_misses) if getattr(self, "enemy_tracker", None) is not None else 0,
             "aim_x_std": aim_x_std,
             "aim_y_std": aim_y_std,
             "aim_span_x": aim_span_x,

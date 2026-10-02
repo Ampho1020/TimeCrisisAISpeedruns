@@ -40,12 +40,14 @@ class EnemyTracker:
         # Cumulative diagnostics (survive track purges).
         self.total_created = 0
         self.total_done = 0
+        self.total_credit_misses = 0  # credit_hit() called with a None/expired id
 
     def reset(self) -> None:
         self.tracks.clear()
         self._next_id = 1
         self.total_created = 0
         self.total_done = 0
+        self.total_credit_misses = 0
 
     def update(self, tick: int, detections) -> None:
         """Match this tick's ENEMY-class detections to existing tracks,
@@ -111,6 +113,7 @@ class EnemyTracker:
         exists to test, regardless of how many hits the enemy actually needs
         to die in-game."""
         if track_id is None or track_id not in self.tracks:
+            self.total_credit_misses += 1
             return
         s = self.tracks[track_id]
         s["hits"] += 1

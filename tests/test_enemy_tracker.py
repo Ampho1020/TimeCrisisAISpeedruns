@@ -116,6 +116,7 @@ class EnemyTrackerOneShotCreditSuite(unittest.TestCase):
         t.credit_hit(None)
         t.credit_hit(999)
         self.assertEqual(t.total_done, 0)
+        self.assertEqual(t.total_credit_misses, 2)
 
     def test_is_done_for_untracked_location_is_false(self):
         t = EnemyTracker(match_radius=0.08, expire_ticks=5)
