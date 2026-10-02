@@ -154,6 +154,16 @@ class TimeCrisisEnv:
         # whichever target the aim has moved onto by hit-report time.
         self._confirmed_shot_aims: list[tuple[int, float, float]] = []
         self.suppressed_shot_pulses: int = 0  # diagnostic: pulses withheld by the refractory
+        # Diagnostics for the kill-stamp lifecycle (see _credit_target_hits /
+        # _mark_kills_by_absence below): how many distinct hit locations were
+        # ever stamped, and how each one FIRST got marked killed (by reaching
+        # KILL_REFRACTORY_SHOTS confirmed hits, vs by the enemy detection box
+        # disappearing nearby). If kills_marked_total stays near 0 relative to
+        # kill_stamps_created, the refractory is barely ever engaging.
+        self.kill_stamps_created: int = 0
+        self.kills_marked_by_shots: int = 0
+        self.kills_marked_by_absence: int = 0
+        self.pulses_suppressed_same_tick: int = 0  # diagnostic: hit_this_tick gate
         # Optional per-fired-shot diagnostic sink (eval only). When set to a
         # list (by run_eval --shot-diag) every registered RAM shot appends one
         # record so we can see WHERE wasted bullets go: no-detection (blind
@@ -359,6 +369,10 @@ class TimeCrisisEnv:
         self._kill_stamps = []
         self._confirmed_shot_aims = []
         self.suppressed_shot_pulses = 0
+        self.kill_stamps_created = 0
+        self.kills_marked_by_shots = 0
+        self.kills_marked_by_absence = 0
+        self.pulses_suppressed_same_tick = 0
         self.reaction_no_shot_streak = 0
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
@@ -408,11 +422,13 @@ class TimeCrisisEnv:
             stamp = {"x": float(x), "y": float(y), "hits": 0,
                      "killed_tick": None, "last_tick": self.ticks}
             stamps.append(stamp)
+            self.kill_stamps_created = getattr(self, "kill_stamps_created", 0) + 1
         stamp["hits"] += int(n)
         stamp["x"], stamp["y"] = float(x), float(y)
         stamp["last_tick"] = self.ticks
         if stamp["killed_tick"] is None and stamp["hits"] >= KILL_REFRACTORY_SHOTS:
             stamp["killed_tick"] = self.ticks
+            self.kills_marked_by_shots = getattr(self, "kills_marked_by_shots", 0) + 1
 
     def _remember_confirmed_shots(self, n: int, x: float, y: float):
         """Append n confirmed fired-shot origins (from RAM shots_fired deltas).
@@ -480,6 +496,7 @@ class TimeCrisisEnv:
                     break
             if not enemy_near:
                 s["killed_tick"] = self.ticks
+                self.kills_marked_by_absence = getattr(self, "kills_marked_by_absence", 0) + 1
 
     def _purge_kill_stamps(self):
         """Drop expired kill stamps (and stale un-killed ones) so a newly-queued
@@ -705,6 +722,9 @@ class TimeCrisisEnv:
                 shoot and shoot_allowed and (f % pulse_every == 0)
                 and not hit_this_tick
             )
+            if (shoot and shoot_allowed and (f % pulse_every == 0)
+                    and hit_this_tick and not fire_pulse):
+                self.pulses_suppressed_same_tick = getattr(self, "pulses_suppressed_same_tick", 0) + 1
             # Post-kill refractory: the enemy at this spot is already dead once
             # KILL_REFRACTORY_SHOTS have landed, so withhold further pulses to
             # stop dumping shots into the death animation.
@@ -1260,6 +1280,10 @@ class TimeCrisisEnv:
             "reload_correct_count": int(reload_correct_count),
             "continue_screen_count": int(continue_screen_count),
             "suppressed_shot_pulses": int(getattr(self, "suppressed_shot_pulses", 0)),
+            "pulses_suppressed_same_tick": int(getattr(self, "pulses_suppressed_same_tick", 0)),
+            "kill_stamps_created": int(getattr(self, "kill_stamps_created", 0)),
+            "kills_marked_by_shots": int(getattr(self, "kills_marked_by_shots", 0)),
+            "kills_marked_by_absence": int(getattr(self, "kills_marked_by_absence", 0)),
             "aim_x_std": aim_x_std,
             "aim_y_std": aim_y_std,
             "aim_span_x": aim_span_x,
