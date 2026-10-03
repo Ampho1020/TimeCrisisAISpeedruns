@@ -190,6 +190,7 @@ class TimeCrisisEnv:
             else None
         )
         self.quarantine_pulses_blocked: int = 0
+        self.hits_without_fire_frame: int = 0  # diagnostic: RAM hit on a frame with no fired shot
         # FIFO of (track_id) per confirmed fired shot, mirroring
         # _confirmed_shot_aims but for the ID tracker -- lets a later RAM
         # shots_hit delta be credited to the track the round was aimed at,
@@ -414,6 +415,7 @@ class TimeCrisisEnv:
         if quarantine is not None:
             quarantine.reset()
         self.quarantine_pulses_blocked = 0
+        self.hits_without_fire_frame = 0
         self._confirmed_shot_track_ids = []
         self.shots_fired_no_track_id = 0
         self._diag_hit_events = []
@@ -855,7 +857,7 @@ class TimeCrisisEnv:
 
             frame_fired = max(0, u16_delta(post["shots_fired"], pre["shots_fired"]))
             total_fired += frame_fired
-            if frame_fired > 0 and (ENABLE_KILL_REFRACTORY or quarantine is not None):
+            if frame_fired > 0 and ENABLE_KILL_REFRACTORY:
                 self._remember_confirmed_shots(frame_fired, aim_x, aim_y)
             if frame_fired > 0 and tracker is not None:
                 self._remember_confirmed_shot_track_ids(frame_fired, target_track_id)
@@ -866,15 +868,16 @@ class TimeCrisisEnv:
             if frame_hits > 0:
                 hit_this_tick = True
                 self.hit_delta = 0
-                if ENABLE_KILL_REFRACTORY or quarantine is not None:
-                    # One pop of the shot-origin FIFO shared by both systems.
-                    origins = self._consume_hit_origins(frame_hits, aim_x, aim_y)
-                    if ENABLE_KILL_REFRACTORY:
-                        for hx, hy in origins:
-                            self._credit_target_hits(1, hx, hy)
-                    if quarantine is not None:
-                        for hx, hy in origins:
-                            quarantine.add(self.ticks, hx, hy, self.last_detections)
+                if ENABLE_KILL_REFRACTORY:
+                    for hx, hy in self._consume_hit_origins(frame_hits, aim_x, aim_y):
+                        self._credit_target_hits(1, hx, hy)
+                if frame_fired == 0:
+                    self.hits_without_fire_frame = getattr(self, "hits_without_fire_frame", 0) + 1
+                if quarantine is not None:
+                    # Hits are reported on the same frame as the shot, so this
+                    # frame's aim is the origin. (The shot-origin FIFO is NOT used
+                    # here: misses are never popped from it, so it misattributes.)
+                    quarantine.add(self.ticks, aim_x, aim_y, self.last_detections)
                 if tracker is not None:
                     for tid in self._consume_hit_track_ids(frame_hits):
                         tracker.credit_hit(tid)
@@ -1415,6 +1418,7 @@ class TimeCrisisEnv:
             "quarantine_unboxed_hits": int(self.hit_quarantine.unboxed_hits) if getattr(self, "hit_quarantine", None) is not None else 0,
             "quarantine_dets_hidden": int(self.hit_quarantine.filtered) if getattr(self, "hit_quarantine", None) is not None else 0,
             "quarantine_pulses_blocked": int(getattr(self, "quarantine_pulses_blocked", 0)),
+            "hits_without_fire_frame": int(getattr(self, "hits_without_fire_frame", 0)),
             "enemy_tracks_created": int(self.enemy_tracker.total_created) if getattr(self, "enemy_tracker", None) is not None else 0,
             "enemy_tracks_done": int(self.enemy_tracker.total_done) if getattr(self, "enemy_tracker", None) is not None else 0,
             "enemy_tracks_credit_misses": int(self.enemy_tracker.total_credit_misses) if getattr(self, "enemy_tracker", None) is not None else 0,
