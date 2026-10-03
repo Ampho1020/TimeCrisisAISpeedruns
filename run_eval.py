@@ -188,6 +188,12 @@ def main():
         print(f"kill stamps created        : {info.get('kill_stamps_created', 0)} "
               f"(killed by 3-shot count: {info.get('kills_marked_by_shots', 0)}, "
               f"by detection absence: {info.get('kills_marked_by_absence', 0)})")
+        print(f"hit quarantine             : {info.get('quarantine_created', 0)} created "
+              f"(released: {info.get('quarantine_released_absent', 0)} box-gone, "
+              f"{info.get('quarantine_released_timeout', 0)} timeout; "
+              f"hits with no box: {info.get('quarantine_unboxed_hits', 0)}; "
+              f"box-ticks hidden: {info.get('quarantine_dets_hidden', 0)}; "
+              f"pulses blocked: {info.get('quarantine_pulses_blocked', 0)})")
         print(f"ID-tracker suppressed      : {info.get('suppressed_shot_pulses_tracked', 0)} "
               f"(tracks created: {info.get('enemy_tracks_created', 0)}, "
               f"marked done: {info.get('enemy_tracks_done', 0)}, "

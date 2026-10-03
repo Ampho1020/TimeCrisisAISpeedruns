@@ -406,7 +406,7 @@ ENABLE_VISION_DRIFT = False
 # can't evolve the inward pull the old drift_gain did. 1.0 = off; raise slightly
 # if still inward, lower if it overshoots outward. Heuristic stopgap until the
 # detector is fine-tuned (see TODO).
-AIM_OUTWARD_GAIN_X = 1.07
+AIM_OUTWARD_GAIN_X = 1.10
 
 # Scales how strongly live detection confidence can nudge the trigger in
 # POLICY_MODE="vision_schedule". The shoot decision blends this term onto
@@ -549,7 +549,7 @@ KILL_REFRACTORY_ABSENCE = True
 # neither, or -- for a combined test -- both) can be run in isolation.
 # ENABLE_KILL_REFRACTORY is turned OFF on this branch so the A/B comparison
 # against main isn't confounded by the two suppression mechanisms stacking.
-ENABLE_ENEMY_ID_TRACKING = True
+ENABLE_ENEMY_ID_TRACKING = False  # 2026-10-03: off; superseded by hit quarantine below
 # 2026-10-02: measured via --shot-diag's new tracker counters across 3 eval
 # runs of the same checkpoint at (0.08, 10): only 3-8% of confirmed hits ever
 # successfully marked a track "done" (most hit-credits are silently dropped),
@@ -573,6 +573,21 @@ ENEMY_TRACK_EXPIRE_TICKS = 3  # was 10 (~830ms) -- now ~250ms, close to the old
 # KILL_REFRACTORY_TICKS=2 window that was already validated to reliably catch
 # a dead enemy's detection disappearing, without lingering long enough to
 # collide with the next enemy's arrival.
+
+# Hit quarantine (hit_quarantine.py): the moment RAM confirms a hit, the ENEMY
+# box that shot was aimed at is hidden from the policy and its aim point is
+# blocked at the trigger, so no further rounds go into a dying enemy. The
+# --shot-diag histogram showed ~31% of misses land within 5 ticks of a hit at
+# the same spot. Released once the box has been gone HIT_QUARANTINE_ABSENT_TICKS
+# consecutive ticks (>1 rides out detector flicker on the death sprite), or
+# after HIT_QUARANTINE_MAX_TICKS as a safety net so a survivor is not ignored
+# forever. Stacked enemies sharing one box are deliberately NOT handled yet.
+# Independent of ENABLE_KILL_REFRACTORY; leave that off when testing this.
+ENABLE_HIT_QUARANTINE = True
+HIT_QUARANTINE_ABSENT_TICKS = 2
+HIT_QUARANTINE_MAX_TICKS = 12  # ~1s at FRAME_SKIP=5; death-animation length is unmeasured
+HIT_QUARANTINE_MATCH_FRAC = 0.5  # box centres within half a box size = same enemy
+HIT_QUARANTINE_POINT_RADIUS = 0.05  # trigger block radius around the box's aim point
 
 # Only pull the trigger when the detector actually sees a target. On a tick
 # with no ENEMY detection the open-loop schedule otherwise fires at the near-
