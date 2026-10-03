@@ -633,11 +633,14 @@ class TimeCrisisEnv:
                 if quarantine is not None:
                     quarantine.update(self.ticks, self.last_detections)
 
+            policy_dets = (
+                quarantine.filter(self.last_detections) if quarantine is not None
+                else (self.last_detections or [])
+            )
             shoot, peek, aim_x_bias, aim_y_bias = act_vision_schedule(
                 theta,
                 self.ticks,
-                quarantine.filter(self.last_detections) if quarantine is not None
-                else (self.last_detections or []),
+                policy_dets,
                 cursor_x_norm=normalize_cursor(
                     self.prev.get("cursor_x", CURSOR_X_MIN), CURSOR_X_MIN, CURSOR_X_MAX,
                 ),
@@ -646,9 +649,10 @@ class TimeCrisisEnv:
                 ),
                 ammo_left_norm=self.ammo_left / AMMO_MAX_ROUNDS,
             )
-            enemy_visible = any(
-                int(det.class_id) == 0 for det in (self.last_detections or [])
-            )
+            # Visibility is what the policy can act on: a quarantined enemy must
+            # not count, or the exposed-no-shot and reaction-latency penalties
+            # would punish the agent for correctly holding fire at it.
+            enemy_visible = any(int(det.class_id) == 0 for det in policy_dets)
         else:
             shoot, peek, aim_x_bias, aim_y_bias = act(
                 theta, self._build_obs(
