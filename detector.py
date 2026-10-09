@@ -87,6 +87,72 @@ class EnemyClass(IntEnum):
 
 NUM_CLASSES = len(EnemyClass)
 
+# A detector-only class: an enemy sprite that is already dead or dying (death /
+# fall animation after the fatal hit), so shooting it is wasted ammo. It is NOT
+# part of EnemyClass -- NUM_CLASSES sizes the policy's class-priority vector, so
+# adding it there would change theta and invalidate every checkpoint. Detectors
+# keep GHOST boxes out of the list the policy sees (see TorchYoloDetector).
+GHOST_CLASS_NAME = "GHOST"
+GHOST_CLASS_ID = 3  # only used on Detection objects in ``last_ghosts``
+
+_CLASS_NAME_TO_ID: dict[str, int | None] = {
+    "ENEMY": int(EnemyClass.ENEMY),
+    "GRENADE": int(EnemyClass.GRENADE),
+    "PROJECTILE": int(EnemyClass.PROJECTILE),
+    GHOST_CLASS_NAME: None,  # hidden from the policy
+}
+
+
+def build_class_map(names) -> dict[int, int | None]:
+    """Map a model's class index -> EnemyClass id, or None for GHOST.
+
+    Mapping is by NAME so the 3-class ENEMY/GRENADE/PROJECTILE weights and the
+    2-class ENEMY/GHOST weights both work. ``names`` is ultralytics'
+    ``model.names`` (dict or list).
+    """
+    items = names.items() if isinstance(names, dict) else enumerate(names)
+    out: dict[int, int | None] = {}
+    for idx, name in items:
+        key = str(name).strip().upper()
+        if key not in _CLASS_NAME_TO_ID:
+            raise ValueError(
+                f"Unknown model class name {name!r} at index {idx}; expected "
+                f"one of {sorted(_CLASS_NAME_TO_ID)}."
+            )
+        out[int(idx)] = _CLASS_NAME_TO_ID[key]
+    return out
+
+
+def _box_iou(a, b) -> float:
+    """IoU of two Detections in pixel space."""
+    ax2, ay2 = a.x + a.w, a.y + a.h
+    bx2, by2 = b.x + b.w, b.y + b.h
+    iw = max(0, min(ax2, bx2) - max(a.x, b.x))
+    ih = max(0, min(ay2, by2) - max(a.y, b.y))
+    inter = iw * ih
+    union = a.w * a.h + b.w * b.h - inter
+    return inter / union if union > 0 else 0.0
+
+
+def drop_enemies_under_ghosts(detections, ghosts, iou_thresh: float = 0.5):
+    """Remove ENEMY boxes that overlap a GHOST box at least as confidently.
+
+    The model is end-to-end (no NMS), so it can emit both an ENEMY and a GHOST
+    box for one sprite. When GHOST is at least as confident the sprite is dying,
+    so the ENEMY box must not become a target.
+    """
+    if not ghosts:
+        return detections
+    keep = []
+    for d in detections:
+        if int(d.class_id) == int(EnemyClass.ENEMY) and any(
+            g.confidence >= d.confidence and _box_iou(d, g) >= iou_thresh
+            for g in ghosts
+        ):
+            continue
+        keep.append(d)
+    return keep
+
 
 @dataclass(frozen=True)
 class Detection:
@@ -723,6 +789,11 @@ class TorchYoloDetector:
         self.device = device
         self._model = YOLO(model_path)
         self._model.to(device)
+        # Model class index -> EnemyClass id (None = GHOST, hidden from policy).
+        self._class_map = build_class_map(self._model.names)
+        # GHOST boxes from the most recent detect() call, for diagnostics and
+        # label proposals. Never fed to the policy.
+        self.last_ghosts: list[Detection] = []
 
     def reset(self) -> None:
         """No stateful history -- see ``ONNXDetector.reset`` docstring."""
@@ -748,12 +819,14 @@ class TorchYoloDetector:
         )
         boxes = results[0].boxes
         if boxes is None or len(boxes) == 0:
+            self.last_ghosts = []
             return []
         xyxy = boxes.xyxy.detach().cpu().numpy()
         conf = boxes.conf.detach().cpu().numpy()
         cls = boxes.cls.detach().cpu().numpy().astype(int)
 
         detections: list[Detection] = []
+        ghosts: list[Detection] = []
         for i in range(xyxy.shape[0]):
             x1, y1, x2, y2 = xyxy[i]
             bx = max(0, int(x1))
@@ -762,24 +835,27 @@ class TorchYoloDetector:
             bh = max(1, int(y2 - y1))
             cx = float((x1 + x2) / 2.0)
             cy = float((y1 + y2) / 2.0)
+            internal = self._class_map[int(cls[i])]
+            is_ghost = internal is None
+            class_id = GHOST_CLASS_ID if is_ghost else internal
             aim_x_norm, aim_y_norm = _aim_point_for_detection(
-                int(cls[i]), bx, by, bw, bh, src_w, src_h,
+                class_id, bx, by, bw, bh, src_w, src_h,
             )
-            detections.append(
-                Detection(
-                    x=bx,
-                    y=by,
-                    w=bw,
-                    h=bh,
-                    class_id=int(cls[i]),
-                    confidence=float(conf[i]),
-                    cx_norm=cx / src_w,
-                    cy_norm=cy / src_h,
-                    aim_x_norm=aim_x_norm,
-                    aim_y_norm=aim_y_norm,
-                )
+            det = Detection(
+                x=bx,
+                y=by,
+                w=bw,
+                h=bh,
+                class_id=class_id,
+                confidence=float(conf[i]),
+                cx_norm=cx / src_w,
+                cy_norm=cy / src_h,
+                aim_x_norm=aim_x_norm,
+                aim_y_norm=aim_y_norm,
             )
-        return detections
+            (ghosts if is_ghost else detections).append(det)
+        self.last_ghosts = ghosts
+        return drop_enemies_under_ghosts(detections, ghosts)
 
 
 # ---------------------------------------------------------------------------

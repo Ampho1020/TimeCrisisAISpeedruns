@@ -28,7 +28,10 @@ from detector import (
     _ENEMY_COLOR_FLOOR,
     _ENEMY_THREAT_COLORS,
     _threat_color_score,
+    build_class_map,
     build_detector,
+    drop_enemies_under_ghosts,
+    GHOST_CLASS_ID,
 )
 from config import VISION_ONNX_MODEL_PATH
 
@@ -349,6 +352,64 @@ class ProductionOnnxModelSuite(unittest.TestCase):
                     if frame is not None:
                         return frame
         return np.zeros((240, 264, 3), dtype=np.uint8)
+
+
+def _det(x, y, w, h, class_id, conf):
+    return Detection(
+        x=x, y=y, w=w, h=h, class_id=class_id, confidence=conf,
+        cx_norm=(x + w / 2) / 320.0, cy_norm=(y + h / 2) / 240.0,
+    )
+
+
+class GhostClassMappingSuite(unittest.TestCase):
+    def test_three_class_model_maps_to_the_enemy_enum_unchanged(self):
+        m = build_class_map({0: "ENEMY", 1: "GRENADE", 2: "PROJECTILE"})
+        self.assertEqual(m, {0: 0, 1: 1, 2: 2})
+
+    def test_two_class_model_maps_ghost_to_none(self):
+        m = build_class_map({0: "ENEMY", 1: "GHOST"})
+        self.assertEqual(m, {0: int(EnemyClass.ENEMY), 1: None})
+
+    def test_mapping_is_by_name_not_index(self):
+        m = build_class_map({0: "GHOST", 1: "ENEMY"})
+        self.assertEqual(m, {0: None, 1: int(EnemyClass.ENEMY)})
+
+    def test_names_are_case_and_space_insensitive_and_lists_work(self):
+        self.assertEqual(build_class_map([" enemy ", "Ghost"]), {0: 0, 1: None})
+
+    def test_unknown_class_name_fails_loudly(self):
+        with self.assertRaises(ValueError):
+            build_class_map({0: "ENEMY", 1: "DYING"})
+
+    def test_ghost_class_id_is_outside_the_policy_class_range(self):
+        # NUM_CLASSES sizes the policy's priority vector: GHOST must never index it.
+        self.assertGreaterEqual(GHOST_CLASS_ID, NUM_CLASSES)
+
+
+class EnemyUnderGhostSuite(unittest.TestCase):
+    def test_enemy_box_on_a_more_confident_ghost_is_dropped(self):
+        enemy = _det(100, 50, 40, 80, 0, 0.60)
+        ghost = _det(102, 52, 40, 80, GHOST_CLASS_ID, 0.80)
+        self.assertEqual(drop_enemies_under_ghosts([enemy], [ghost]), [])
+
+    def test_enemy_more_confident_than_the_ghost_is_kept(self):
+        enemy = _det(100, 50, 40, 80, 0, 0.90)
+        ghost = _det(102, 52, 40, 80, GHOST_CLASS_ID, 0.50)
+        self.assertEqual(drop_enemies_under_ghosts([enemy], [ghost]), [enemy])
+
+    def test_distant_enemy_is_never_dropped_by_an_unrelated_ghost(self):
+        far = _det(250, 50, 40, 80, 0, 0.40)
+        ghost = _det(100, 50, 40, 80, GHOST_CLASS_ID, 0.95)
+        self.assertEqual(drop_enemies_under_ghosts([far], [ghost]), [far])
+
+    def test_non_enemy_classes_are_untouched(self):
+        grenade = _det(100, 50, 40, 80, 1, 0.30)
+        ghost = _det(100, 50, 40, 80, GHOST_CLASS_ID, 0.95)
+        self.assertEqual(drop_enemies_under_ghosts([grenade], [ghost]), [grenade])
+
+    def test_no_ghosts_returns_detections_unchanged(self):
+        enemy = _det(100, 50, 40, 80, 0, 0.60)
+        self.assertEqual(drop_enemies_under_ghosts([enemy], []), [enemy])
 
 
 if __name__ == "__main__":

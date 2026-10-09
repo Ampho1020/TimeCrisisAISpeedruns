@@ -6,9 +6,11 @@ Usage:
 
 Flags:
     --dump-frames <dir>   Save one PNG per decision tick during the episode
-                          under <dir>. Used to build a labelling corpus for
-                          the offline YOLO fine-tune workflow documented in
-                          detector.py's footer. No effect on fitness.
+                          under <dir>, plus events.jsonl (detector boxes on
+                          each image and the RAM hit events of that tick),
+                          which propose_ghost_labels.py turns into GHOST label
+                          proposals. Use a FRESH directory per run. No effect
+                          on fitness.
     --tick-vision         Opt out of per-frame vision (revert to the
                           training-matching cadence: vision refreshed once
                           every VISION_CAPTURE_EVERY_N_TICKS ticks instead of
@@ -25,6 +27,7 @@ Flags:
 """
 
 import argparse
+import os
 import sys
 
 import numpy as np
@@ -159,6 +162,11 @@ def main():
 
     env = TimeCrisisEnv(per_frame_vision=not args.tick_vision)
     if args.dump_frames:
+        if os.path.exists(os.path.join(args.dump_frames, "events.jsonl")):
+            sys.exit(
+                f"{args.dump_frames} already has events.jsonl; PNGs would be "
+                "overwritten while events append. Use a fresh directory."
+            )
         env.dump_frames_dir = args.dump_frames
     if args.shot_diag:
         env.shot_diag = []

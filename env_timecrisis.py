@@ -292,7 +292,7 @@ class TimeCrisisEnv:
     def close(self):
         self.client.close()
 
-    def _dump_current_frame(self) -> None:
+    def _dump_current_frame(self, info: dict | None = None) -> None:
         """Capture one frame via the bridge and save it as a PNG under
         ``self.dump_frames_dir``. Guarded by a broad try/except so a
         transient screenshot failure never aborts the surrounding episode
@@ -301,8 +301,13 @@ class TimeCrisisEnv:
         File name pattern: ``frame_XXXXXX.png`` (six-digit zero-padded
         tick counter) so the natural sort matches the tick order the
         frames were captured in.
+
+        Also appends one line to ``events.jsonl`` in the same directory: the
+        detector's boxes on THIS image plus the RAM hit events of the tick that
+        produced it. propose_ghost_labels.py turns that into GHOST proposals.
         """
         try:
+            import json
             import os
             frame = self.client.get_screenshot()
             os.makedirs(self.dump_frames_dir, exist_ok=True)
@@ -314,6 +319,25 @@ class TimeCrisisEnv:
             import cv2
             bgr = frame[:, :, [2, 1, 0]]
             cv2.imwrite(path, bgr)
+            detector = getattr(self, "detector", None)
+            if detector is not None:
+                def _box(d):
+                    return {"c": int(d.class_id), "conf": round(float(d.confidence), 4),
+                            "x": int(d.x), "y": int(d.y), "w": int(d.w), "h": int(d.h)}
+                dets = detector.detect(frame)
+                ghosts = list(getattr(detector, "last_ghosts", []))
+                record = {
+                    "frame": self._dump_frame_counter,
+                    "tick": int(self.ticks),
+                    "w": int(frame.shape[1]), "h": int(frame.shape[0]),
+                    "fired": int((info or {}).get("shots_fired_delta", 0)),
+                    "hits": int((info or {}).get("shots_hit_delta", 0)),
+                    "hit_events": [list(e) for e in (info or {}).get("hit_events", [])],
+                    "dets": [_box(d) for d in dets],
+                    "ghosts": [_box(g) for g in ghosts],
+                }
+                with open(os.path.join(self.dump_frames_dir, "events.jsonl"), "a") as fh:
+                    fh.write(json.dumps(record) + "\n")
             self._dump_frame_counter += 1
         except Exception as exc:  # pragma: no cover -- diagnostic path
             print(
@@ -739,6 +763,9 @@ class TimeCrisisEnv:
         # and can resume fire if the target is still present (or a stacked
         # enemy has appeared at the same location).
         hit_this_tick = False
+        # (frame-in-tick, aim_x, aim_y) per RAM-confirmed hit; feeds the frame
+        # dump's events.jsonl, from which GHOST label proposals are derived.
+        tick_hit_events: list[tuple[int, float, float]] = []
         dead_guess = timed_out_guess = False
         continue_screen_guess = False
         area_cleared_guess = False  # all AREA_SCREENS done -> success terminal
@@ -871,6 +898,7 @@ class TimeCrisisEnv:
             total_hit += frame_hits
             if frame_hits > 0:
                 hit_this_tick = True
+                tick_hit_events.append((f, float(aim_x), float(aim_y)))
                 self.hit_delta = 0
                 if ENABLE_KILL_REFRACTORY:
                     for hx, hy in self._consume_hit_origins(frame_hits, aim_x, aim_y):
@@ -1161,6 +1189,7 @@ class TimeCrisisEnv:
         info = {
             "shots_fired_delta": total_fired,
             "shots_hit_delta": total_hit,
+            "hit_events": tick_hit_events,
             "life_loss": total_life_loss,
             # Single source of truth: derived directly from screens_cleared
             # (no separate/second clear heuristic -- see the screen-clear
@@ -1218,7 +1247,7 @@ class TimeCrisisEnv:
                 # workflow (see detector.py footer). No-op unless
                 # dump_frames_dir was set on the env; getattr fallback keeps
                 # sim subclasses that skip TimeCrisisEnv.__init__ working.
-                self._dump_current_frame()
+                self._dump_current_frame(info)
             total_hits      += info["shots_hit_delta"]
             total_fired     += info["shots_fired_delta"]
             total_life_loss += info["life_loss"]
