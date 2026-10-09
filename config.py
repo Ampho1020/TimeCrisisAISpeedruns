@@ -505,7 +505,11 @@ AIM_ON_TARGET_RADIUS = 0.15
 # ENEMY_ID_TRACKING experiment below isn't confounded by also running this
 # location-based system. Re-enable (and set ENABLE_ENEMY_ID_TRACKING=False) to
 # get back to main's behavior.
-ENABLE_KILL_REFRACTORY = False
+# 2026-10-09: back to True on merge so main trains as before. KNOWN BUG: the
+# shot-origin FIFO behind _credit_target_hits pops the OLDEST fired shot and
+# misses are never popped, so hits are credited to old miss positions. Hits land
+# on the same frame as the shot, so this frame's aim is the true origin.
+ENABLE_KILL_REFRACTORY = True
 KILL_REFRACTORY_SHOTS = 3
 KILL_REFRACTORY_RADIUS = 0.06
 KILL_REFRACTORY_TICKS = 2
@@ -583,7 +587,12 @@ ENEMY_TRACK_EXPIRE_TICKS = 3  # was 10 (~830ms) -- now ~250ms, close to the old
 # after HIT_QUARANTINE_MAX_TICKS as a safety net so a survivor is not ignored
 # forever. Stacked enemies sharing one box are deliberately NOT handled yet.
 # Independent of ENABLE_KILL_REFRACTORY; leave that off when testing this.
-ENABLE_HIT_QUARANTINE = True
+# 2026-10-09: OFF on merge. Evals of a checkpoint trained without it emptied the
+# 0-5 tick ghost window (26 fired -> 0) but did not raise accuracy (40.5%, 33.3%
+# vs 37-49% before) and cut hits from ~39-47 to 30-32 (repeat hits on multi-hit
+# or stacked enemies are blocked). Needs a training run to judge; kept off so the
+# detector retrain comparison is not confounded.
+ENABLE_HIT_QUARANTINE = False
 HIT_QUARANTINE_ABSENT_TICKS = 2
 HIT_QUARANTINE_MAX_TICKS = 12  # ~1s at FRAME_SKIP=5; death-animation length is unmeasured
 HIT_QUARANTINE_MATCH_FRAC = 0.5  # box centres within half a box size = same enemy
