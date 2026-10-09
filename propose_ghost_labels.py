@@ -27,12 +27,17 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("dump_dir", help="directory written by run_eval.py --dump-frames")
     ap.add_argument("--out", help="output directory (default: <dump_dir>_cvat)")
-    ap.add_argument("--min-conf", type=float, default=0.5,
-                    help="ignore detector boxes below this confidence (default 0.5)")
+    ap.add_argument("--min-conf", type=float, default=0.35,
+                    help="ignore detector boxes below this confidence (default 0.35, the "
+                         "policy's VISION_DETECTION_CONFIDENCE)")
     ap.add_argument("--max-ghost-ticks", type=int, default=12,
                     help="a box that vanishes within this many ticks of its last hit is a kill "
                          "(default 12); longer is treated as a survivor")
     ap.add_argument("--zip", action="store_true", help="also write <out>.zip for CVAT upload")
+    ap.add_argument("--context", type=int, nargs=2, default=[2, 4], metavar=("BEFORE", "AFTER"),
+                    help="export only frames from BEFORE ticks before to AFTER ticks after each "
+                         "RAM hit (default 2 4): the frames where ENEMY vs GHOST matters")
+    ap.add_argument("--all-frames", action="store_true", help="export every frame, not just near hits")
     args = ap.parse_args()
 
     events = os.path.join(args.dump_dir, "events.jsonl")
@@ -47,6 +52,20 @@ def main() -> int:
         return 1
 
     labels, report = gl.propose(records, max_ghost_ticks=args.max_ghost_ticks, min_conf=args.min_conf)
+
+    n_all = len(records)
+    if args.all_frames:
+        keep = set(range(n_all))
+    else:
+        before, after = args.context
+        keep = {j for i, r in enumerate(records) if r.get("hit_events")
+                for j in range(max(0, i - before), min(n_all, i + after + 1))}
+    sel = [i for i in range(n_all) if i in keep]
+    if not sel:
+        print("no RAM hits in this capture, so nothing to export (use --all-frames)")
+        return 1
+    records = [records[i] for i in sel]
+    labels = [labels[i] for i in sel]
 
     out = args.out or args.dump_dir.rstrip("/\\") + "_cvat"
     data_dir = os.path.join(out, "obj_train_data")
@@ -72,7 +91,7 @@ def main() -> int:
     outcomes = Counter(r["outcome"] for r in rows)
     ghost_frames = sum(1 for lab in labels if any(c == gl.GHOST_ID for c, _ in lab))
     total_hits = sum(len(r.get("hit_events", [])) for r in records)
-    print(f"{len(records)} frames, {total_hits} RAM hits -> {out}")
+    print(f"{len(records)} of {n_all} frames exported, {total_hits} RAM hits -> {out}")
     print(f"  enemies hit: {len(rows)}   " + "  ".join(f"{k}={v}" for k, v in sorted(outcomes.items())))
     print(f"  hits with no box under the aim: {report[-1]['unattributed_hits']}")
     print(f"  frames with a GHOST box: {ghost_frames}   "

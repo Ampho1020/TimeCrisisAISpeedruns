@@ -165,7 +165,7 @@ def _boxes_of(rec: dict, min_conf: float) -> list[Box]:
     ]
 
 
-def propose(records: list[dict], *, max_ghost_ticks: int = 12, min_conf: float = 0.5,
+def propose(records: list[dict], *, max_ghost_ticks: int = 12, min_conf: float = 0.35,
             vanish_gap: int = 2):
     """Derive ENEMY/GHOST label proposals from one episode's events.jsonl.
 
@@ -204,13 +204,19 @@ def propose(records: list[dict], *, max_ghost_ticks: int = 12, min_conf: float =
     for tid, hit_recs in sorted(hits_by_track.items()):
         t = by_id[tid]
         last_hit = max(hit_recs)
-        ticks_after = t.last - last_hit
-        ended = t.last < n - 1 - vanish_gap
+        # GHOST is only the UNBROKEN run of boxes right after the last hit. A box
+        # that reappears after a gap is a different object (e.g. the detector's
+        # fire false positive at a corpse's spot), never the dying enemy.
+        run_end = last_hit
+        while run_end + 1 in t.obs:
+            run_end += 1
+        ticks_after = run_end - last_hit
+        ended = run_end < n - 1 - vanish_gap
         if ended and ticks_after <= 0:
             outcome, ghosts = "instant_kill", []
         elif ended and ticks_after <= max_ghost_ticks:
             outcome = "kill"
-            ghosts = [i for i in sorted(t.obs) if i > last_hit]
+            ghosts = list(range(last_hit + 1, run_end + 1))
         elif ended:
             outcome, ghosts = "survivor_or_slow_death", []
         else:

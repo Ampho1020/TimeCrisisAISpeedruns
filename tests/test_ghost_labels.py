@@ -89,6 +89,13 @@ class ProposalSuite(unittest.TestCase):
         self.assertEqual(classes(labels[5]), [ENEMY_ID])
         self.assertEqual(classes(labels[6]), [GHOST_ID])
 
+    def test_a_box_reappearing_after_a_gap_is_not_the_dying_enemy(self):
+        # Enemy hit at 3 and gone at 4; something (e.g. a fire false positive)
+        # is boxed in the same spot at 5. Only the unbroken run is GHOST.
+        labels, _ = gl.propose(self.episode(present={0, 1, 2, 3, 5, 6}, hits={3}))
+        self.assertEqual(classes(labels[4]), [])
+        self.assertTrue(all(c != GHOST_ID for i in (5, 6) for c, _ in labels[i]))
+
     def test_box_that_never_vanishes_is_a_survivor_not_ghost(self):
         labels, report = gl.propose(self.episode(present=range(0, 14), hits={3}))
         self.assertTrue(all(classes(labels[i]) == [ENEMY_ID] for i in range(14)))
