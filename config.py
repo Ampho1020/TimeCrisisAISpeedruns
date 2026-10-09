@@ -501,6 +501,14 @@ AIM_ON_TARGET_RADIUS = 0.15
 # detected) isn't worth the stacked-enemy penalty. Code kept behind the flag.
 # 2026-09-25: Re-enabled kill refractory after evaluating stacked-enemy behavior.
 # TODO: NEEDS VALIDATION!
+# 2026-10-02: DISABLED on branch 1-punchman-(1-shot-on-target-only) so the new
+# ENEMY_ID_TRACKING experiment below isn't confounded by also running this
+# location-based system. Re-enable (and set ENABLE_ENEMY_ID_TRACKING=False) to
+# get back to main's behavior.
+# 2026-10-09: back to True on merge so main trains as before. KNOWN BUG: the
+# shot-origin FIFO behind _credit_target_hits pops the OLDEST fired shot and
+# misses are never popped, so hits are credited to old miss positions. Hits land
+# on the same frame as the shot, so this frame's aim is the true origin.
 ENABLE_KILL_REFRACTORY = True
 KILL_REFRACTORY_SHOTS = 3
 KILL_REFRACTORY_RADIUS = 0.06
@@ -515,6 +523,80 @@ KILL_REFRACTORY_TICKS = 2
 # is never suppressed; a brief false positive (detection flicker) only delays
 # the next shot by <=KILL_REFRACTORY_TICKS ticks, so the cost is bounded.
 KILL_REFRACTORY_ABSENCE = True
+
+# -----------------------------------------------------------------------
+# EXPERIMENTAL (branch 1-punchman-(1-shot-on-target-only), 2026-10-02):
+# per-enemy IDENTITY tracking, as an alternative to the location-based
+# KILL_REFRACTORY_* system above.
+#
+# Diagnostics on the live refractory (--shot-diag + kill-stamp counters,
+# see run_eval.py) showed aim is pixel-perfect (0 off-target shots, mean
+# aim->box distance 0.010) yet on-target shots still only connect ~45% of
+# the time -- the agent is firing exactly where the detector draws a box,
+# which can be a lingering death-animation sprite the detector still
+# classifies as ENEMY. KILL_REFRACTORY_TICKS is a fixed, arbitrary-feeling
+# guess at how long that lingers, and the absence check can't distinguish
+# "this exact enemy is dead" from "a different enemy just arrived here".
+#
+# EnemyTracker (enemy_tracker.py) assigns a stable ID to each detected
+# ENEMY box via nearest-centroid matching across ticks, independent of
+# screen position. Once a track registers its FIRST confirmed RAM hit it
+# is marked permanently "done" (one-shot-only, regardless of whether the
+# in-game enemy actually needed more hits to die -- this is a deliberate
+# test of whether suppressing ALL further fire at a known-hit enemy raises
+# accuracy/clear speed, at the cost of possibly under-killing tankier
+# enemies). A track is only forgotten after ENEMY_TRACK_EXPIRE_TICKS of
+# the box being absent, so a new enemy walking into the same spot gets a
+# fresh, not-done ID instead of inheriting the old one's "done" status.
+#
+# Independent toggle from ENABLE_KILL_REFRACTORY so either system (or
+# neither, or -- for a combined test -- both) can be run in isolation.
+# ENABLE_KILL_REFRACTORY is turned OFF on this branch so the A/B comparison
+# against main isn't confounded by the two suppression mechanisms stacking.
+ENABLE_ENEMY_ID_TRACKING = False  # 2026-10-03: off; superseded by hit quarantine below
+# 2026-10-02: measured via --shot-diag's new tracker counters across 3 eval
+# runs of the same checkpoint at (0.08, 10): only 3-8% of confirmed hits ever
+# successfully marked a track "done" (most hit-credits are silently dropped),
+# AND in the worst run the mechanism over-suppressed (94 pulses blocked,
+# MORE than the 89 that fired) badly enough to drop a full clear to 3/5
+# screens with 3 damage + a timeout. Root cause: Time Crisis enemies reuse a
+# small set of fixed cover/spawn points, so a brand-new, fully-alive enemy
+# can spawn close enough to a just-killed one's last position, within the
+# expiry window, to get matched to that stale "done" track and never get
+# fired at again -- the same "can't tell this enemy apart from a new one"
+# problem the location-based refractory had, just lasting far longer.
+# Tightened both knobs to shrink the false-merge window: smaller radius so
+# two distinct enemies at nearby-but-different cover spots don't collide,
+# shorter expiry so a dead enemy's track is forgotten before the NEXT enemy
+# plausibly arrives at a similar spot. Re-test via --shot-diag before
+# loosening either back up.
+ENEMY_TRACK_MATCH_RADIUS = 0.05  # was 0.08 -- matches the old KILL_REFRACTORY_RADIUS,
+# already validated (previous diagnostics) as tight enough to track a single
+# enemy without false-merging neighbors, at this same detector precision.
+ENEMY_TRACK_EXPIRE_TICKS = 3  # was 10 (~830ms) -- now ~250ms, close to the old
+# KILL_REFRACTORY_TICKS=2 window that was already validated to reliably catch
+# a dead enemy's detection disappearing, without lingering long enough to
+# collide with the next enemy's arrival.
+
+# Hit quarantine (hit_quarantine.py): the moment RAM confirms a hit, the ENEMY
+# box that shot was aimed at is hidden from the policy and its aim point is
+# blocked at the trigger, so no further rounds go into a dying enemy. The
+# --shot-diag histogram showed ~31% of misses land within 5 ticks of a hit at
+# the same spot. Released once the box has been gone HIT_QUARANTINE_ABSENT_TICKS
+# consecutive ticks (>1 rides out detector flicker on the death sprite), or
+# after HIT_QUARANTINE_MAX_TICKS as a safety net so a survivor is not ignored
+# forever. Stacked enemies sharing one box are deliberately NOT handled yet.
+# Independent of ENABLE_KILL_REFRACTORY; leave that off when testing this.
+# 2026-10-09: OFF on merge. Evals of a checkpoint trained without it emptied the
+# 0-5 tick ghost window (26 fired -> 0) but did not raise accuracy (40.5%, 33.3%
+# vs 37-49% before) and cut hits from ~39-47 to 30-32 (repeat hits on multi-hit
+# or stacked enemies are blocked). Needs a training run to judge; kept off so the
+# detector retrain comparison is not confounded.
+ENABLE_HIT_QUARANTINE = False
+HIT_QUARANTINE_ABSENT_TICKS = 2
+HIT_QUARANTINE_MAX_TICKS = 12  # ~1s at FRAME_SKIP=5; death-animation length is unmeasured
+HIT_QUARANTINE_MATCH_FRAC = 0.5  # box centres within half a box size = same enemy
+HIT_QUARANTINE_POINT_RADIUS = 0.05  # trigger block radius around the box's aim point
 
 # Only pull the trigger when the detector actually sees a target. On a tick
 # with no ENEMY detection the open-loop schedule otherwise fires at the near-

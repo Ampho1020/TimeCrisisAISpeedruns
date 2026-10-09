@@ -29,7 +29,7 @@ import sys
 
 import numpy as np
 
-from config import POLICY_MODE
+from config import FRAME_SKIP, POLICY_MODE
 from env_timecrisis import TimeCrisisEnv
 from policy import PARAM_COUNT, SCHEDULE_PARAM_COUNT, VISION_SCHEDULE_PARAM_COUNT
 
@@ -86,6 +86,24 @@ def _print_shot_diag(recs: list, on_target_radius: float = 0.08) -> None:
     print(f"  on-target (aim<{on_target_radius:.2f})    : {on_f:3d} ({pct(on_f):4.1f}%)  "
           f"hit {rate(on_h, on_f)}")
     print(f"  mean aim->nearest box  : {mean_dist:.3f}  (detected-shot frames)")
+
+    # Ticks since the most recent EARLIER confirmed hit within the kill radius
+    # of this shot's aim point. Misses clustered shortly after a hit = ghost
+    # shots at a dying sprite; misses with no prior nearby hit = something else.
+    edges = [(0, 0), (1, 1), (2, 2), (3, 3), (4, 5), (6, 8), (9, 14), (15, 10**9)]
+    print("  shots by ticks since last nearby hit (hit rate):")
+    none_f = sum(r["fired"] for r in recs if r.get("since_hit_frames", -1) < 0)
+    none_h = sum(r["hit"] for r in recs if r.get("since_hit_frames", -1) < 0)
+    for lo, hi in edges:
+        sel = [r for r in recs
+               if r.get("since_hit_frames", -1) >= 0
+               and lo <= r["since_hit_frames"] // FRAME_SKIP <= hi]
+        f_ = sum(r["fired"] for r in sel)
+        h_ = sum(r["hit"] for r in sel)
+        label = f"{lo}" if lo == hi else (f"{lo}-{hi}" if hi < 10**9 else f"{lo}+")
+        print(f"    {label:>5} ticks : {f_:3d} fired, {f_ - h_:3d} missed, hit {rate(h_, f_)}")
+    print(f"    no prior hit nearby : {none_f:3d} fired, {none_f - none_h:3d} missed, "
+          f"hit {rate(none_h, none_f)}")
 
 
 def main():
@@ -170,6 +188,18 @@ def main():
         print(f"kill stamps created        : {info.get('kill_stamps_created', 0)} "
               f"(killed by 3-shot count: {info.get('kills_marked_by_shots', 0)}, "
               f"by detection absence: {info.get('kills_marked_by_absence', 0)})")
+        print(f"hit quarantine             : {info.get('quarantine_created', 0)} created "
+              f"(released: {info.get('quarantine_released_absent', 0)} box-gone, "
+              f"{info.get('quarantine_released_timeout', 0)} timeout; "
+              f"hits with no box: {info.get('quarantine_unboxed_hits', 0)}; "
+              f"box-ticks hidden: {info.get('quarantine_dets_hidden', 0)}; "
+              f"pulses blocked: {info.get('quarantine_pulses_blocked', 0)}; "
+              f"hits on a no-shot frame: {info.get('hits_without_fire_frame', 0)})")
+        print(f"ID-tracker suppressed      : {info.get('suppressed_shot_pulses_tracked', 0)} "
+              f"(tracks created: {info.get('enemy_tracks_created', 0)}, "
+              f"marked done: {info.get('enemy_tracks_done', 0)}, "
+              f"credit misses: {info.get('enemy_tracks_credit_misses', 0)}, "
+              f"fired with no track: {info.get('shots_fired_no_track_id', 0)})")
         print(f"no_shot exposed : {info['no_shot_exposed_ticks']} ticks, "
               f"hesitated cover : {info['hesitated_cover_ticks']} ticks")
         if args.dump_frames:

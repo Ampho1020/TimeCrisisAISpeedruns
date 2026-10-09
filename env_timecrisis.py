@@ -17,6 +17,9 @@ from config import (
     EXPOSED_NO_SHOT_PENALTY,
     ENABLE_KILL_REFRACTORY, KILL_REFRACTORY_SHOTS,
     KILL_REFRACTORY_RADIUS, KILL_REFRACTORY_TICKS, KILL_REFRACTORY_ABSENCE,
+    ENABLE_ENEMY_ID_TRACKING, ENEMY_TRACK_MATCH_RADIUS, ENEMY_TRACK_EXPIRE_TICKS,
+    ENABLE_HIT_QUARANTINE, HIT_QUARANTINE_ABSENT_TICKS, HIT_QUARANTINE_MAX_TICKS,
+    HIT_QUARANTINE_MATCH_FRAC, HIT_QUARANTINE_POINT_RADIUS,
     FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
     MAX_TICKS, MISS_PENALTY, MULTI_CLEAR_BONUS,
     PEEK_LOCK_IN_TICKS, PEEK_LOCK_OUT_TICKS, PEEK_TRAVERSE_TICKS,
@@ -30,6 +33,8 @@ from config import (
 )
 from phase_inference import Phase, PhaseInferer, TickSignals
 from policy import act, act_schedule, act_vision_schedule
+from enemy_tracker import EnemyTracker
+from hit_quarantine import HitQuarantine
 
 
 # Optional global suppression for watchdog diagnostic prints. Primarily used
@@ -164,12 +169,41 @@ class TimeCrisisEnv:
         self.kills_marked_by_shots: int = 0
         self.kills_marked_by_absence: int = 0
         self.pulses_suppressed_same_tick: int = 0  # diagnostic: hit_this_tick gate
+        # Per-enemy IDENTITY tracker (see ENABLE_ENEMY_ID_TRACKING in config.py
+        # and enemy_tracker.py). Independent of the location-based kill-stamp
+        # refractory above -- built only under vision_schedule, same as the
+        # detector itself.
+        self.enemy_tracker: EnemyTracker | None = (
+            EnemyTracker(ENEMY_TRACK_MATCH_RADIUS, ENEMY_TRACK_EXPIRE_TICKS)
+            if ENABLE_ENEMY_ID_TRACKING and POLICY_MODE == "vision_schedule"
+            else None
+        )
+        self.suppressed_shot_pulses_tracked: int = 0  # diagnostic: ID-tracker gate
+        # Hit quarantine (see ENABLE_HIT_QUARANTINE in config.py): hides an enemy
+        # from the policy once RAM confirms a hit on it.
+        self.hit_quarantine: HitQuarantine | None = (
+            HitQuarantine(
+                HIT_QUARANTINE_MAX_TICKS, HIT_QUARANTINE_ABSENT_TICKS,
+                HIT_QUARANTINE_MATCH_FRAC, HIT_QUARANTINE_POINT_RADIUS,
+            )
+            if ENABLE_HIT_QUARANTINE and POLICY_MODE == "vision_schedule"
+            else None
+        )
+        self.quarantine_pulses_blocked: int = 0
+        self.hits_without_fire_frame: int = 0  # diagnostic: RAM hit on a frame with no fired shot
+        # FIFO of (track_id) per confirmed fired shot, mirroring
+        # _confirmed_shot_aims but for the ID tracker -- lets a later RAM
+        # shots_hit delta be credited to the track the round was aimed at,
+        # even if aim moved on before the hit was reported.
+        self._confirmed_shot_track_ids: list[int | None] = []
+        self.shots_fired_no_track_id: int = 0  # diagnostic: fired while target_track_id was None
         # Optional per-fired-shot diagnostic sink (eval only). When set to a
         # list (by run_eval --shot-diag) every registered RAM shot appends one
         # record so we can see WHERE wasted bullets go: no-detection (blind
         # schedule pulses), off-target (aim not on any box), or on-target
         # misses (aim on a box but the shot still fails -> detector/aim ceiling).
         self.shot_diag: list | None = None
+        self._diag_hit_events: list[tuple[int, float, float]] = []  # (frame_idx, x, y), shot_diag only
         self.reaction_no_shot_streak: int = 0  # ticks a target has been visible with no shot fired since
         self.prev_aim_x_bias: float = 0.0   # last tick's aim_x_bias, fed back as obs
         self.prev_aim_y_bias: float = 0.0   # last tick's aim_y_bias, fed back as obs
@@ -373,6 +407,18 @@ class TimeCrisisEnv:
         self.kills_marked_by_shots = 0
         self.kills_marked_by_absence = 0
         self.pulses_suppressed_same_tick = 0
+        tracker = getattr(self, "enemy_tracker", None)
+        if tracker is not None:
+            tracker.reset()
+        self.suppressed_shot_pulses_tracked = 0
+        quarantine = getattr(self, "hit_quarantine", None)
+        if quarantine is not None:
+            quarantine.reset()
+        self.quarantine_pulses_blocked = 0
+        self.hits_without_fire_frame = 0
+        self._confirmed_shot_track_ids = []
+        self.shots_fired_no_track_id = 0
+        self._diag_hit_events = []
         self.reaction_no_shot_streak = 0
         self.prev_aim_x_bias = 0.0
         self.prev_aim_y_bias = 0.0
@@ -512,8 +558,40 @@ class TimeCrisisEnv:
                 and (self.ticks - s["last_tick"]) <= KILL_REFRACTORY_TICKS + 1)
         ]
 
+    # -- per-enemy ID tracker (see ENABLE_ENEMY_ID_TRACKING) -------------
+
+    def _remember_confirmed_shot_track_ids(self, n: int, track_id: int | None):
+        """Append n copies of the track_id a confirmed fired shot was aimed at
+        (mirrors _remember_confirmed_shots, but for enemy_tracker's hit
+        attribution instead of the location-based kill stamps)."""
+        if n <= 0:
+            return
+        q = getattr(self, "_confirmed_shot_track_ids", None)
+        if q is None:
+            q = self._confirmed_shot_track_ids = []
+        q.extend([track_id] * int(n))
+        max_kept = max(64, AMMO_MAX_ROUNDS * 8)
+        if len(q) > max_kept:
+            del q[: len(q) - max_kept]
+
+    def _consume_hit_track_ids(self, n: int) -> list:
+        """Pop n track ids from the confirmed-shot FIFO to attribute RAM hits
+        back to the enemy they were fired at (mirrors _consume_hit_origins)."""
+        out = []
+        q = getattr(self, "_confirmed_shot_track_ids", None)
+        if q is None:
+            q = self._confirmed_shot_track_ids = []
+        for _ in range(max(0, int(n))):
+            out.append(q.pop(0) if q else None)
+        return out
+
     def step(self, theta: np.ndarray):
         _tick_t0 = time.perf_counter() if VISION_PROFILE else 0.0
+        # getattr-guarded: the sim test harness (SimulatedTimeCrisisEnv) manually
+        # replicates TimeCrisisEnv's instance attributes instead of calling
+        # __init__, so attributes added there (like enemy_tracker) may not exist.
+        tracker = getattr(self, "enemy_tracker", None)
+        quarantine = getattr(self, "hit_quarantine", None)
         peek_phase = (self.peek_ticks / PEEK_TRAVERSE_TICKS) * (1.0 if self.prev_peek else -1.0)
         enemy_visible = False
         if POLICY_MODE == "schedule":
@@ -550,11 +628,19 @@ class TimeCrisisEnv:
                     if self.last_detections is None:
                         self.last_detections = []
                     print(f"[env] vision capture failed: {exc!r}", flush=True)
+                if tracker is not None:
+                    tracker.update(self.ticks, self.last_detections)
+                if quarantine is not None:
+                    quarantine.update(self.ticks, self.last_detections)
 
+            policy_dets = (
+                quarantine.filter(self.last_detections) if quarantine is not None
+                else (self.last_detections or [])
+            )
             shoot, peek, aim_x_bias, aim_y_bias = act_vision_schedule(
                 theta,
                 self.ticks,
-                self.last_detections or [],
+                policy_dets,
                 cursor_x_norm=normalize_cursor(
                     self.prev.get("cursor_x", CURSOR_X_MIN), CURSOR_X_MIN, CURSOR_X_MAX,
                 ),
@@ -563,9 +649,10 @@ class TimeCrisisEnv:
                 ),
                 ammo_left_norm=self.ammo_left / AMMO_MAX_ROUNDS,
             )
-            enemy_visible = any(
-                int(det.class_id) == 0 for det in (self.last_detections or [])
-            )
+            # Visibility is what the policy can act on: a quarantined enemy must
+            # not count, or the exposed-no-shot and reaction-latency penalties
+            # would punish the agent for correctly holding fire at it.
+            enemy_visible = any(int(det.class_id) == 0 for det in policy_dets)
         else:
             shoot, peek, aim_x_bias, aim_y_bias = act(
                 theta, self._build_obs(
@@ -691,10 +778,13 @@ class TimeCrisisEnv:
                         self.last_detections = self.detector.detect(frame_img)
                 except Exception as exc:  # pragma: no cover - defensive
                     print(f"[env] per-frame vision capture failed: {exc!r}", flush=True)
+                if tracker is not None:
+                    tracker.update(self.ticks, self.last_detections)
                 frame_shoot, _, aim_x_bias, aim_y_bias = act_vision_schedule(
                     theta,
                     self.ticks,
-                    self.last_detections or [],
+                    quarantine.filter(self.last_detections) if quarantine is not None
+                    else (self.last_detections or []),
                     cursor_x_norm=normalize_cursor(
                         self.prev.get("cursor_x", CURSOR_X_MIN), CURSOR_X_MIN, CURSOR_X_MAX,
                     ),
@@ -731,6 +821,22 @@ class TimeCrisisEnv:
             if fire_pulse and ENABLE_KILL_REFRACTORY and self._target_in_refractory(aim_x, aim_y):
                 fire_pulse = False
                 self.suppressed_shot_pulses += 1
+            # Per-enemy ID tracker (experimental, see ENABLE_ENEMY_ID_TRACKING):
+            # resolve which tracked enemy (if any) this pulse is aimed at BEFORE
+            # deciding suppression, so the id is still available below to
+            # attribute a RAM hit to it even when the pulse fires normally.
+            target_track_id = (
+                tracker.nearest_track_id(aim_x, aim_y)
+                if tracker is not None else None
+            )
+            if fire_pulse and tracker is not None and tracker.is_done(target_track_id):
+                fire_pulse = False
+                self.suppressed_shot_pulses_tracked += 1
+            # Hit quarantine: belt-and-braces on top of hiding the box from the
+            # policy, in case the cursor is still on a quarantined enemy.
+            if fire_pulse and quarantine is not None and quarantine.blocks(aim_x, aim_y):
+                fire_pulse = False
+                self.quarantine_pulses_blocked += 1
             if VISION_PROFILE:
                 _t0 = time.perf_counter()
             self.client.set_input(
@@ -757,6 +863,10 @@ class TimeCrisisEnv:
             total_fired += frame_fired
             if frame_fired > 0 and ENABLE_KILL_REFRACTORY:
                 self._remember_confirmed_shots(frame_fired, aim_x, aim_y)
+            if frame_fired > 0 and tracker is not None:
+                self._remember_confirmed_shot_track_ids(frame_fired, target_track_id)
+                if target_track_id is None:
+                    self.shots_fired_no_track_id += frame_fired
             frame_hits = max(0, u16_delta(post["shots_hit"], pre["shots_hit"]))
             total_hit += frame_hits
             if frame_hits > 0:
@@ -765,6 +875,16 @@ class TimeCrisisEnv:
                 if ENABLE_KILL_REFRACTORY:
                     for hx, hy in self._consume_hit_origins(frame_hits, aim_x, aim_y):
                         self._credit_target_hits(1, hx, hy)
+                if frame_fired == 0:
+                    self.hits_without_fire_frame = getattr(self, "hits_without_fire_frame", 0) + 1
+                if quarantine is not None:
+                    # Hits are reported on the same frame as the shot, so this
+                    # frame's aim is the origin. (The shot-origin FIFO is NOT used
+                    # here: misses are never popped from it, so it misattributes.)
+                    quarantine.add(self.ticks, aim_x, aim_y, self.last_detections)
+                if tracker is not None:
+                    for tid in self._consume_hit_track_ids(frame_hits):
+                        tracker.credit_hit(tid)
             else:
                 self.hit_delta += 1
             if getattr(self, "shot_diag", None) is not None and frame_fired > 0:
@@ -784,6 +904,14 @@ class TimeCrisisEnv:
                     if nearest_dist < 0.0 or d < nearest_dist:
                         nearest_dist = d
                         nearest_conf = c
+                cur_fi = self.ticks * FRAME_SKIP + f
+                since_hit_frames = -1
+                for hfi, hx, hy in reversed(self._diag_hit_events):
+                    if hfi >= cur_fi:
+                        continue
+                    if ((hx - aim_x) ** 2 + (hy - aim_y) ** 2) ** 0.5 <= KILL_REFRACTORY_RADIUS:
+                        since_hit_frames = cur_fi - hfi
+                        break
                 self.shot_diag.append({
                     "fired": int(frame_fired),
                     "hit": int(frame_hits),
@@ -791,7 +919,10 @@ class TimeCrisisEnv:
                     "best_conf": best_conf,
                     "nearest_dist": nearest_dist,
                     "nearest_conf": nearest_conf,
+                    "since_hit_frames": since_hit_frames,
                 })
+            if getattr(self, "shot_diag", None) is not None and frame_hits > 0:
+                self._diag_hit_events.append((self.ticks * FRAME_SKIP + f, aim_x, aim_y))
             life_d       = u16_delta(post["life"], pre["life"])
             if life_d < 0:
                 total_life_loss += -life_d
@@ -1284,6 +1415,18 @@ class TimeCrisisEnv:
             "kill_stamps_created": int(getattr(self, "kill_stamps_created", 0)),
             "kills_marked_by_shots": int(getattr(self, "kills_marked_by_shots", 0)),
             "kills_marked_by_absence": int(getattr(self, "kills_marked_by_absence", 0)),
+            "suppressed_shot_pulses_tracked": int(getattr(self, "suppressed_shot_pulses_tracked", 0)),
+            "quarantine_created": int(self.hit_quarantine.created) if getattr(self, "hit_quarantine", None) is not None else 0,
+            "quarantine_released_absent": int(self.hit_quarantine.released_absent) if getattr(self, "hit_quarantine", None) is not None else 0,
+            "quarantine_released_timeout": int(self.hit_quarantine.released_timeout) if getattr(self, "hit_quarantine", None) is not None else 0,
+            "quarantine_unboxed_hits": int(self.hit_quarantine.unboxed_hits) if getattr(self, "hit_quarantine", None) is not None else 0,
+            "quarantine_dets_hidden": int(self.hit_quarantine.filtered) if getattr(self, "hit_quarantine", None) is not None else 0,
+            "quarantine_pulses_blocked": int(getattr(self, "quarantine_pulses_blocked", 0)),
+            "hits_without_fire_frame": int(getattr(self, "hits_without_fire_frame", 0)),
+            "enemy_tracks_created": int(self.enemy_tracker.total_created) if getattr(self, "enemy_tracker", None) is not None else 0,
+            "enemy_tracks_done": int(self.enemy_tracker.total_done) if getattr(self, "enemy_tracker", None) is not None else 0,
+            "enemy_tracks_credit_misses": int(self.enemy_tracker.total_credit_misses) if getattr(self, "enemy_tracker", None) is not None else 0,
+            "shots_fired_no_track_id": int(getattr(self, "shots_fired_no_track_id", 0)),
             "aim_x_std": aim_x_std,
             "aim_y_std": aim_y_std,
             "aim_span_x": aim_span_x,
