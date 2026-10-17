@@ -11,6 +11,9 @@ Flags:
                           which propose_ghost_labels.py turns into GHOST label
                           proposals. Use a FRESH directory per run. No effect
                           on fitness.
+    --shot-diag-out FILE  Append the episode's per-shot records as one JSON
+                          line (with --tag NAME); pool with pool_eval.py.
+    --aim-y-fraction F    Override ENEMY_AIM_Y_FRACTION for this run.
     --tick-vision         Opt out of per-frame vision (revert to the
                           training-matching cadence: vision refreshed once
                           every VISION_CAPTURE_EVERY_N_TICKS ticks instead of
@@ -27,8 +30,10 @@ Flags:
 """
 
 import argparse
+import json
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -43,6 +48,11 @@ def _expected_theta_size() -> int:
     if POLICY_MODE == "vision_schedule":
         return VISION_SCHEDULE_PARAM_COUNT
     return PARAM_COUNT
+
+
+def detector_aim_y_fraction() -> float:
+    import detector
+    return float(detector.ENEMY_AIM_Y_FRACTION)
 
 
 def _print_shot_diag(recs: list, on_target_radius: float = 0.08) -> None:
@@ -140,6 +150,30 @@ def main():
         ),
     )
     parser.add_argument(
+        "--shot-diag-out",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Append this episode's summary and per-shot records as one JSON "
+            "line to FILE (implies --shot-diag); pool runs with pool_eval.py."
+        ),
+    )
+    parser.add_argument(
+        "--tag",
+        default="",
+        help="Label stored in the --shot-diag-out record (the pool_eval.py group).",
+    )
+    parser.add_argument(
+        "--aim-y-fraction",
+        type=float,
+        default=None,
+        metavar="F",
+        help=(
+            "Override ENEMY_AIM_Y_FRACTION (aim point as a fraction of box "
+            "height from the top) for this run, for the aim-point sweep."
+        ),
+    )
+    parser.add_argument(
         "--speed",
         type=int,
         default=100,
@@ -160,6 +194,12 @@ def main():
             "with the current config."
         )
 
+    if args.aim_y_fraction is not None:
+        import detector
+        detector.ENEMY_AIM_Y_FRACTION = args.aim_y_fraction
+    if args.tag == "" and args.aim_y_fraction is not None:
+        args.tag = f"aim{args.aim_y_fraction:g}"
+
     env = TimeCrisisEnv(per_frame_vision=not args.tick_vision)
     if args.dump_frames:
         if os.path.exists(os.path.join(args.dump_frames, "events.jsonl")):
@@ -168,7 +208,7 @@ def main():
                 "overwritten while events append. Use a fresh directory."
             )
         env.dump_frames_dir = args.dump_frames
-    if args.shot_diag:
+    if args.shot_diag or args.shot_diag_out:
         env.shot_diag = []
     env.connect()
     try:
@@ -212,8 +252,24 @@ def main():
               f"hesitated cover : {info['hesitated_cover_ticks']} ticks")
         if args.dump_frames:
             print(f"frames     : {env._dump_frame_counter} saved to {args.dump_frames}")
-        if args.shot_diag and env.shot_diag is not None:
+        if env.shot_diag is not None:
             _print_shot_diag(env.shot_diag)
+        if args.shot_diag_out and env.shot_diag is not None:
+            record = {
+                "tag": args.tag or os.path.basename(args.checkpoint),
+                "checkpoint": args.checkpoint,
+                "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "aim_y_fraction": detector_aim_y_fraction(),
+                "cleared": bool(info["cleared"]),
+                "screens": int(info.get("screens_cleared", 0)),
+                "elapsed": float(info["elapsed"]),
+                "shots_fired": int(info["shots_fired"]),
+                "shots_hit": int(info["shots_hit"]),
+                "shots": env.shot_diag,
+            }
+            with open(args.shot_diag_out, "a") as fh:
+                fh.write(json.dumps(record) + "\n")
+            print(f"shot-diag  : episode appended to {args.shot_diag_out}")
     finally:
         env.close()
 

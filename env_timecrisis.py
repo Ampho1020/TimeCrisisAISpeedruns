@@ -333,6 +333,7 @@ class TimeCrisisEnv:
                     "fired": int((info or {}).get("shots_fired_delta", 0)),
                     "hits": int((info or {}).get("shots_hit_delta", 0)),
                     "hit_events": [list(e) for e in (info or {}).get("hit_events", [])],
+                    "aim": [float((info or {}).get("aim_x", -1.0)), float((info or {}).get("aim_y", -1.0))],
                     "dets": [_box(d) for d in dets],
                     "ghosts": [_box(g) for g in ghosts],
                 }
@@ -948,6 +949,9 @@ class TimeCrisisEnv:
                     "nearest_dist": nearest_dist,
                     "nearest_conf": nearest_conf,
                     "since_hit_frames": since_hit_frames,
+                    "tick": int(self.ticks),
+                    "aim_x": float(aim_x),
+                    "aim_y": float(aim_y),
                 })
             if getattr(self, "shot_diag", None) is not None and frame_hits > 0:
                 self._diag_hit_events.append((self.ticks * FRAME_SKIP + f, aim_x, aim_y))
