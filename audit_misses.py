@@ -58,14 +58,27 @@ def classify_miss(rec: dict, earlier_hits: list[tuple[int, float, float]], *,
     return "fresh", dist, conf
 
 
+def _nearest_box_h(rec: dict) -> float:
+    """Height (fraction of frame) of the box whose aim point is nearest the aim, -1 if none."""
+    best = None
+    for d in rec.get("dets", []):
+        px = (d["x"] + d["w"] / 2.0) / rec["w"]
+        py = (d["y"] + ENEMY_AIM_Y_FRACTION * d["h"]) / rec["h"]
+        dist = math.hypot(px - rec["aim"][0], py - rec["aim"][1])
+        if best is None or dist < best[0]:
+            best = (dist, d["h"] / rec["h"])
+    return best[1] if best else -1.0
+
+
 def audit(records: list[dict], **kw) -> list[dict]:
-    """One entry per missed shot tick: {"rec", "bucket", "dist", "conf"}."""
+    """One entry per missed shot tick: {"rec", "bucket", "dist", "conf", "h_norm"}."""
     hits: list[tuple[int, float, float]] = []
     out = []
     for rec in records:
         if rec.get("fired", 0) > 0 and rec.get("hits", 0) == 0:
             bucket, dist, conf = classify_miss(rec, hits, **kw)
-            out.append({"rec": rec, "bucket": bucket, "dist": dist, "conf": conf})
+            out.append({"rec": rec, "bucket": bucket, "dist": dist, "conf": conf,
+                        "h_norm": _nearest_box_h(rec)})
         for _, hx, hy in rec.get("hit_events", []):
             hits.append((rec["tick"], hx, hy))
     return out
@@ -170,6 +183,8 @@ def main() -> int:
     ap.add_argument("--ghost-ticks", type=int, default=6)
     ap.add_argument("--per-sheet", type=int, default=12)
     ap.add_argument("--no-sheets", action="store_true")
+    ap.add_argument("--small-h", type=float, default=0.14,
+                    help="misses on boxes shorter than this fraction of the frame also go to small_box.png")
     ap.add_argument("--stats", action="store_true",
                     help="also print hit rate by box size / confidence / miss streak, pooled over all dirs")
     args = ap.parse_args()
@@ -205,6 +220,8 @@ def main() -> int:
                 by_bucket[e["bucket"]].append(e)
             for b, es in by_bucket.items():
                 render_sheet(dump_dir, es, os.path.join(out_dir, f"{b}.png"), args.per_sheet)
+            small = [e for e in entries if 0 <= e["h_norm"] < args.small_h]
+            render_sheet(dump_dir, small, os.path.join(out_dir, "small_box.png"), args.per_sheet)
             print(f"sheets written to {out_dir}")
 
     if len(args.dump_dirs) > 1:

@@ -111,5 +111,18 @@ class AuditMissTests(unittest.TestCase):
         self.assertAlmostEqual(feats[0]["h_norm"], 0.2)
 
 
+class ReviewSetTests(unittest.TestCase):
+    def test_select_frames_takes_misses_context_and_random_only_from_the_rest(self):
+        import export_review_set as ers
+        recs = [{"fired": 0, "hits": 0} for _ in range(10)]
+        recs[4] = {"fired": 2, "hits": 0}
+        recs[7] = {"fired": 1, "hits": 1}
+        chosen = ers.select_frames(recs, before=1, n_random=3, seed=1)
+        self.assertEqual(chosen[4], "miss")
+        self.assertEqual(chosen[3], "context")
+        self.assertNotEqual(chosen.get(7), "miss")
+        self.assertEqual(sum(1 for v in chosen.values() if v == "random"), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
