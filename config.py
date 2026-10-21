@@ -644,7 +644,9 @@ AMMO_CONSERVE_SCALE = 1.5
 # of geometric center so limb/shield center-mass misses happen less often.
 #
 # Y fraction is measured from bbox top (0.0 = top edge, 1.0 = bottom edge).
-ENEMY_AIM_Y_FRACTION = 0.26
+# 2026-10-21 pooled evals (theta_interrupt, 10 episodes each): 0.26 -> 42.4%, 0.32 -> 47.2%
+# (+4.8 pts, 95% CI +0.7..+8.2); 0.15 -> 26%, 0.20 -> 37%, 0.40 -> 31%.
+ENEMY_AIM_Y_FRACTION = 0.32
 # If an enemy bbox is wide (likely shield-side posture), shift x away from
 # dead-center toward an inner-side shoulder point to avoid shielded center.
 ENEMY_SHIELD_WIDE_ASPECT = 0.60
