@@ -95,6 +95,21 @@ class AuditMissTests(unittest.TestCase):
         out = am.audit(recs)
         self.assertEqual([e["bucket"] for e in out], ["ghost_window"])
 
+    def test_fired_tick_features_track_miss_streak_and_reset_on_hit(self):
+        d = _det(50, 40)
+        ax, ay = self.aim_of(d)
+        recs = [
+            _rec(1, (ax, ay), [d]),
+            _rec(2, (ax, ay), [d]),
+            _rec(3, (ax, ay), [d], hits=1),
+            _rec(4, (ax, ay), [d]),
+            _rec(9, (ax, ay), [d]),
+        ]
+        feats = am.fired_tick_features(recs)
+        self.assertEqual([f["streak"] for f in feats], [0, 1, 2, 0, 0])
+        self.assertEqual([f["hit"] for f in feats], [False, False, True, False, False])
+        self.assertAlmostEqual(feats[0]["h_norm"], 0.2)
+
 
 if __name__ == "__main__":
     unittest.main()

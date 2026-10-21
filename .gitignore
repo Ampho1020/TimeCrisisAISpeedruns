@@ -21,3 +21,5 @@ maingame_fulltrain/
 *.png
 ghost_dataset/
 captures/
+evals*.jsonl
+logs/
