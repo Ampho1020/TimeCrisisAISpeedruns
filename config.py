@@ -209,7 +209,7 @@ VISION_ONNX_MODEL_PATH = os.path.join(os.path.dirname(__file__), "best.onnx")
 # CUDA 13 libs). Falls back to ONNXDetector (CPU), then ClassicalDetector,
 # if torch/CUDA isn't available -- same "never hard-fail on missing model"
 # philosophy as VISION_ONNX_MODEL_PATH.
-VISION_TORCH_MODEL_PATH = os.path.join(os.path.dirname(__file__), "best.pt")
+VISION_TORCH_MODEL_PATH = os.path.join(os.path.dirname(__file__), "best_ghost.pt")
 VISION_DETECTOR_DEVICE = "cuda"  # passed to TorchYoloDetector's YOLO.to(...)
 
 # Minimum detection confidence floor for the YOLO/ONNX detector (passed as
