@@ -14,6 +14,7 @@ Flags:
     --shot-diag-out FILE  Append the episode's per-shot records as one JSON
                           line (with --tag NAME); pool with pool_eval.py.
     --aim-y-fraction F    Override ENEMY_AIM_Y_FRACTION for this run.
+    --detector WEIGHTS    Use these YOLO weights instead of config's best.pt.
     --tick-vision         Opt out of per-frame vision (revert to the
                           training-matching cadence: vision refreshed once
                           every VISION_CAPTURE_EVERY_N_TICKS ticks instead of
@@ -174,6 +175,12 @@ def main():
         ),
     )
     parser.add_argument(
+        "--detector",
+        metavar="WEIGHTS",
+        default=None,
+        help="YOLO .pt weights to use instead of config.VISION_TORCH_MODEL_PATH (for A/B runs).",
+    )
+    parser.add_argument(
         "--speed",
         type=int,
         default=100,
@@ -200,6 +207,9 @@ def main():
     if args.tag == "" and args.aim_y_fraction is not None:
         args.tag = f"aim{args.aim_y_fraction:g}"
 
+    if args.detector:
+        import env_timecrisis
+        env_timecrisis.VISION_TORCH_MODEL_PATH = os.path.abspath(args.detector)
     env = TimeCrisisEnv(per_frame_vision=not args.tick_vision)
     if args.dump_frames:
         if os.path.exists(os.path.join(args.dump_frames, "events.jsonl")):
