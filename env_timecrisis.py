@@ -20,6 +20,7 @@ from config import (
     ENABLE_ENEMY_ID_TRACKING, ENEMY_TRACK_MATCH_RADIUS, ENEMY_TRACK_EXPIRE_TICKS,
     ENABLE_HIT_QUARANTINE, HIT_QUARANTINE_ABSENT_TICKS, HIT_QUARANTINE_MAX_TICKS,
     HIT_QUARANTINE_MATCH_FRAC, HIT_QUARANTINE_POINT_RADIUS,
+    ENABLE_GHOST_LATCH, GHOST_LATCH_TTL_FRAMES, GHOST_LATCH_RELEASE_CONF, GHOST_LATCH_GHOST_CONF,
     FRAME_SKIP, HIT_DELTA_NORM_FRAMES, HIT_DELTA_PENALTY, HOST, HIT_REWARD,
     MAX_TICKS, MISS_PENALTY, MULTI_CLEAR_BONUS,
     PEEK_LOCK_IN_TICKS, PEEK_LOCK_OUT_TICKS, PEEK_TRAVERSE_TICKS,
@@ -236,6 +237,11 @@ class TimeCrisisEnv:
             )
         else:
             self.detector = None
+        self.ghost_latch = None
+        if ENABLE_GHOST_LATCH and self.detector is not None:
+            from ghost_latch import GhostLatch
+            self.ghost_latch = GhostLatch(GHOST_LATCH_TTL_FRAMES, GHOST_LATCH_RELEASE_CONF,
+                                          GHOST_LATCH_GHOST_CONF)
         self.last_detections: list | None = None
         # VISION_PROFILE diagnostics (config.py): rolling per-tick timing
         # buffers, only ever appended to when VISION_PROFILE is True (see
@@ -282,6 +288,16 @@ class TimeCrisisEnv:
 
     def connect(self):
         self.client.connect()
+
+    def _detect_frame(self, frame, frame_in_tick: int):
+        """Run the detector, then the optional GhostLatch on its ENEMY/GHOST output."""
+        dets = self.detector.detect(frame)
+        latch = getattr(self, "ghost_latch", None)
+        if latch is None:
+            return dets
+        dets, _ = latch.apply(dets, list(getattr(self.detector, "last_ghosts", [])),
+                              self.ticks * FRAME_SKIP + frame_in_tick)
+        return dets
 
     def start_listening(self):
         self.client.start_listening()
@@ -461,6 +477,9 @@ class TimeCrisisEnv:
         detector = getattr(self, "detector", None)
         if detector is not None:
             detector.reset()
+        latch = getattr(self, "ghost_latch", None)
+        if latch is not None:
+            latch.reset()
         self.last_detections = None
         self._profile_reset()
         return self._build_obs(
@@ -644,11 +663,11 @@ class TimeCrisisEnv:
                         frame = self.client.get_screenshot()
                         self._profile_shot_ms.append((time.perf_counter() - _t0) * 1000.0)
                         _t0 = time.perf_counter()
-                        self.last_detections = self.detector.detect(frame)
+                        self.last_detections = self._detect_frame(frame, 0)
                         self._profile_detect_ms.append((time.perf_counter() - _t0) * 1000.0)
                     else:
                         frame = self.client.get_screenshot()
-                        self.last_detections = self.detector.detect(frame)
+                        self.last_detections = self._detect_frame(frame, 0)
                 except Exception as exc:  # pragma: no cover - defensive
                     if self.last_detections is None:
                         self.last_detections = []
@@ -799,11 +818,11 @@ class TimeCrisisEnv:
                         frame_img = self.client.get_screenshot()
                         self._profile_shot_ms.append((time.perf_counter() - _t0) * 1000.0)
                         _t0 = time.perf_counter()
-                        self.last_detections = self.detector.detect(frame_img)
+                        self.last_detections = self._detect_frame(frame_img, f)
                         self._profile_detect_ms.append((time.perf_counter() - _t0) * 1000.0)
                     else:
                         frame_img = self.client.get_screenshot()
-                        self.last_detections = self.detector.detect(frame_img)
+                        self.last_detections = self._detect_frame(frame_img, f)
                 except Exception as exc:  # pragma: no cover - defensive
                     print(f"[env] per-frame vision capture failed: {exc!r}", flush=True)
                 if tracker is not None:

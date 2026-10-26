@@ -595,6 +595,15 @@ ENEMY_TRACK_EXPIRE_TICKS = 3  # was 10 (~830ms) -- now ~250ms, close to the old
 ENABLE_HIT_QUARANTINE = False
 HIT_QUARANTINE_ABSENT_TICKS = 2
 HIT_QUARANTINE_MAX_TICKS = 12  # ~1s at FRAME_SKIP=5; death-animation length is unmeasured
+
+# GhostLatch (ghost_latch.py): once a sprite's box has been called GHOST, later ENEMY
+# calls on the same tracked sprite stay GHOST (a dead sprite never recovers). Fixes
+# GHOST -> ENEMY flips on collapsed sprites; a confident ENEMY (>= RELEASE_CONF) or
+# TTL frames of absence clears the latch so a new enemy at the same spot is not hidden.
+ENABLE_GHOST_LATCH = False
+GHOST_LATCH_TTL_FRAMES = 20  # ~4 ticks at FRAME_SKIP=5
+GHOST_LATCH_RELEASE_CONF = 0.8
+GHOST_LATCH_GHOST_CONF = 0.4
 HIT_QUARANTINE_MATCH_FRAC = 0.5  # box centres within half a box size = same enemy
 HIT_QUARANTINE_POINT_RADIUS = 0.05  # trigger block radius around the box's aim point
 

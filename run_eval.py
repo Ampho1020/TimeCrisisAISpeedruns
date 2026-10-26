@@ -15,6 +15,7 @@ Flags:
                           line (with --tag NAME); pool with pool_eval.py.
     --aim-y-fraction F    Override ENEMY_AIM_Y_FRACTION for this run.
     --detector WEIGHTS    Use these YOLO weights instead of config's best.pt.
+    --ghost-latch         Keep a sprite GHOST once called GHOST (see ghost_latch.py).
     --tick-vision         Opt out of per-frame vision (revert to the
                           training-matching cadence: vision refreshed once
                           every VISION_CAPTURE_EVERY_N_TICKS ticks instead of
@@ -175,6 +176,11 @@ def main():
         ),
     )
     parser.add_argument(
+        "--ghost-latch",
+        action="store_true",
+        help="Enable GhostLatch (ENEMY boxes on a sprite already called GHOST stay GHOST) for this run.",
+    )
+    parser.add_argument(
         "--detector",
         metavar="WEIGHTS",
         default=None,
@@ -207,6 +213,9 @@ def main():
     if args.tag == "" and args.aim_y_fraction is not None:
         args.tag = f"aim{args.aim_y_fraction:g}"
 
+    if args.ghost_latch:
+        import env_timecrisis
+        env_timecrisis.ENABLE_GHOST_LATCH = True
     if args.detector:
         import env_timecrisis
         env_timecrisis.VISION_TORCH_MODEL_PATH = os.path.abspath(args.detector)
