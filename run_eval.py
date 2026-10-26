@@ -181,6 +181,14 @@ def main():
         help="Enable GhostLatch (ENEMY boxes on a sprite already called GHOST stay GHOST) for this run.",
     )
     parser.add_argument(
+        "--latch-conf",
+        type=float,
+        nargs=2,
+        metavar=("GHOST", "RELEASE"),
+        default=None,
+        help="With --ghost-latch: minimum GHOST confidence that latches, and ENEMY confidence that releases.",
+    )
+    parser.add_argument(
         "--detector",
         metavar="WEIGHTS",
         default=None,
@@ -216,6 +224,8 @@ def main():
     if args.ghost_latch:
         import env_timecrisis
         env_timecrisis.ENABLE_GHOST_LATCH = True
+        if args.latch_conf:
+            env_timecrisis.GHOST_LATCH_GHOST_CONF, env_timecrisis.GHOST_LATCH_RELEASE_CONF = args.latch_conf
     if args.detector:
         import env_timecrisis
         env_timecrisis.VISION_TORCH_MODEL_PATH = os.path.abspath(args.detector)
